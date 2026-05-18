@@ -93,7 +93,10 @@ fun AppNavigation() {
                 )
             }
             composable(NavDestination.Search.route) {
-                SearchScreen(contentPadding = innerPadding.bottomOnly())
+                SearchScreen(
+                    contentPadding = innerPadding.bottomOnly(),
+                    onResultClick = { id -> navController.navigate("image/$id") },
+                )
             }
             composable(NavDestination.Cleanup.route) {
                 CleanupScreen(contentPadding = innerPadding.bottomOnly())

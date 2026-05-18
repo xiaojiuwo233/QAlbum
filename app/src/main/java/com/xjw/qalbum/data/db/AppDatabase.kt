@@ -15,6 +15,7 @@ import com.xjw.qalbum.data.db.entity.CleanupCandidateEntity
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.db.entity.ImageTagEntity
 import com.xjw.qalbum.data.db.entity.MatchedMessageEntity
+import com.xjw.qalbum.data.db.entity.OcrFtsEntity
 import com.xjw.qalbum.data.db.entity.OcrTextEntity
 import com.xjw.qalbum.data.db.entity.QuarantineEntity
 import com.xjw.qalbum.data.db.entity.TagEntity
@@ -31,6 +32,7 @@ import com.xjw.qalbum.data.db.entity.UserActionEntity
     entities = [
         ImageEntity::class,
         OcrTextEntity::class,
+        OcrFtsEntity::class,
         TagEntity::class,
         ImageTagEntity::class,
         CleanupBatchEntity::class,
@@ -39,7 +41,7 @@ import com.xjw.qalbum.data.db.entity.UserActionEntity
         MatchedMessageEntity::class,
         UserActionEntity::class,
     ],
-    version = 1,
+    version = 2,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {

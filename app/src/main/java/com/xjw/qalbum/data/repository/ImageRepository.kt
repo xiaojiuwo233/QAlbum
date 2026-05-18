@@ -4,7 +4,9 @@ import androidx.paging.Pager
 import androidx.paging.PagingConfig
 import androidx.paging.PagingData
 import com.xjw.qalbum.data.db.dao.ImageDao
+import com.xjw.qalbum.data.db.dao.OcrDao
 import com.xjw.qalbum.data.db.entity.ImageEntity
+import com.xjw.qalbum.data.db.entity.OcrTextEntity
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -15,6 +17,7 @@ import kotlinx.coroutines.flow.Flow
  */
 class ImageRepository(
     private val imageDao: ImageDao,
+    private val ocrDao: OcrDao,
 ) {
 
     // ---- 时间线 ----
@@ -37,6 +40,20 @@ class ImageRepository(
     suspend fun getById(id: Long): ImageEntity? = imageDao.getById(id)
 
     suspend fun getVariants(groupId: Long): List<ImageEntity> = imageDao.getByVariantGroup(groupId)
+
+    suspend fun getOcr(imageId: Long): OcrTextEntity? = ocrDao.getByImageId(imageId)
+
+    suspend fun setUserKeep(imageId: Long, keep: Boolean?) = imageDao.setUserKeep(imageId, keep)
+
+    suspend fun setProtected(imageId: Long, isProtected: Boolean) =
+        imageDao.setProtected(imageId, isProtected)
+
+    // ---- 搜索（Phase 3 起） ----
+
+    suspend fun search(query: String, limit: Int = 50, offset: Int = 0): List<OcrDao.SearchHit> =
+        ocrDao.searchWithSnippet(query, limit, offset)
+
+    suspend fun searchCount(query: String): Int = ocrDao.countMatches(query)
 
     // ---- 仪表盘统计 ----
 

@@ -2,6 +2,10 @@ package com.xjw.qalbum.service.analysis
 
 import com.xjw.qalbum.access.AccessManager
 import com.xjw.qalbum.data.db.dao.ImageDao
+import com.xjw.qalbum.data.db.dao.OcrDao
+import com.xjw.qalbum.data.db.entity.OcrTextEntity
+import com.xjw.qalbum.service.ocr.LocalOcrEngine
+import com.xjw.qalbum.service.ocr.OcrResult
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -26,7 +30,9 @@ import timber.log.Timber
 class AnalysisPipeline(
     private val accessManager: AccessManager,
     private val imageDao: ImageDao,
+    private val ocrDao: OcrDao,
     private val duplicateDetector: DuplicateDetector,
+    private val ocrEngine: LocalOcrEngine,
 ) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -50,6 +56,7 @@ class AnalysisPipeline(
                 runHash()
                 runQuality()
                 runDuplicate()
+                runOcr()
                 runScore()
                 _state.value = AnalysisState.Done
             } catch (t: Throwable) {
@@ -120,18 +127,77 @@ class AnalysisPipeline(
         _progress.value = AnalysisProgress(AnalysisPhase.DUPLICATE, 1, 1, msg = "完成")
     }
 
+    private suspend fun runOcr() {
+        val provider = accessManager.current()
+        if (!provider.isAvailable()) return
+
+        var processed = 0
+        while (true) {
+            val batch = imageDao.pendingOcr(OCR_BATCH)
+            if (batch.isEmpty()) break
+            for (img in batch) {
+                val result = ocrEngine.recognize(provider, img.path)
+                val now = System.currentTimeMillis()
+                when (result) {
+                    is OcrResult.Success -> {
+                        ocrDao.saveOcrResult(
+                            OcrTextEntity(
+                                imageId = img.id,
+                                text = result.text,
+                                confidence = result.confidence,
+                                hasPhone = result.hasPhone,
+                                hasAmount = result.hasAmount,
+                                hasAddress = result.hasAddress,
+                                hasIdNumber = result.hasIdNumber,
+                                hasOrderNo = result.hasOrderNo,
+                                updatedAt = now,
+                            )
+                        )
+                    }
+                    OcrResult.Empty -> {
+                        // 写一条空文本记录，避免 pendingOcr 反复返回
+                        ocrDao.saveOcrResult(
+                            OcrTextEntity(
+                                imageId = img.id,
+                                text = "",
+                                confidence = 0f,
+                                updatedAt = now,
+                            )
+                        )
+                    }
+                    is OcrResult.Failed -> {
+                        Timber.w("OCR failed for ${img.path}: ${result.reason}")
+                    }
+                }
+                imageDao.markOcrDone(img.id)
+                processed++
+                if (processed % 5 == 0) {
+                    _progress.value = AnalysisProgress(AnalysisPhase.OCR, processed, processed)
+                }
+            }
+        }
+        _progress.value = AnalysisProgress(AnalysisPhase.OCR, processed, processed, msg = "完成")
+        Timber.i("AnalysisPipeline.runOcr: OCR-ed $processed images")
+    }
+
     private suspend fun runScore() {
         // 全库遍历主图，重新计算 info_score / delete_score 并写回
+        // 评分时会读取关联的 OCR 结果（hasPhone / hasAmount 等）作为强信号
         var processed = 0
         var afterId = 0L
         while (true) {
             val page = imageDao.pagePrimaryHashed(afterId, SCORE_BATCH)
             if (page.isEmpty()) break
             for (img in page) {
-                val info = ScoringEngine.computeInfoScore(img)
-                val del = ScoringEngine.computeDeleteScore(img)
+                val ocr = ocrDao.getByImageId(img.id)
+                val info = ScoringEngine.computeInfoScore(img, ocr)
+                val del = ScoringEngine.computeDeleteScore(img, ocr)
                 imageDao.updateInfoScore(img.id, info)
                 imageDao.updateDeleteScore(img.id, del)
+                // 含敏感信息（手机/金额/证件/订单）自动设置 is_protected，避免误删
+                if (ocr != null && (ocr.hasIdNumber || ocr.hasOrderNo || ocr.hasAmount)) {
+                    imageDao.setProtected(img.id, true)
+                }
                 processed++
                 afterId = img.id
             }
@@ -144,12 +210,13 @@ class AnalysisPipeline(
     companion object {
         private const val HASH_BATCH = 50
         private const val QUALITY_BATCH = 30
+        private const val OCR_BATCH = 20
         private const val SCORE_BATCH = 500
     }
 }
 
 enum class AnalysisState { Idle, Running, Done, Failed }
-enum class AnalysisPhase { HASH, QUALITY, DUPLICATE, SCORE }
+enum class AnalysisPhase { HASH, QUALITY, DUPLICATE, OCR, SCORE }
 
 data class AnalysisProgress(
     val phase: AnalysisPhase,

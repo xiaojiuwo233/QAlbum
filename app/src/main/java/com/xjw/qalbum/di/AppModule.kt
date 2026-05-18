@@ -11,9 +11,11 @@ import com.xjw.qalbum.service.analysis.DuplicateDetector
 import com.xjw.qalbum.service.cleanup.CleanupController
 import com.xjw.qalbum.service.cleanup.CleanupRecommender
 import com.xjw.qalbum.service.cleanup.QuarantineManager
+import com.xjw.qalbum.service.cleanup.VaultManager
 import com.xjw.qalbum.service.indexer.ImageIndexer
 import com.xjw.qalbum.service.indexer.IncrementalScanner
 import com.xjw.qalbum.service.indexer.ScanController
+import com.xjw.qalbum.service.ocr.LocalOcrEngine
 import com.xjw.qalbum.ui.dashboard.DashboardViewModel
 import com.xjw.qalbum.ui.gallery.GalleryViewModel
 import com.xjw.qalbum.ui.imageloading.buildImageLoader
@@ -46,7 +48,7 @@ val appModule = module {
     single { get<AppDatabase>().userActionDao() }
 
     single { SettingsRepository(get()) }
-    single { ImageRepository(get()) }
+    single { ImageRepository(imageDao = get(), ocrDao = get()) }
 
     // ---- 文件访问 ----
 
@@ -60,10 +62,19 @@ val appModule = module {
     single { IncrementalScanner(accessManager = get(), imageDao = get(), indexer = get()) }
     single { ScanController(settings = get(), indexer = get(), incrementalScanner = get()) }
 
-    // ---- 分析 / 清理服务 ----
+    // ---- 分析 / 清理 / OCR 服务 ----
 
     single { DuplicateDetector(imageDao = get()) }
-    single { AnalysisPipeline(accessManager = get(), imageDao = get(), duplicateDetector = get()) }
+    single { LocalOcrEngine() }
+    single {
+        AnalysisPipeline(
+            accessManager = get(),
+            imageDao = get(),
+            ocrDao = get(),
+            duplicateDetector = get(),
+            ocrEngine = get(),
+        )
+    }
     single { CleanupRecommender(imageDao = get(), cleanupDao = get()) }
     single {
         QuarantineManager(
@@ -74,6 +85,7 @@ val appModule = module {
             settings = get(),
         )
     }
+    single { VaultManager(context = get(), accessManager = get(), imageDao = get()) }
     single { CleanupController(recommender = get(), quarantineManager = get(), cleanupDao = get()) }
 
     // ---- Coil ImageLoader（全局单例，通过 Koin 暴露，App.onCreate 安装为 SingletonImageLoader） ----
@@ -98,13 +110,19 @@ val appModule = module {
     viewModel { SettingsViewModel(settings = get(), accessManager = get(), scanController = get()) }
     viewModel { DashboardViewModel(imageRepository = get(), scanController = get()) }
     viewModel { GalleryViewModel(imageRepository = get()) }
-    viewModel { com.xjw.qalbum.ui.detail.ImageDetailViewModel(imageRepository = get()) }
+    viewModel {
+        com.xjw.qalbum.ui.detail.ImageDetailViewModel(
+            imageRepository = get(),
+            vaultManager = get(),
+        )
+    }
     viewModel {
         com.xjw.qalbum.ui.cleanup.CleanupViewModel(
             cleanupController = get(),
             analysisPipeline = get(),
         )
     }
+    viewModel { com.xjw.qalbum.ui.search.SearchViewModel(imageRepository = get()) }
 
     // ---- Worker ----
 

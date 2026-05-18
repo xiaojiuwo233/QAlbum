@@ -263,4 +263,27 @@ interface ImageDao {
         LIMIT :limit
     """)
     suspend fun pagePrimaryHashed(afterId: Long, limit: Int = 500): List<ImageEntity>
+
+    // ---- Phase 3：OCR ----
+
+    /** 待 OCR 的主图（仅主图执行，质量分析完成的优先） */
+    @Query("""
+        SELECT * FROM images
+        WHERE status = 'active' AND ocr_done = 0
+          AND (variant_group IS NULL OR is_variant_primary = 1)
+          AND is_corrupt = 0
+          AND width >= 64 AND height >= 64
+        ORDER BY mtime DESC
+        LIMIT :limit
+    """)
+    suspend fun pendingOcr(limit: Int = 50): List<ImageEntity>
+
+    @Query("UPDATE images SET ocr_done = 1 WHERE id = :id")
+    suspend fun markOcrDone(id: Long)
+
+    @Query("""
+        SELECT * FROM images
+        WHERE status = 'active' AND id IN (:ids)
+    """)
+    suspend fun getByIds(ids: List<Long>): List<ImageEntity>
 }

@@ -142,6 +142,8 @@ dependencies {
     implementation(libs.okhttp.logging)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.android)
+    // ML Kit Task 转 Kotlin suspend 的桥接（Task.await()）
+    implementation(libs.kotlinx.coroutines.play.services)
 
     // --- 哈希 ---
     implementation(libs.zero.allocation.hashing)

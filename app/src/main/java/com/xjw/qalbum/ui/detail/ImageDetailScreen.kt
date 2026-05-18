@@ -14,19 +14,27 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import android.widget.Toast
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.IosShare
+import androidx.compose.material.icons.outlined.Lock
+import androidx.compose.material.icons.outlined.LockOpen
+import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -45,6 +53,7 @@ import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import coil3.request.crossfade
 import com.xjw.qalbum.data.db.entity.ImageEntity
+import com.xjw.qalbum.data.db.entity.OcrTextEntity
 import com.xjw.qalbum.ui.imageloading.ImageEntityModel
 import org.koin.androidx.compose.koinViewModel
 import java.text.SimpleDateFormat
@@ -60,6 +69,15 @@ fun ImageDetailScreen(
 ) {
     LaunchedEffect(imageId) { viewModel.load(imageId) }
     val state by viewModel.state.collectAsState()
+    val toast by viewModel.toast.collectAsState()
+
+    val context = LocalContext.current
+    LaunchedEffect(toast) {
+        toast?.let {
+            Toast.makeText(context, it, Toast.LENGTH_SHORT).show()
+            viewModel.consumeToast()
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -86,26 +104,122 @@ fun ImageDetailScreen(
             when (val s = state) {
                 ImageDetailState.Loading -> CenteredLoading()
                 ImageDetailState.NotFound -> CenteredText("图片不存在或已被清理")
-                is ImageDetailState.Ready -> Content(s.image, s.variants)
+                is ImageDetailState.Ready -> Content(
+                    image = s.image,
+                    variants = s.variants,
+                    ocr = s.ocr,
+                    onAddToVault = viewModel::addToVault,
+                    onToggleProtection = viewModel::toggleProtection,
+                    onExport = viewModel::exportToGallery,
+                )
             }
         }
     }
 }
 
 @Composable
-private fun Content(image: ImageEntity, variants: List<ImageEntity>) {
+private fun Content(
+    image: ImageEntity,
+    variants: List<ImageEntity>,
+    ocr: OcrTextEntity?,
+    onAddToVault: () -> Unit,
+    onToggleProtection: () -> Unit,
+    onExport: () -> Unit,
+) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         item { HeroImage(image) }
+        item { ActionsRow(image, onAddToVault, onToggleProtection, onExport) }
         item { MetadataCard(image) }
+        ocr?.takeIf { it.text.isNotBlank() }?.let { ocrText ->
+            item { OcrCard(ocrText) }
+        }
         if (variants.size > 1) {
             item { VariantsHeader(variants.size) }
             items(count = variants.size, key = { variants[it].id }) { idx ->
                 VariantRow(variants[idx], isPrimary = variants[idx].id == image.id)
             }
+        }
+    }
+}
+
+@Composable
+private fun ActionsRow(
+    image: ImageEntity,
+    onAddToVault: () -> Unit,
+    onToggleProtection: () -> Unit,
+    onExport: () -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        FilledTonalButton(onClick = onAddToVault, modifier = Modifier.weight(1f)) {
+            Icon(Icons.Outlined.Shield, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.size(6.dp))
+            Text("加入保险箱")
+        }
+        OutlinedButton(onClick = onToggleProtection, modifier = Modifier.weight(1f)) {
+            Icon(
+                if (image.isProtected) Icons.Outlined.LockOpen else Icons.Outlined.Lock,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp),
+            )
+            Spacer(Modifier.size(6.dp))
+            Text(if (image.isProtected) "取消保护" else "保护")
+        }
+    }
+    Spacer(Modifier.size(8.dp))
+    OutlinedButton(onClick = onExport, modifier = Modifier.fillMaxWidth()) {
+        Icon(Icons.Outlined.IosShare, contentDescription = null, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.size(6.dp))
+        Text("导出到系统相册")
+    }
+}
+
+@Composable
+private fun OcrCard(ocr: OcrTextEntity) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+    ) {
+        Column(modifier = Modifier.padding(20.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("OCR 识别文本", style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.weight(1f))
+                Text(
+                    "置信度 ${(ocr.confidence * 100).toInt()}%",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            // 敏感信息标签
+            val flags = buildList {
+                if (ocr.hasIdNumber) add("证件号")
+                if (ocr.hasOrderNo) add("订单号")
+                if (ocr.hasAmount) add("金额")
+                if (ocr.hasPhone) add("手机号")
+                if (ocr.hasAddress) add("地址")
+            }
+            if (flags.isNotEmpty()) {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    flags.forEach { f ->
+                        AssistChip(onClick = {}, label = { Text(f) })
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+            }
+            Text(
+                ocr.text.trim(),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 12,
+            )
         }
     }
 }
