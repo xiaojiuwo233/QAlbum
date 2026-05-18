@@ -1,0 +1,29 @@
+# --- Gradle / Build ---
+.gradle/
+build/
+captures/
+out/
+
+# --- Android Studio / IDEA ---
+.idea/
+*.iml
+.cxx/
+
+# --- Local config ---
+local.properties
+
+# --- Kotlin ---
+*.hprof
+
+# --- macOS ---
+.DS_Store
+
+# --- 私密配置 ---
+keystore.properties
+release.keystore
+debug.keystore
+
+# --- 参考文档 ---
+QQDecrypt/
+
+*.md

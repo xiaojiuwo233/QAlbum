@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 这些颜色保留给非 Compose 资源（启动屏、Widget 等）使用。
+         Compose 端的颜色见 ui/theme/Color.kt -->
+    <color name="brand_primary">#1565C0</color>
+    <color name="brand_secondary">#2E7D32</color>
+    <color name="brand_tertiary">#BF360C</color>
+</resources>

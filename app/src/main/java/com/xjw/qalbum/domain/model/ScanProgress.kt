@@ -1,0 +1,16 @@
+package com.xjw.qalbum.domain.model
+
+/** 扫描进度事件，供 UI 层订阅显示 */
+sealed class ScanProgress {
+    /** 初始化中（统计总文件数） */
+    data class Enumerating(val total: Int) : ScanProgress()
+
+    /** 正在写入索引 */
+    data class Indexing(val processed: Int, val total: Int) : ScanProgress()
+
+    /** 扫描完成 */
+    data class Done(val total: Int) : ScanProgress()
+
+    /** 扫描出错 */
+    data class Failed(val reason: String) : ScanProgress()
+}
