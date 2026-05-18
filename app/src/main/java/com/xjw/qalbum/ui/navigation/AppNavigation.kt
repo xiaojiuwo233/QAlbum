@@ -16,12 +16,15 @@ import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavGraph.Companion.findStartDestination
+import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
 import com.xjw.qalbum.ui.cleanup.CleanupScreen
 import com.xjw.qalbum.ui.dashboard.DashboardScreen
+import com.xjw.qalbum.ui.detail.ImageDetailScreen
 import com.xjw.qalbum.ui.gallery.GalleryScreen
 import com.xjw.qalbum.ui.search.SearchScreen
 import com.xjw.qalbum.ui.settings.SettingsScreen
@@ -39,31 +42,36 @@ fun AppNavigation() {
     val currentRoute = backStackEntry?.destination?.route
     val currentDestination = NavDestination.fromRoute(currentRoute)
 
+    // 详情页路由不在底部导航中，进入详情时隐藏底部栏
+    val showBottomBar = currentRoute in NavDestination.entries.map { it.route }
+
     Scaffold(
         bottomBar = {
-            NavigationBar {
-                NavDestination.entries.forEach { dest ->
-                    val selected = dest == currentDestination
-                    NavigationBarItem(
-                        selected = selected,
-                        onClick = {
-                            navController.navigate(dest.route) {
-                                popUpTo(navController.graph.findStartDestination().id) {
-                                    saveState = true
+            if (showBottomBar) {
+                NavigationBar {
+                    NavDestination.entries.forEach { dest ->
+                        val selected = dest == currentDestination
+                        NavigationBarItem(
+                            selected = selected,
+                            onClick = {
+                                navController.navigate(dest.route) {
+                                    popUpTo(navController.graph.findStartDestination().id) {
+                                        saveState = true
+                                    }
+                                    launchSingleTop = true
+                                    restoreState = true
                                 }
-                                launchSingleTop = true
-                                restoreState = true
-                            }
-                        },
-                        icon = {
-                            Icon(
-                                imageVector = if (selected) dest.filledIcon else dest.outlinedIcon,
-                                contentDescription = stringResource(dest.labelRes),
-                            )
-                        },
-                        label = { Text(stringResource(dest.labelRes)) },
-                        alwaysShowLabel = true,
-                    )
+                            },
+                            icon = {
+                                Icon(
+                                    imageVector = if (selected) dest.filledIcon else dest.outlinedIcon,
+                                    contentDescription = stringResource(dest.labelRes),
+                                )
+                            },
+                            label = { Text(stringResource(dest.labelRes)) },
+                            alwaysShowLabel = true,
+                        )
+                    }
                 }
             }
         }
@@ -79,7 +87,10 @@ fun AppNavigation() {
                 DashboardScreen(contentPadding = innerPadding.bottomOnly())
             }
             composable(NavDestination.Gallery.route) {
-                GalleryScreen(contentPadding = innerPadding.bottomOnly())
+                GalleryScreen(
+                    contentPadding = innerPadding.bottomOnly(),
+                    onImageClick = { id -> navController.navigate("image/$id") },
+                )
             }
             composable(NavDestination.Search.route) {
                 SearchScreen(contentPadding = innerPadding.bottomOnly())
@@ -89,6 +100,16 @@ fun AppNavigation() {
             }
             composable(NavDestination.Settings.route) {
                 SettingsScreen(contentPadding = innerPadding.bottomOnly())
+            }
+            composable(
+                route = "image/{imageId}",
+                arguments = listOf(navArgument("imageId") { type = NavType.LongType }),
+            ) { entry ->
+                val id = entry.arguments?.getLong("imageId") ?: 0L
+                ImageDetailScreen(
+                    imageId = id,
+                    onBack = { navController.popBackStack() },
+                )
             }
         }
     }

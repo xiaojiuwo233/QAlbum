@@ -41,7 +41,7 @@ fun PlaceholderScaffold(
         topBar = {
             CenterAlignedTopAppBar(
                 title = { Text(title, style = MaterialTheme.typography.titleLarge) },
-                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+                colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface,
                 ),
             )

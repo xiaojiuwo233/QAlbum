@@ -11,8 +11,10 @@ import com.xjw.qalbum.data.db.entity.ImageEntity
 import kotlinx.coroutines.flow.Flow
 
 /**
- * 图片表 DAO —— Phase 0 提供基础读写接口；
- * Phase 1 起会补充变体组、扫描状态等更复杂的查询。
+ * 图片表 DAO
+ *
+ * Phase 1 重点：扫描 / 变体组 / 时间线分页 / 仪表盘统计
+ * Phase 2 起会补充：xxhash/phash 查询、重复组聚类、模糊度统计等
  */
 @Dao
 interface ImageDao {
@@ -31,13 +33,16 @@ interface ImageDao {
     @Query("UPDATE images SET status = :status WHERE id = :id")
     suspend fun updateStatus(id: Long, status: String)
 
+    @Query("UPDATE images SET last_seen = :ts WHERE id = :id")
+    suspend fun touchLastSeen(id: Long, ts: Long)
+
     @Transaction
     suspend fun insertBatch(images: List<ImageEntity>) {
         if (images.isEmpty()) return
         upsertAll(images)
     }
 
-    // ---- 单条查询 ----
+    // ---- 单条 / 路径查询 ----
 
     @Query("SELECT * FROM images WHERE id = :id LIMIT 1")
     suspend fun getById(id: Long): ImageEntity?
@@ -45,8 +50,48 @@ interface ImageDao {
     @Query("SELECT * FROM images WHERE path = :path LIMIT 1")
     suspend fun getByPath(path: String): ImageEntity?
 
-    // ---- 列表 / 分页 ----
+    /** 仅取必要字段做增量扫描 diff，避免装载整行 */
+    @Query("SELECT id, path, size, mtime, last_seen FROM images")
+    suspend fun listPathSizeMtime(): List<PathSizeMtime>
 
+    data class PathSizeMtime(
+        val id: Long,
+        val path: String,
+        val size: Long,
+        val mtime: Long,
+        val last_seen: Long,
+    )
+
+    // ---- 变体组建立 ----
+
+    /** 找出 cache_key 在多条记录间共享的（跨 chatimg/chatraw/chatthumb） */
+    @Query("""
+        SELECT cache_key FROM images
+        WHERE cache_key <> ''
+        GROUP BY cache_key
+        HAVING COUNT(*) > 1
+    """)
+    suspend fun cacheKeysWithMultipleEntries(): List<String>
+
+    @Query("SELECT * FROM images WHERE cache_key = :cacheKey")
+    suspend fun getByCacheKey(cacheKey: String): List<ImageEntity>
+
+    @Query("SELECT * FROM images WHERE variant_group = :groupId")
+    suspend fun getByVariantGroup(groupId: Long): List<ImageEntity>
+
+    @Query("SELECT IFNULL(MAX(variant_group), 0) FROM images")
+    suspend fun maxVariantGroupId(): Long
+
+    @Query("""
+        UPDATE images
+        SET variant_group = :groupId, is_variant_primary = :isPrimary
+        WHERE id = :id
+    """)
+    suspend fun assignVariant(id: Long, groupId: Long, isPrimary: Boolean)
+
+    // ---- 时间线分页 ----
+
+    /** 时间线视图：默认按 mtime 倒序，变体组合并（同组仅主图出现） */
     @Query("""
         SELECT * FROM images
         WHERE status = 'active' AND (variant_group IS NULL OR is_variant_primary = 1)
@@ -59,21 +104,34 @@ interface ImageDao {
 
     // ---- 仪表盘统计 ----
 
+    /** 物理文件总数（含变体所有副本） */
     @Query("SELECT COUNT(*) FROM images WHERE status = 'active'")
     fun observeActiveCount(): Flow<Int>
 
-    @Query("SELECT COUNT(*) FROM images WHERE status = 'active' AND (variant_group IS NULL OR is_variant_primary = 1)")
+    /** 逻辑图片数（变体合并后） */
+    @Query("""
+        SELECT COUNT(*) FROM images
+        WHERE status = 'active' AND (variant_group IS NULL OR is_variant_primary = 1)
+    """)
     fun observeLogicalCount(): Flow<Int>
 
     @Query("SELECT IFNULL(SUM(size), 0) FROM images WHERE status = 'active'")
     fun observeTotalSize(): Flow<Long>
 
-    @Query("SELECT source_type, COUNT(*) AS cnt, IFNULL(SUM(size), 0) AS bytes FROM images WHERE status = 'active' GROUP BY source_type")
+    @Query("""
+        SELECT source_type AS source, COUNT(*) AS count, IFNULL(SUM(size), 0) AS bytes
+        FROM images WHERE status = 'active'
+        GROUP BY source_type
+    """)
     fun observeSourceBreakdown(): Flow<List<SourceBreakdownRow>>
 
     data class SourceBreakdownRow(
-        val source_type: String,
-        val cnt: Int,
+        val source: String,
+        val count: Int,
         val bytes: Long,
     )
+
+    /** 已存在的 path 集合，用于增量扫描快速判重（一次性拉取） */
+    @Query("SELECT path FROM images")
+    suspend fun listAllPaths(): List<String>
 }

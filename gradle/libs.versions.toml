@@ -19,9 +19,13 @@ paging = "3.3.5"
 datastore = "1.1.2"
 
 # Compose
-composeBom = "2024.12.01"
-material3 = "1.3.1"
-adaptive = "1.0.0"
+# 改用 compose-bom-alpha（alpha 通道 BOM），统一管理 alpha 版本的 Compose 库
+# 2025.12.00 绑定 material3 1.5.0-alpha10：暴露 MaterialExpressiveTheme / expressiveLightColorScheme / MotionScheme，
+# 且 minCompileSdk=35、minAGP=8.6.0，与本项目 AGP 8.7.3 / compileSdk 35 兼容
+# （material3 1.4.0 stable 把 Expressive API 改成了 internal；1.5.0-alpha19+ 要求 AGP 9 / compileSdk 37）
+composeBom = "2025.12.00"
+# androidx.compose.material3.adaptive 是独立 group，最新稳定 1.2.0
+adaptive = "1.2.0"
 material = "1.12.0"
 
 # Room
@@ -73,8 +77,8 @@ androidx-paging-compose = { group = "androidx.paging", name = "paging-compose", 
 androidx-paging-runtime-ktx = { group = "androidx.paging", name = "paging-runtime-ktx", version.ref = "paging" }
 androidx-datastore-preferences = { group = "androidx.datastore", name = "datastore-preferences", version.ref = "datastore" }
 
-# Compose
-androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
+# Compose（BOM 管理所有 androidx.compose.* 与 androidx.compose.material3:* 的版本，子模块声明无需写版本）
+androidx-compose-bom = { group = "androidx.compose", name = "compose-bom-alpha", version.ref = "composeBom" }
 androidx-compose-ui = { group = "androidx.compose.ui", name = "ui" }
 androidx-compose-ui-graphics = { group = "androidx.compose.ui", name = "ui-graphics" }
 androidx-compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
@@ -84,8 +88,9 @@ androidx-compose-material-icons-extended = { group = "androidx.compose.material"
 
 # Material Components for Android — 仅用于 XML 主题 Theme.Material3.* 桥接
 google-material = { group = "com.google.android.material", name = "material", version.ref = "material" }
-androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3", version.ref = "material3" }
-androidx-compose-material3-window-size = { group = "androidx.compose.material3", name = "material3-window-size-class", version.ref = "material3" }
+# material3 / material3-window-size-class 由 compose-bom-alpha 管理版本，不显式声明
+androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
+androidx-compose-material3-window-size = { group = "androidx.compose.material3", name = "material3-window-size-class" }
 androidx-compose-material3-adaptive = { group = "androidx.compose.material3.adaptive", name = "adaptive", version.ref = "adaptive" }
 androidx-compose-material3-adaptive-layout = { group = "androidx.compose.material3.adaptive", name = "adaptive-layout", version.ref = "adaptive" }
 androidx-compose-material3-adaptive-navigation = { group = "androidx.compose.material3.adaptive", name = "adaptive-navigation", version.ref = "adaptive" }

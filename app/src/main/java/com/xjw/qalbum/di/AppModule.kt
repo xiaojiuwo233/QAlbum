@@ -5,6 +5,13 @@ import com.xjw.qalbum.access.RootFileAccess
 import com.xjw.qalbum.access.ShizukuFileAccess
 import com.xjw.qalbum.data.db.AppDatabase
 import com.xjw.qalbum.data.preferences.SettingsRepository
+import com.xjw.qalbum.data.repository.ImageRepository
+import com.xjw.qalbum.service.indexer.ImageIndexer
+import com.xjw.qalbum.service.indexer.IncrementalScanner
+import com.xjw.qalbum.service.indexer.ScanController
+import com.xjw.qalbum.ui.dashboard.DashboardViewModel
+import com.xjw.qalbum.ui.gallery.GalleryViewModel
+import com.xjw.qalbum.ui.imageloading.buildImageLoader
 import com.xjw.qalbum.ui.settings.SettingsViewModel
 import com.xjw.qalbum.worker.AnalysisWorker
 import com.xjw.qalbum.worker.IncrementalScanWorker
@@ -34,12 +41,23 @@ val appModule = module {
     single { get<AppDatabase>().userActionDao() }
 
     single { SettingsRepository(get()) }
+    single { ImageRepository(get()) }
 
     // ---- 文件访问 ----
 
     single { ShizukuFileAccess() }
     single { RootFileAccess() }
     single { AccessManager(get(), get(), get()) }
+
+    // ---- 索引服务 ----
+
+    single { ImageIndexer(accessManager = get(), imageDao = get()) }
+    single { IncrementalScanner(accessManager = get(), imageDao = get(), indexer = get()) }
+    single { ScanController(settings = get(), indexer = get(), incrementalScanner = get()) }
+
+    // ---- Coil ImageLoader（全局单例，通过 Koin 暴露，App.onCreate 安装为 SingletonImageLoader） ----
+
+    single { buildImageLoader(context = get(), accessManager = get()) }
 
     // ---- 网络（Phase 4 AI 使用，先初始化好） ----
 
@@ -56,7 +74,10 @@ val appModule = module {
 
     // ---- ViewModel ----
 
-    viewModel { SettingsViewModel(settings = get(), accessManager = get()) }
+    viewModel { SettingsViewModel(settings = get(), accessManager = get(), scanController = get()) }
+    viewModel { DashboardViewModel(imageRepository = get(), scanController = get()) }
+    viewModel { GalleryViewModel(imageRepository = get()) }
+    viewModel { com.xjw.qalbum.ui.detail.ImageDetailViewModel(imageRepository = get()) }
 
     // ---- Worker ----
 

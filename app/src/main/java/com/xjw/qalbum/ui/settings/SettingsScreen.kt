@@ -83,7 +83,7 @@ fun SettingsScreen(
         topBar = {
             CenterAlignedTopAppBar(
                 title = { Text(stringResource(R.string.nav_settings), style = MaterialTheme.typography.titleLarge) },
-                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+                colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface,
                 ),
             )
@@ -177,6 +177,16 @@ fun SettingsScreen(
                     }
                     Button(onClick = { viewModel.setChatpicPath(pathInput.trim()) }) {
                         Text("保存")
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                val running by viewModel.scanRunning.collectAsState()
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (running) {
+                        OutlinedButton(onClick = viewModel::cancelScan) { Text("取消扫描") }
+                    } else {
+                        OutlinedButton(onClick = viewModel::startIncrementalScan) { Text("增量扫描") }
+                        Button(onClick = viewModel::startFullScan) { Text("全量扫描") }
                     }
                 }
             }

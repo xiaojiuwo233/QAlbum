@@ -5,6 +5,8 @@ import androidx.lifecycle.viewModelScope
 import com.xjw.qalbum.access.AccessManager
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.domain.model.AccessMode
+import com.xjw.qalbum.domain.model.ScanProgress
+import com.xjw.qalbum.service.indexer.ScanController
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -17,10 +19,12 @@ import kotlinx.coroutines.launch
  * 设置页 ViewModel：
  * - 暴露当前访问模式 / 路径 / 动态取色等设置
  * - 提供"检查权限"动作，把 Shizuku/Root 可用性同步回 UI
+ * - 提供"立即扫描"动作（包装 [ScanController]）
  */
 class SettingsViewModel(
     private val settings: SettingsRepository,
     private val accessManager: AccessManager,
+    private val scanController: ScanController,
 ) : ViewModel() {
 
     val uiState: StateFlow<SettingsUiState> = combine(
@@ -41,6 +45,9 @@ class SettingsViewModel(
 
     private val _accessStatus = MutableStateFlow(AccessStatus.Unknown)
     val accessStatus: StateFlow<AccessStatus> = _accessStatus.asStateFlow()
+
+    val scanRunning: StateFlow<Boolean> = scanController.running
+    val scanProgress: StateFlow<ScanProgress?> = scanController.progress
 
     fun setAccessMode(mode: AccessMode) {
         viewModelScope.launch {
@@ -64,6 +71,10 @@ class SettingsViewModel(
             _accessStatus.value = if (ok) AccessStatus.Ready else AccessStatus.NotReady
         }
     }
+
+    fun startFullScan() = scanController.startFullScan()
+    fun startIncrementalScan() = scanController.startIncrementalScan()
+    fun cancelScan() = scanController.cancel()
 }
 
 data class SettingsUiState(
