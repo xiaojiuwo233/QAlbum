@@ -3,22 +3,37 @@ package com.xjw.qalbum.worker
 import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
+import com.xjw.qalbum.service.analysis.AnalysisPipeline
+import com.xjw.qalbum.service.analysis.AnalysisState
+import kotlinx.coroutines.flow.first
+import org.koin.core.component.KoinComponent
+import org.koin.core.component.inject
 import timber.log.Timber
 
 /**
- * 分析任务 Worker（Phase 2 起实装）
+ * 后台分析 Worker
  *
- * 后续会按 [com.xjw.qalbum.domain.model.ScanProgress] 依赖关系
- * 串行执行 Hash → Quality → Duplicate → OCR → AI 等阶段。
+ * 把 hash + quality + duplicate + score 一次跑完，
+ * 等 [AnalysisPipeline.state] 变成 Done 或 Failed 时退出。
  */
 class AnalysisWorker(
     appContext: Context,
     params: WorkerParameters,
-) : CoroutineWorker(appContext, params) {
+) : CoroutineWorker(appContext, params), KoinComponent {
+
+    private val pipeline: AnalysisPipeline by inject()
 
     override suspend fun doWork(): Result {
-        Timber.i("AnalysisWorker placeholder (Phase 0) — Phase 2+ will implement analysis pipeline")
-        return Result.success()
+        return try {
+            pipeline.start()
+            // 等到 pipeline 进入终态
+            val terminal = pipeline.state.first { it == AnalysisState.Done || it == AnalysisState.Failed }
+            Timber.i("AnalysisWorker finished with state=$terminal")
+            if (terminal == AnalysisState.Done) Result.success() else Result.retry()
+        } catch (t: Throwable) {
+            Timber.e(t, "AnalysisWorker failed")
+            Result.retry()
+        }
     }
 
     companion object {

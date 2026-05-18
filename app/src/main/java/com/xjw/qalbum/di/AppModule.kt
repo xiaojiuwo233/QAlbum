@@ -6,6 +6,11 @@ import com.xjw.qalbum.access.ShizukuFileAccess
 import com.xjw.qalbum.data.db.AppDatabase
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.data.repository.ImageRepository
+import com.xjw.qalbum.service.analysis.AnalysisPipeline
+import com.xjw.qalbum.service.analysis.DuplicateDetector
+import com.xjw.qalbum.service.cleanup.CleanupController
+import com.xjw.qalbum.service.cleanup.CleanupRecommender
+import com.xjw.qalbum.service.cleanup.QuarantineManager
 import com.xjw.qalbum.service.indexer.ImageIndexer
 import com.xjw.qalbum.service.indexer.IncrementalScanner
 import com.xjw.qalbum.service.indexer.ScanController
@@ -55,6 +60,22 @@ val appModule = module {
     single { IncrementalScanner(accessManager = get(), imageDao = get(), indexer = get()) }
     single { ScanController(settings = get(), indexer = get(), incrementalScanner = get()) }
 
+    // ---- 分析 / 清理服务 ----
+
+    single { DuplicateDetector(imageDao = get()) }
+    single { AnalysisPipeline(accessManager = get(), imageDao = get(), duplicateDetector = get()) }
+    single { CleanupRecommender(imageDao = get(), cleanupDao = get()) }
+    single {
+        QuarantineManager(
+            context = get(),
+            accessManager = get(),
+            imageDao = get(),
+            cleanupDao = get(),
+            settings = get(),
+        )
+    }
+    single { CleanupController(recommender = get(), quarantineManager = get(), cleanupDao = get()) }
+
     // ---- Coil ImageLoader（全局单例，通过 Koin 暴露，App.onCreate 安装为 SingletonImageLoader） ----
 
     single { buildImageLoader(context = get(), accessManager = get()) }
@@ -78,6 +99,12 @@ val appModule = module {
     viewModel { DashboardViewModel(imageRepository = get(), scanController = get()) }
     viewModel { GalleryViewModel(imageRepository = get()) }
     viewModel { com.xjw.qalbum.ui.detail.ImageDetailViewModel(imageRepository = get()) }
+    viewModel {
+        com.xjw.qalbum.ui.cleanup.CleanupViewModel(
+            cleanupController = get(),
+            analysisPipeline = get(),
+        )
+    }
 
     // ---- Worker ----
 
