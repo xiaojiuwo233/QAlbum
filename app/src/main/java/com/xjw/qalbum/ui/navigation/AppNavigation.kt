@@ -81,7 +81,11 @@ fun AppNavigation() {
         NavHost(
             navController = navController,
             startDestination = NavDestination.Dashboard.route,
-            modifier = Modifier.padding(top = innerPadding.calculateTopPadding()),
+            modifier = if (showBottomBar) {
+                Modifier.padding(top = innerPadding.calculateTopPadding())
+            } else {
+                Modifier
+            },
         ) {
             composable(NavDestination.Dashboard.route) {
                 DashboardScreen(contentPadding = innerPadding.bottomOnly())

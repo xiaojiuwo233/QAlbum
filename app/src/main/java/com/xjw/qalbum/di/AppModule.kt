@@ -129,11 +129,18 @@ val appModule = module {
 
     viewModel { SettingsViewModel(settings = get(), accessManager = get(), scanController = get()) }
     viewModel { DashboardViewModel(imageRepository = get(), scanController = get()) }
-    viewModel { GalleryViewModel(imageRepository = get()) }
+    viewModel {
+        GalleryViewModel(
+            imageRepository = get(),
+            vaultManager = get(),
+            quarantineManager = get(),
+        )
+    }
     viewModel {
         com.xjw.qalbum.ui.detail.ImageDetailViewModel(
             imageRepository = get(),
             vaultManager = get(),
+            quarantineManager = get(),
         )
     }
     viewModel {

@@ -59,6 +59,16 @@
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL"
             tools:ignore="ExportedContentProvider" />
 
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
         <!-- WorkManager 自定义 Initializer：由 Koin 注入 WorkerFactory -->
         <provider
             android:name="androidx.startup.InitializationProvider"

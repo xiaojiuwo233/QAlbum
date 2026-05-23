@@ -35,9 +35,14 @@ class ImageRepository(
         ).flow
     }
 
+    suspend fun timelineSnapshot(): List<ImageEntity> = imageDao.listActiveTimeline()
+
     // ---- 详情 ----
 
     suspend fun getById(id: Long): ImageEntity? = imageDao.getById(id)
+
+    suspend fun getByIds(ids: List<Long>): List<ImageEntity> =
+        if (ids.isEmpty()) emptyList() else imageDao.getByIds(ids)
 
     suspend fun getVariants(groupId: Long): List<ImageEntity> = imageDao.getByVariantGroup(groupId)
 

@@ -2,8 +2,10 @@ package com.xjw.qalbum.service.cleanup
 
 import android.content.ContentValues
 import android.content.Context
+import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
+import androidx.core.content.FileProvider
 import com.xjw.qalbum.access.AccessManager
 import com.xjw.qalbum.data.db.dao.ImageDao
 import kotlinx.coroutines.Dispatchers
@@ -28,6 +30,10 @@ class VaultManager(
 
     private val rootDir: File by lazy {
         File(context.filesDir, "vault").apply { if (!exists()) mkdirs() }
+    }
+
+    private val externalViewDir: File by lazy {
+        File(context.cacheDir, "external_view").apply { if (!exists()) mkdirs() }
     }
 
     /** 将图片复制到保险箱，并设置 is_protected */
@@ -96,4 +102,34 @@ class VaultManager(
             false
         }
     }
+
+    /** 准备一个可交给第三方 App 打开的临时 content Uri。 */
+    suspend fun prepareExternalView(imageId: Long): ExternalViewTarget? = withContext(Dispatchers.IO) {
+        val image = imageDao.getById(imageId) ?: return@withContext null
+        val provider = accessManager.current()
+        if (!provider.isAvailable()) return@withContext null
+
+        try {
+            externalViewDir.listFiles()?.forEach { it.delete() }
+            val safeName = image.filename.ifBlank { "qalbum_${image.id}.jpg" }
+            val dest = File(externalViewDir, "${image.id}_$safeName")
+            provider.readFile(image.path).use { input ->
+                dest.outputStream().use { output -> input.copyTo(output) }
+            }
+            val uri = FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                dest,
+            )
+            ExternalViewTarget(uri = uri, mimeType = image.mime.ifBlank { "image/*" })
+        } catch (t: Throwable) {
+            Timber.e(t, "VaultManager.prepareExternalView failed for $imageId")
+            null
+        }
+    }
 }
+
+data class ExternalViewTarget(
+    val uri: Uri,
+    val mimeType: String,
+)

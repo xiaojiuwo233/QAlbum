@@ -95,9 +95,17 @@ interface ImageDao {
     @Query("""
         SELECT * FROM images
         WHERE status = 'active' AND (variant_group IS NULL OR is_variant_primary = 1)
-        ORDER BY mtime DESC
+        ORDER BY mtime DESC, id DESC
     """)
     fun pagingActiveTimeline(): PagingSource<Int, ImageEntity>
+
+    /** 详情页左右滑动使用同一套时间线排序。 */
+    @Query("""
+        SELECT * FROM images
+        WHERE status = 'active' AND (variant_group IS NULL OR is_variant_primary = 1)
+        ORDER BY mtime DESC, id DESC
+    """)
+    suspend fun listActiveTimeline(): List<ImageEntity>
 
     @Query("SELECT * FROM images ORDER BY mtime DESC LIMIT :limit")
     fun observeRecent(limit: Int = 50): Flow<List<ImageEntity>>

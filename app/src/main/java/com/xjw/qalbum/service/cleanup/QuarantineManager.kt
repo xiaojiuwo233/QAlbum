@@ -102,6 +102,29 @@ class QuarantineManager(
         true
     }
 
+    /** 直接从原位置永久删除，不进入隔离区。 */
+    suspend fun deletePermanently(imageId: Long): Boolean = withContext(Dispatchers.IO) {
+        val image = imageDao.getById(imageId) ?: return@withContext false
+        val provider = accessManager.current()
+        if (!provider.isAvailable()) return@withContext false
+
+        val targets = image.variantGroup
+            ?.let { imageDao.getByVariantGroup(it) }
+            ?: listOf(image)
+
+        var deletedAny = false
+        for (variant in targets) {
+            val deleted = runCatching { provider.deleteFile(variant.path) }.getOrDefault(false)
+            if (deleted) {
+                deletedAny = true
+                imageDao.updateStatus(variant.id, "deleted")
+            } else {
+                Timber.w("Permanent delete failed for ${variant.path}")
+            }
+        }
+        deletedAny
+    }
+
     /** 从隔离区恢复（把所有变体移回原 chatpic 路径） */
     suspend fun restore(quarantineId: Long): Boolean = withContext(Dispatchers.IO) {
         val record = cleanupDao.getQuarantineById(quarantineId) ?: return@withContext false
