@@ -93,6 +93,7 @@ fun SettingsScreen(
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface,
                 ),
+                windowInsets = WindowInsets(0, 0, 0, 0),
             )
         },
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
