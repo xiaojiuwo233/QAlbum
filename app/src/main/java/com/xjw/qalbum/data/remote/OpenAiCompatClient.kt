@@ -1,0 +1,235 @@
+package com.xjw.qalbum.data.remote
+
+import com.xjw.qalbum.data.preferences.SettingsRepository
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.addJsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.float
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
+import kotlinx.serialization.json.putJsonObject
+import kotlinx.coroutines.flow.first
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
+import timber.log.Timber
+import java.io.IOException
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+
+/**
+ * 与 OpenAI Chat Completions / Embeddings API 兼容的 HTTP Client。
+ *
+ * 任何遵循 OpenAI 协议的服务都可以接入：OpenAI、Anthropic（via LiteLLM）、Gemini（via proxy）、
+ * Ollama、vLLM、各类中转站等。用户在设置页填入 endpoint + API Key + model 即可。
+ *
+ * 设计：
+ * - 用 OkHttp + kotlinx.serialization Json builder（手动 JSON 构造，避免大量 data class）
+ * - 所有方法都是 suspend；OkHttp Call 通过 [Call.awaitResponse] 桥接
+ */
+class OpenAiCompatClient(
+    private val settings: SettingsRepository,
+    private val okHttpClient: OkHttpClient,
+) {
+
+    private val json = Json {
+        ignoreUnknownKeys = true
+        isLenient = true
+    }
+
+    /** Chat Completion（含 vision，imageBase64 不为空时附带图片） */
+    suspend fun chatCompletion(
+        messages: List<ChatMessage>,
+        model: String? = null,
+        maxTokens: Int = 1024,
+        temperature: Float = 0.3f,
+    ): ChatResponse? = withContext(Dispatchers.IO) {
+        val cfg = settings.aiEnabled.first()
+        if (!cfg) return@withContext null
+        val endpoint = settings.aiEndpoint.first().trimEnd('/')
+        val apiKey = settings.aiApiKey.first()
+        val defaultModel = settings.aiModel.first()
+        if (endpoint.isBlank() || apiKey.isBlank()) {
+            Timber.w("OpenAiCompatClient: AI endpoint or key is empty")
+            return@withContext null
+        }
+
+        val body = buildJsonObject {
+            put("model", model ?: defaultModel)
+            put("max_tokens", maxTokens)
+            put("temperature", temperature)
+            putJsonArray("messages") {
+                messages.forEach { msg -> add(buildMessage(msg)) }
+            }
+        }
+
+        val req = Request.Builder()
+            .url("$endpoint/v1/chat/completions")
+            .addHeader("Authorization", "Bearer $apiKey")
+            .addHeader("Content-Type", "application/json")
+            .post(body.toString().toRequestBody(JSON_MEDIA_TYPE))
+            .build()
+
+        try {
+            val resp = okHttpClient.newCall(req).awaitResponse()
+            resp.use { r ->
+                if (!r.isSuccessful) {
+                    Timber.w("ChatCompletion HTTP ${r.code}: ${r.body?.string()?.take(300)}")
+                    return@use null
+                }
+                parseChatResponse(r.body?.string())
+            }
+        } catch (t: Throwable) {
+            Timber.w(t, "ChatCompletion failed")
+            null
+        }
+    }
+
+    /** Embedding（文本/查询语义向量） */
+    suspend fun embedding(text: String, model: String? = null): FloatArray? = withContext(Dispatchers.IO) {
+        val cfg = settings.aiEnabled.first()
+        if (!cfg) return@withContext null
+        val endpoint = settings.aiEndpoint.first().trimEnd('/')
+        val apiKey = settings.aiApiKey.first()
+        val embModel = model ?: settings.aiEmbeddingModel.first()
+        if (endpoint.isBlank() || apiKey.isBlank()) return@withContext null
+
+        val body = buildJsonObject {
+            put("model", embModel)
+            put("input", text)
+        }
+
+        val req = Request.Builder()
+            .url("$endpoint/v1/embeddings")
+            .addHeader("Authorization", "Bearer $apiKey")
+            .addHeader("Content-Type", "application/json")
+            .post(body.toString().toRequestBody(JSON_MEDIA_TYPE))
+            .build()
+
+        try {
+            val resp = okHttpClient.newCall(req).awaitResponse()
+            resp.use { r ->
+                if (!r.isSuccessful) {
+                    Timber.w("Embedding HTTP ${r.code}: ${r.body?.string()?.take(300)}")
+                    return@use null
+                }
+                parseEmbeddingResponse(r.body?.string())
+            }
+        } catch (t: Throwable) {
+            Timber.w(t, "Embedding failed")
+            null
+        }
+    }
+
+    // ---- JSON 构造 / 解析 ----
+
+    private fun buildMessage(msg: ChatMessage): JsonObject = buildJsonObject {
+        put("role", msg.role)
+        if (msg.imageBase64 != null) {
+            putJsonArray("content") {
+                addJsonObject {
+                    put("type", "text")
+                    put("text", msg.text)
+                }
+                addJsonObject {
+                    put("type", "image_url")
+                    putJsonObject("image_url") {
+                        // OpenAI vision 兼容格式：data URL + 可选 detail 控制 token 消耗
+                        put("url", "data:image/jpeg;base64,${msg.imageBase64}")
+                        put("detail", msg.imageDetail)
+                    }
+                }
+            }
+        } else {
+            put("content", msg.text)
+        }
+    }
+
+    private fun parseChatResponse(raw: String?): ChatResponse? {
+        if (raw.isNullOrBlank()) return null
+        return try {
+            val root = json.parseToJsonElement(raw).jsonObject
+            val choices = root["choices"]?.jsonArray ?: return null
+            val first = choices.firstOrNull()?.jsonObject ?: return null
+            val message = first["message"]?.jsonObject ?: return null
+            val content = message["content"]?.jsonPrimitive?.content ?: return null
+            val usage = root["usage"]?.jsonObject
+            ChatResponse(
+                content = content,
+                usage = usage?.let {
+                    TokenUsage(
+                        promptTokens = it["prompt_tokens"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+                        completionTokens = it["completion_tokens"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+                    )
+                },
+            )
+        } catch (t: Throwable) {
+            Timber.w(t, "parseChatResponse failed: ${raw.take(200)}")
+            null
+        }
+    }
+
+    private fun parseEmbeddingResponse(raw: String?): FloatArray? {
+        if (raw.isNullOrBlank()) return null
+        return try {
+            val root = json.parseToJsonElement(raw).jsonObject
+            val data = root["data"]?.jsonArray ?: return null
+            val first = data.firstOrNull()?.jsonObject ?: return null
+            val arr = first["embedding"]?.jsonArray ?: return null
+            FloatArray(arr.size) { i -> arr[i].jsonPrimitive.float }
+        } catch (t: Throwable) {
+            Timber.w(t, "parseEmbeddingResponse failed: ${raw.take(200)}")
+            null
+        }
+    }
+
+    companion object {
+        private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+    }
+}
+
+// ---- 数据模型 ----
+
+data class ChatMessage(
+    val role: String,            // system / user / assistant
+    val text: String,
+    val imageBase64: String? = null,
+    val imageDetail: String = "low",  // low 模式大幅降低 token 消耗
+)
+
+data class ChatResponse(
+    val content: String,
+    val usage: TokenUsage? = null,
+)
+
+data class TokenUsage(
+    val promptTokens: Int,
+    val completionTokens: Int,
+)
+
+// ---- OkHttp Call 转 suspend ----
+
+private suspend fun Call.awaitResponse(): Response = suspendCancellableCoroutine { cont ->
+    enqueue(object : Callback {
+        override fun onFailure(call: Call, e: IOException) {
+            if (!cont.isCancelled) cont.resumeWithException(e)
+        }
+        override fun onResponse(call: Call, response: Response) {
+            cont.resume(response)
+        }
+    })
+    cont.invokeOnCancellation { runCatching { cancel() } }
+}

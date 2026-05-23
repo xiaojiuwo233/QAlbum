@@ -5,6 +5,7 @@ import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import com.xjw.qalbum.data.db.dao.CleanupDao
+import com.xjw.qalbum.data.db.dao.EmbeddingDao
 import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.db.dao.MatchedMessageDao
 import com.xjw.qalbum.data.db.dao.OcrDao
@@ -12,6 +13,7 @@ import com.xjw.qalbum.data.db.dao.TagDao
 import com.xjw.qalbum.data.db.dao.UserActionDao
 import com.xjw.qalbum.data.db.entity.CleanupBatchEntity
 import com.xjw.qalbum.data.db.entity.CleanupCandidateEntity
+import com.xjw.qalbum.data.db.entity.ImageEmbeddingEntity
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.db.entity.ImageTagEntity
 import com.xjw.qalbum.data.db.entity.MatchedMessageEntity
@@ -40,8 +42,9 @@ import com.xjw.qalbum.data.db.entity.UserActionEntity
         QuarantineEntity::class,
         MatchedMessageEntity::class,
         UserActionEntity::class,
+        ImageEmbeddingEntity::class,
     ],
-    version = 2,
+    version = 3,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -52,6 +55,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun cleanupDao(): CleanupDao
     abstract fun matchedMessageDao(): MatchedMessageDao
     abstract fun userActionDao(): UserActionDao
+    abstract fun embeddingDao(): EmbeddingDao
 
     companion object {
         const val DB_NAME = "qalbum.db"

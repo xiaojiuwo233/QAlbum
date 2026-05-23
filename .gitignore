@@ -8,6 +8,7 @@ out/
 .idea/
 *.iml
 .cxx/
+.vscode/
 
 # --- Local config ---
 local.properties
@@ -26,5 +27,4 @@ debug.keystore
 
 # --- 参考文档 ---
 QQDecrypt/
-
 *.md

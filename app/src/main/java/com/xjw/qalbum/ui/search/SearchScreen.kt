@@ -17,9 +17,13 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.TextFields
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -47,7 +51,10 @@ import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import coil3.request.crossfade
 import com.xjw.qalbum.data.db.dao.OcrDao
+import com.xjw.qalbum.data.db.entity.ImageEntity
+import com.xjw.qalbum.service.ai.SemanticHit
 import com.xjw.qalbum.ui.imageloading.FileAccessPath
+import com.xjw.qalbum.ui.imageloading.ImageEntityModel
 import org.koin.androidx.compose.koinViewModel
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -67,12 +74,13 @@ fun SearchScreen(
     viewModel: SearchViewModel = koinViewModel(),
 ) {
     val query by viewModel.query.collectAsState()
+    val mode by viewModel.mode.collectAsState()
+    val aiEnabled by viewModel.aiEnabled.collectAsState()
     val state by viewModel.state.collectAsState()
 
     Scaffold(
         topBar = {
-            // 搜索框直接放在 TopBar 区域
-            Box(
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(MaterialTheme.colorScheme.surface)
@@ -83,7 +91,12 @@ fun SearchScreen(
                     onValueChange = viewModel::onQueryChange,
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
-                    placeholder = { Text("搜索 OCR 文本…") },
+                    placeholder = {
+                        Text(
+                            if (mode == SearchMode.OCR) "搜索 OCR 文本…"
+                            else "用自然语言搜索（如：发票截图）…"
+                        )
+                    },
                     leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
                     trailingIcon = {
                         if (query.isNotEmpty()) {
@@ -98,6 +111,29 @@ fun SearchScreen(
                         unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainer,
                     ),
                 )
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = mode == SearchMode.OCR,
+                        onClick = { viewModel.setMode(SearchMode.OCR) },
+                        label = { Text("OCR 文本") },
+                        leadingIcon = {
+                            Icon(Icons.Outlined.TextFields, contentDescription = null, modifier = Modifier.size(18.dp))
+                        },
+                    )
+                    FilterChip(
+                        selected = mode == SearchMode.Semantic,
+                        onClick = { viewModel.setMode(SearchMode.Semantic) },
+                        enabled = aiEnabled,
+                        label = { Text("AI 语义") },
+                        leadingIcon = {
+                            Icon(Icons.Outlined.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
+                        },
+                    )
+                    if (!aiEnabled) {
+                        AssistChip(onClick = {}, label = { Text("先到设置启用 AI", style = MaterialTheme.typography.labelSmall) })
+                    }
+                }
             }
         },
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
@@ -109,7 +145,7 @@ fun SearchScreen(
                 .padding(contentPadding),
         ) {
             when (val s = state) {
-                SearchUiState.Idle -> IdleHint()
+                SearchUiState.Idle -> IdleHint(mode)
                 SearchUiState.Loading -> Centered { CircularProgressIndicator() }
                 SearchUiState.Empty -> Centered {
                     Text("没有匹配结果", style = MaterialTheme.typography.bodyMedium)
@@ -117,14 +153,15 @@ fun SearchScreen(
                 is SearchUiState.Failed -> Centered {
                     Text("查询失败：${s.reason}", color = MaterialTheme.colorScheme.error)
                 }
-                is SearchUiState.Result -> ResultList(s.hits, onResultClick)
+                is SearchUiState.OcrResult -> OcrResultList(s.hits, onResultClick)
+                is SearchUiState.SemanticResult -> SemanticResultList(s.hits, onResultClick)
             }
         }
     }
 }
 
 @Composable
-private fun ResultList(hits: List<OcrDao.SearchHit>, onClick: (Long) -> Unit) {
+private fun OcrResultList(hits: List<OcrDao.SearchHit>, onClick: (Long) -> Unit) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp),
@@ -132,13 +169,76 @@ private fun ResultList(hits: List<OcrDao.SearchHit>, onClick: (Long) -> Unit) {
     ) {
         items(count = hits.size, key = { hits[it].image_id }) { idx ->
             val hit = hits[idx]
-            HitRow(hit, onClick)
+            OcrHitRow(hit, onClick)
         }
     }
 }
 
 @Composable
-private fun HitRow(hit: OcrDao.SearchHit, onClick: (Long) -> Unit) {
+private fun SemanticResultList(hits: List<SemanticHit>, onClick: (Long) -> Unit) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        items(count = hits.size, key = { hits[it].image.id }) { idx ->
+            val hit = hits[idx]
+            SemanticHitRow(hit, onClick)
+        }
+    }
+}
+
+@Composable
+private fun SemanticHitRow(hit: SemanticHit, onClick: (Long) -> Unit) {
+    val context = LocalContext.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .clickable { onClick(hit.image.id) }
+            .padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(72.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+        ) {
+            AsyncImage(
+                model = ImageRequest.Builder(context).data(ImageEntityModel(hit.image)).crossfade(true).build(),
+                contentDescription = hit.image.filename,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+        Spacer(Modifier.size(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                hit.image.filename,
+                style = MaterialTheme.typography.titleSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "${hit.image.sourceType} · ${formatTime(hit.image.mtime)}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "相似度 ${(hit.similarity * 100).toInt()}%",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
+    }
+}
+
+@Composable
+private fun OcrHitRow(hit: OcrDao.SearchHit, onClick: (Long) -> Unit) {
     val context = LocalContext.current
     Row(
         modifier = Modifier
@@ -189,20 +289,24 @@ private fun HitRow(hit: OcrDao.SearchHit, onClick: (Long) -> Unit) {
 }
 
 @Composable
-private fun IdleHint() {
+private fun IdleHint(mode: SearchMode) {
     Centered {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Icon(
-                Icons.Outlined.Search,
+                if (mode == SearchMode.OCR) Icons.Outlined.Search else Icons.Outlined.AutoAwesome,
                 contentDescription = null,
                 modifier = Modifier.size(64.dp),
                 tint = MaterialTheme.colorScheme.primary,
             )
             Spacer(Modifier.height(12.dp))
-            Text("OCR 全文搜索", style = MaterialTheme.typography.titleMedium)
+            Text(
+                if (mode == SearchMode.OCR) "OCR 全文搜索" else "AI 语义搜索",
+                style = MaterialTheme.typography.titleMedium,
+            )
             Spacer(Modifier.height(4.dp))
             Text(
-                "试试搜：发票、订单、地址、姓名",
+                if (mode == SearchMode.OCR) "试试搜：发票、订单、地址、姓名"
+                else "试试自然语言：寒假课表、收款码、写代码的截图",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

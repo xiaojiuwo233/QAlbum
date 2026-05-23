@@ -31,16 +31,37 @@ class SettingsViewModel(
         settings.accessMode,
         settings.chatpicPath,
         settings.dynamicColorEnabled,
-    ) { mode, path, dynamicColor ->
+        settings.aiEnabled,
+        settings.aiEndpoint,
+    ) { mode, path, dynamicColor, aiEnabled, aiEndpoint ->
+        SettingsBase(mode, path, dynamicColor, aiEnabled, aiEndpoint)
+    }.combine(
+        combine(settings.aiApiKey, settings.aiModel, settings.aiEmbeddingModel) { k, m, em ->
+            Triple(k, m, em)
+        }
+    ) { base, ai ->
         SettingsUiState(
-            accessMode = mode,
-            chatpicPath = path,
-            dynamicColorEnabled = dynamicColor,
+            accessMode = base.accessMode,
+            chatpicPath = base.chatpicPath,
+            dynamicColorEnabled = base.dynamicColorEnabled,
+            aiEnabled = base.aiEnabled,
+            aiEndpoint = base.aiEndpoint,
+            aiApiKey = ai.first,
+            aiModel = ai.second,
+            aiEmbeddingModel = ai.third,
         )
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),
         initialValue = SettingsUiState(),
+    )
+
+    private data class SettingsBase(
+        val accessMode: AccessMode,
+        val chatpicPath: String,
+        val dynamicColorEnabled: Boolean,
+        val aiEnabled: Boolean,
+        val aiEndpoint: String,
     )
 
     private val _accessStatus = MutableStateFlow(AccessStatus.Unknown)
@@ -75,12 +96,35 @@ class SettingsViewModel(
     fun startFullScan() = scanController.startFullScan()
     fun startIncrementalScan() = scanController.startIncrementalScan()
     fun cancelScan() = scanController.cancel()
+
+    // ---- AI 配置 ----
+
+    fun setAiEnabled(enabled: Boolean) {
+        viewModelScope.launch { settings.setAiEnabled(enabled) }
+    }
+    fun setAiEndpoint(endpoint: String) {
+        viewModelScope.launch { settings.setAiEndpoint(endpoint.trim()) }
+    }
+    fun setAiApiKey(key: String) {
+        viewModelScope.launch { settings.setAiApiKey(key.trim()) }
+    }
+    fun setAiModel(model: String) {
+        viewModelScope.launch { settings.setAiModel(model.trim()) }
+    }
+    fun setAiEmbeddingModel(model: String) {
+        viewModelScope.launch { settings.setAiEmbeddingModel(model.trim()) }
+    }
 }
 
 data class SettingsUiState(
     val accessMode: AccessMode = AccessMode.SHIZUKU,
     val chatpicPath: String = SettingsRepository.DEFAULT_CHATPIC_PATH,
     val dynamicColorEnabled: Boolean = true,
+    val aiEnabled: Boolean = false,
+    val aiEndpoint: String = "",
+    val aiApiKey: String = "",
+    val aiModel: String = "gpt-4o-mini",
+    val aiEmbeddingModel: String = "text-embedding-3-small",
 )
 
 enum class AccessStatus { Unknown, Ready, NotReady }

@@ -4,9 +4,15 @@ import com.xjw.qalbum.access.AccessManager
 import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.db.dao.OcrDao
 import com.xjw.qalbum.data.db.entity.OcrTextEntity
+import com.xjw.qalbum.data.preferences.SettingsRepository
+import com.xjw.qalbum.data.remote.OpenAiCompatClient
+import com.xjw.qalbum.service.ai.AiTaggingService
+import com.xjw.qalbum.service.ai.AiTaggingShared
+import com.xjw.qalbum.service.ai.SemanticIndex
 import com.xjw.qalbum.service.ocr.LocalOcrEngine
 import com.xjw.qalbum.service.ocr.OcrResult
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -33,6 +39,10 @@ class AnalysisPipeline(
     private val ocrDao: OcrDao,
     private val duplicateDetector: DuplicateDetector,
     private val ocrEngine: LocalOcrEngine,
+    private val settings: SettingsRepository,
+    private val aiClient: OpenAiCompatClient,
+    private val aiTagging: AiTaggingService,
+    private val semanticIndex: SemanticIndex,
 ) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -57,6 +67,11 @@ class AnalysisPipeline(
                 runQuality()
                 runDuplicate()
                 runOcr()
+                // AI 阶段仅在用户启用并填好 endpoint 时执行；网络阶段失败不影响整体
+                if (isAiReady()) {
+                    runAiTag()
+                    runEmbedding()
+                }
                 runScore()
                 _state.value = AnalysisState.Done
             } catch (t: Throwable) {
@@ -180,6 +195,94 @@ class AnalysisPipeline(
         Timber.i("AnalysisPipeline.runOcr: OCR-ed $processed images")
     }
 
+    private suspend fun isAiReady(): Boolean {
+        val enabled = settings.aiEnabled.first()
+        val endpoint = settings.aiEndpoint.first()
+        val key = settings.aiApiKey.first()
+        return enabled && endpoint.isNotBlank() && key.isNotBlank()
+    }
+
+    private suspend fun runAiTag() {
+        val provider = accessManager.current()
+        if (!provider.isAvailable()) return
+
+        // 需要 AI 打标签的主图：ai_done = 0
+        var processed = 0
+        val dailyLimit = 50  // 防止首次启用就把日额度跑爆，单次最多打 50 张
+        // 简化：拉取主图中 ai_done=0 的（通过现有 pagePrimaryHashed 过滤），数量上限 dailyLimit
+        var afterId = 0L
+        while (processed < dailyLimit) {
+            val page = imageDao.pagePrimaryHashed(afterId, 50)
+            if (page.isEmpty()) break
+            for (img in page) {
+                if (img.aiDone) {
+                    afterId = img.id
+                    continue
+                }
+                val result = aiTagging.tagImage(provider, img.id)
+                if (result is AiTaggingService.Result.Success) {
+                    // 标记 ai_done
+                    imageDao.update(img.copy(aiDone = true))
+                    processed++
+                }
+                afterId = img.id
+                if (processed >= dailyLimit) break
+                _progress.value = AnalysisProgress(AnalysisPhase.AI_TAG, processed, dailyLimit)
+            }
+        }
+        _progress.value = AnalysisProgress(AnalysisPhase.AI_TAG, processed, dailyLimit, msg = "完成")
+        Timber.i("AnalysisPipeline.runAiTag: tagged $processed images")
+    }
+
+    private suspend fun runEmbedding() {
+        val provider = accessManager.current()
+        if (!provider.isAvailable()) return
+
+        var processed = 0
+        val dailyLimit = 100
+        var afterId = 0L
+        while (processed < dailyLimit) {
+            val page = imageDao.pagePrimaryHashed(afterId, 50)
+            if (page.isEmpty()) break
+            for (img in page) {
+                if (img.embeddingDone || semanticIndex.hasEmbedding(img.id)) {
+                    afterId = img.id
+                    continue
+                }
+                // 用 OCR 文本 + AI 描述作为 embedding 输入（避免直接用图像 embedding，兼容更多模型）
+                val ocr = ocrDao.getByImageId(img.id)
+                val textForEmbedding = buildEmbeddingText(img, ocr)
+                if (textForEmbedding.isBlank()) {
+                    afterId = img.id
+                    continue
+                }
+                val vec = aiClient.embedding(textForEmbedding)
+                if (vec != null) {
+                    semanticIndex.upsert(img.id, settings.aiEmbeddingModel.first(), vec)
+                    imageDao.update(img.copy(embeddingDone = true))
+                    processed++
+                }
+                afterId = img.id
+                if (processed >= dailyLimit) break
+                _progress.value = AnalysisProgress(AnalysisPhase.EMBEDDING, processed, dailyLimit)
+            }
+        }
+        _progress.value = AnalysisProgress(AnalysisPhase.EMBEDDING, processed, dailyLimit, msg = "完成")
+        Timber.i("AnalysisPipeline.runEmbedding: embedded $processed images")
+    }
+
+    private fun buildEmbeddingText(
+        img: com.xjw.qalbum.data.db.entity.ImageEntity,
+        ocr: OcrTextEntity?,
+    ): String {
+        val parts = mutableListOf<String>()
+        parts.add(img.filename)
+        parts.add(img.sourceType)
+        if (img.isAnimated) parts.add("动图")
+        ocr?.text?.takeIf { it.isNotBlank() }?.let { parts.add(it.take(500)) }
+        return parts.joinToString(" ")
+    }
+
     private suspend fun runScore() {
         // 全库遍历主图，重新计算 info_score / delete_score 并写回
         // 评分时会读取关联的 OCR 结果（hasPhone / hasAmount 等）作为强信号
@@ -216,7 +319,7 @@ class AnalysisPipeline(
 }
 
 enum class AnalysisState { Idle, Running, Done, Failed }
-enum class AnalysisPhase { HASH, QUALITY, DUPLICATE, OCR, SCORE }
+enum class AnalysisPhase { HASH, QUALITY, DUPLICATE, OCR, AI_TAG, EMBEDDING, SCORE }
 
 data class AnalysisProgress(
     val phase: AnalysisPhase,

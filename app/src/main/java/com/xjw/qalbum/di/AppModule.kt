@@ -6,6 +6,10 @@ import com.xjw.qalbum.access.ShizukuFileAccess
 import com.xjw.qalbum.data.db.AppDatabase
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.data.repository.ImageRepository
+import com.xjw.qalbum.data.remote.OpenAiCompatClient
+import com.xjw.qalbum.service.ai.AiTaggingService
+import com.xjw.qalbum.service.ai.SemanticIndex
+import com.xjw.qalbum.service.ai.SemanticSearchEngine
 import com.xjw.qalbum.service.analysis.AnalysisPipeline
 import com.xjw.qalbum.service.analysis.DuplicateDetector
 import com.xjw.qalbum.service.cleanup.CleanupController
@@ -46,6 +50,7 @@ val appModule = module {
     single { get<AppDatabase>().cleanupDao() }
     single { get<AppDatabase>().matchedMessageDao() }
     single { get<AppDatabase>().userActionDao() }
+    single { get<AppDatabase>().embeddingDao() }
 
     single { SettingsRepository(get()) }
     single { ImageRepository(imageDao = get(), ocrDao = get()) }
@@ -62,10 +67,21 @@ val appModule = module {
     single { IncrementalScanner(accessManager = get(), imageDao = get(), indexer = get()) }
     single { ScanController(settings = get(), indexer = get(), incrementalScanner = get()) }
 
-    // ---- 分析 / 清理 / OCR 服务 ----
+    // ---- 分析 / 清理 / OCR / AI 服务 ----
 
     single { DuplicateDetector(imageDao = get()) }
     single { LocalOcrEngine() }
+    single { OpenAiCompatClient(settings = get(), okHttpClient = get()) }
+    single { SemanticIndex(dao = get()) }
+    single { AiTaggingService(aiClient = get(), imageDao = get(), tagDao = get()) }
+    single {
+        SemanticSearchEngine(
+            aiClient = get(),
+            semanticIndex = get(),
+            imageDao = get(),
+            settings = get(),
+        )
+    }
     single {
         AnalysisPipeline(
             accessManager = get(),
@@ -73,6 +89,10 @@ val appModule = module {
             ocrDao = get(),
             duplicateDetector = get(),
             ocrEngine = get(),
+            settings = get(),
+            aiClient = get(),
+            aiTagging = get(),
+            semanticIndex = get(),
         )
     }
     single { CleanupRecommender(imageDao = get(), cleanupDao = get()) }
@@ -122,7 +142,13 @@ val appModule = module {
             analysisPipeline = get(),
         )
     }
-    viewModel { com.xjw.qalbum.ui.search.SearchViewModel(imageRepository = get()) }
+    viewModel {
+        com.xjw.qalbum.ui.search.SearchViewModel(
+            imageRepository = get(),
+            semanticEngine = get(),
+            settings = get(),
+        )
+    }
 
     // ---- Worker ----
 

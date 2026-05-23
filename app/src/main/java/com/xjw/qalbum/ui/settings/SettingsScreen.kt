@@ -20,10 +20,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.PrivacyTip
 import androidx.compose.material.icons.outlined.Security
 import androidx.compose.material.icons.outlined.Storage
+import androidx.compose.material.icons.outlined.Visibility
+import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -32,6 +35,7 @@ import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -52,11 +56,14 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.xjw.qalbum.BuildConfig
 import com.xjw.qalbum.R
 import com.xjw.qalbum.domain.model.AccessMode
+import com.xjw.qalbum.service.ai.AiPrivacyGuard
 import org.koin.androidx.compose.koinViewModel
 
 /**
@@ -212,7 +219,15 @@ fun SettingsScreen(
                 }
             }
 
-            // 4. 关于
+            // 4. AI 配置
+            SectionCard(
+                icon = Icons.Outlined.AutoAwesome,
+                title = stringResource(R.string.settings_section_ai),
+            ) {
+                AiSection(state = state, viewModel = viewModel)
+            }
+
+            // 5. 关于
             SectionCard(
                 icon = Icons.Outlined.Info,
                 title = stringResource(R.string.settings_section_about),
@@ -332,9 +347,8 @@ private fun ShizukuStatusRow(
     }
 }
 
-/** 预留：当 endpoint 是公网地址时弹出隐私警告 */
+/** 公网 endpoint 时弹出的隐私提示 */
 @Composable
-@Suppress("UnusedPrivateMember")
 private fun PrivacyWarningDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
@@ -342,16 +356,125 @@ private fun PrivacyWarningDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("隐私提示") },
-        text = {
-            Text(
-                "你正在配置一个公网 AI 服务地址。\n" +
-                    "图片（压缩后）将通过互联网发送到该服务器，可能包含隐私信息。\n" +
-                    "建议优先使用 Ollama / vLLM 等本地推理服务。"
-            )
-        },
+        text = { Text(AiPrivacyGuard.PRIVACY_WARNING.trim()) },
         confirmButton = { TextButton(onClick = onConfirm) { Text(stringResource(R.string.action_ok)) } },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.action_cancel)) } },
     )
+}
+
+@Composable
+private fun AiSection(
+    state: SettingsUiState,
+    viewModel: SettingsViewModel,
+) {
+    val safety = remember(state.aiEndpoint) { AiPrivacyGuard.classify(state.aiEndpoint) }
+    var showPrivacyDialog by remember { mutableStateOf(false) }
+    var endpointInput by remember(state.aiEndpoint) { mutableStateOf(state.aiEndpoint) }
+    var keyInput by remember(state.aiApiKey) { mutableStateOf(state.aiApiKey) }
+    var modelInput by remember(state.aiModel) { mutableStateOf(state.aiModel) }
+    var embModelInput by remember(state.aiEmbeddingModel) { mutableStateOf(state.aiEmbeddingModel) }
+    var keyVisible by remember { mutableStateOf(false) }
+
+    if (showPrivacyDialog) {
+        PrivacyWarningDialog(
+            onConfirm = {
+                showPrivacyDialog = false
+                viewModel.setAiEnabled(true)
+            },
+            onDismiss = { showPrivacyDialog = false },
+        )
+    }
+
+    // 启用开关
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text("启用 AI 分析", style = MaterialTheme.typography.titleSmall)
+            Text(
+                when (safety) {
+                    AiPrivacyGuard.Safety.LOCALHOST -> "✔ 本机地址，数据不离开设备"
+                    AiPrivacyGuard.Safety.LOCAL_NETWORK -> "✔ 内网地址，数据不离开局域网"
+                    AiPrivacyGuard.Safety.PUBLIC_INTERNET -> "⚠ 公网地址，请注意隐私"
+                    AiPrivacyGuard.Safety.INVALID -> "未配置 endpoint"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = when (safety) {
+                    AiPrivacyGuard.Safety.PUBLIC_INTERNET -> MaterialTheme.colorScheme.tertiary
+                    AiPrivacyGuard.Safety.INVALID -> MaterialTheme.colorScheme.onSurfaceVariant
+                    else -> MaterialTheme.colorScheme.primary
+                },
+            )
+        }
+        Switch(
+            checked = state.aiEnabled,
+            onCheckedChange = { newValue ->
+                if (newValue && safety == AiPrivacyGuard.Safety.PUBLIC_INTERNET) {
+                    showPrivacyDialog = true
+                } else {
+                    viewModel.setAiEnabled(newValue)
+                }
+            },
+        )
+    }
+    Spacer(Modifier.height(12.dp))
+
+    OutlinedTextField(
+        value = endpointInput,
+        onValueChange = { endpointInput = it },
+        label = { Text("Endpoint（OpenAI 兼容）") },
+        placeholder = { Text("https://api.openai.com 或 http://192.168.1.100:11434") },
+        modifier = Modifier.fillMaxWidth(),
+        singleLine = true,
+    )
+    Spacer(Modifier.height(8.dp))
+    OutlinedTextField(
+        value = keyInput,
+        onValueChange = { keyInput = it },
+        label = { Text("API Key") },
+        modifier = Modifier.fillMaxWidth(),
+        singleLine = true,
+        visualTransformation = if (keyVisible) VisualTransformation.None else PasswordVisualTransformation(),
+        trailingIcon = {
+            IconButton(onClick = { keyVisible = !keyVisible }) {
+                Icon(
+                    if (keyVisible) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility,
+                    contentDescription = if (keyVisible) "隐藏" else "显示",
+                )
+            }
+        },
+    )
+    Spacer(Modifier.height(8.dp))
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedTextField(
+            value = modelInput,
+            onValueChange = { modelInput = it },
+            label = { Text("Chat 模型") },
+            modifier = Modifier.weight(1f),
+            singleLine = true,
+        )
+        OutlinedTextField(
+            value = embModelInput,
+            onValueChange = { embModelInput = it },
+            label = { Text("Embedding 模型") },
+            modifier = Modifier.weight(1f),
+            singleLine = true,
+        )
+    }
+    Spacer(Modifier.height(12.dp))
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedButton(onClick = {
+            // 重置回默认（OpenAI 主流配置）
+            endpointInput = ""
+            keyInput = ""
+            modelInput = "gpt-4o-mini"
+            embModelInput = "text-embedding-3-small"
+        }) { Text("重置") }
+        Button(onClick = {
+            viewModel.setAiEndpoint(endpointInput)
+            viewModel.setAiApiKey(keyInput)
+            viewModel.setAiModel(modelInput)
+            viewModel.setAiEmbeddingModel(embModelInput)
+        }) { Text("保存") }
+    }
 }
 
 @Composable
