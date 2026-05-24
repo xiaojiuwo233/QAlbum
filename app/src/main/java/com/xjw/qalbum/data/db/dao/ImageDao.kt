@@ -139,6 +139,48 @@ interface ImageDao {
         val bytes: Long,
     )
 
+    @Query("""
+        SELECT
+            COUNT(*) AS totalPhysical,
+            IFNULL(SUM(CASE WHEN hash_done = 1 THEN 1 ELSE 0 END), 0) AS hashDone,
+            IFNULL(SUM(CASE WHEN (variant_group IS NULL OR is_variant_primary = 1) THEN 1 ELSE 0 END), 0) AS totalLogical,
+            IFNULL(SUM(CASE WHEN (variant_group IS NULL OR is_variant_primary = 1) AND ocr_done = 1 THEN 1 ELSE 0 END), 0) AS ocrDone,
+            IFNULL(SUM(CASE WHEN (variant_group IS NULL OR is_variant_primary = 1) AND ai_done = 1 THEN 1 ELSE 0 END), 0) AS aiDone,
+            IFNULL(SUM(CASE WHEN (variant_group IS NULL OR is_variant_primary = 1) AND embedding_done = 1 THEN 1 ELSE 0 END), 0) AS embeddingDone
+        FROM images WHERE status = 'active'
+    """)
+    fun observeAnalysisProgress(): Flow<AnalysisProgressRow>
+
+    data class AnalysisProgressRow(
+        val totalPhysical: Int,
+        val hashDone: Int,
+        val totalLogical: Int,
+        val ocrDone: Int,
+        val aiDone: Int,
+        val embeddingDone: Int,
+    )
+
+    @Query("""
+        SELECT
+            IFNULL(SUM(CASE WHEN is_corrupt = 1 THEN 1 ELSE 0 END), 0) AS corrupt,
+            IFNULL(SUM(CASE WHEN is_blank = 1 THEN 1 ELSE 0 END), 0) AS blank,
+            IFNULL(SUM(CASE WHEN is_animated = 1 THEN 1 ELSE 0 END), 0) AS animated,
+            IFNULL(SUM(CASE WHEN is_protected = 1 THEN 1 ELSE 0 END), 0) AS protectedCount,
+            COUNT(DISTINCT duplicate_group_id) AS duplicateGroups,
+            IFNULL(SUM(CASE WHEN duplicate_group_id IS NOT NULL AND is_duplicate_best = 0 THEN size ELSE 0 END), 0) AS reclaimableBytes
+        FROM images WHERE status = 'active'
+    """)
+    fun observeImageHealth(): Flow<ImageHealthRow>
+
+    data class ImageHealthRow(
+        val corrupt: Int,
+        val blank: Int,
+        val animated: Int,
+        val protectedCount: Int,
+        val duplicateGroups: Int,
+        val reclaimableBytes: Long,
+    )
+
     /** 已存在的 path 集合，用于增量扫描快速判重（一次性拉取） */
     @Query("SELECT path FROM images")
     suspend fun listAllPaths(): List<String>

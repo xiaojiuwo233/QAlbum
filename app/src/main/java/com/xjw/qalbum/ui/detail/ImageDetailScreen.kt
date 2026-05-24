@@ -758,10 +758,7 @@ private fun CircleIconButton(
 ) {
     IconButton(
         onClick = onClick,
-        modifier = Modifier
-            .size(44.dp)
-            .clip(CircleShape)
-            .background(Color.Black.copy(alpha = 0.38f)),
+        modifier = Modifier.size(44.dp),
     ) {
         content()
     }

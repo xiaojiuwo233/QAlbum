@@ -49,7 +49,7 @@ fun AppNavigation() {
         bottomBar = {
             if (showBottomBar) {
                 NavigationBar {
-                    NavDestination.entries.forEach { dest ->
+                    NavDestination.bottomBarEntries.forEach { dest ->
                         val selected = dest == currentDestination
                         NavigationBarItem(
                             selected = selected,
@@ -88,7 +88,14 @@ fun AppNavigation() {
             },
         ) {
             composable(NavDestination.Dashboard.route) {
-                DashboardScreen(contentPadding = innerPadding.bottomOnly())
+                DashboardScreen(
+                    contentPadding = innerPadding.bottomOnly(),
+                    onNavigateToSettings = {
+                        navController.navigate(NavDestination.Settings.route) {
+                            launchSingleTop = true
+                        }
+                    },
+                )
             }
             composable(NavDestination.Gallery.route) {
                 GalleryScreen(

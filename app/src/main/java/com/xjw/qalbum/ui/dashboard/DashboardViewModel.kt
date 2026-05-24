@@ -11,27 +11,30 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 
-/**
- * 概览页 ViewModel
- *
- * 实时聚合：物理文件数、逻辑图片数、占用空间、各目录占比、当前扫描状态。
- */
 class DashboardViewModel(
     private val imageRepository: ImageRepository,
     private val scanController: ScanController,
 ) : ViewModel() {
 
+    private data class CoreStats(val physical: Int, val logical: Int, val totalSize: Long)
+
     val uiState: StateFlow<DashboardUiState> = combine(
-        imageRepository.observePhysicalCount(),
-        imageRepository.observeLogicalCount(),
-        imageRepository.observeTotalSize(),
+        combine(
+            imageRepository.observePhysicalCount(),
+            imageRepository.observeLogicalCount(),
+            imageRepository.observeTotalSize(),
+        ) { physical, logical, totalSize -> CoreStats(physical, logical, totalSize) },
         imageRepository.observeSourceBreakdown(),
-    ) { physical, logical, totalSize, breakdown ->
+        imageRepository.observeAnalysisProgress(),
+        imageRepository.observeImageHealth(),
+    ) { core, breakdown, analysis, health ->
         DashboardUiState(
-            physicalCount = physical,
-            logicalCount = logical,
-            totalSizeBytes = totalSize,
+            physicalCount = core.physical,
+            logicalCount = core.logical,
+            totalSizeBytes = core.totalSize,
             breakdown = breakdown,
+            analysisProgress = analysis,
+            health = health,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -52,4 +55,6 @@ data class DashboardUiState(
     val logicalCount: Int = 0,
     val totalSizeBytes: Long = 0L,
     val breakdown: List<ImageDao.SourceBreakdownRow> = emptyList(),
+    val analysisProgress: ImageDao.AnalysisProgressRow = ImageDao.AnalysisProgressRow(0, 0, 0, 0, 0, 0),
+    val health: ImageDao.ImageHealthRow = ImageDao.ImageHealthRow(0, 0, 0, 0, 0, 0L),
 )

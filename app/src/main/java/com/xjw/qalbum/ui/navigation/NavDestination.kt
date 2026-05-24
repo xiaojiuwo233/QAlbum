@@ -15,14 +15,12 @@ import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.ui.graphics.vector.ImageVector
 import com.xjw.qalbum.R
 
-/**
- * 主导航目的地：底部 NavigationBar 的五个一级 Tab
- */
 enum class NavDestination(
     val route: String,
     @StringRes val labelRes: Int,
     val outlinedIcon: ImageVector,
     val filledIcon: ImageVector,
+    val showInBottomBar: Boolean = true,
 ) {
     Dashboard(
         route = "dashboard",
@@ -53,9 +51,12 @@ enum class NavDestination(
         labelRes = R.string.nav_settings,
         outlinedIcon = Icons.Outlined.Settings,
         filledIcon = Icons.Rounded.Settings,
+        showInBottomBar = false,
     );
 
     companion object {
+        val bottomBarEntries: List<NavDestination> = entries.filter { it.showInBottomBar }
+
         fun fromRoute(route: String?): NavDestination =
             entries.firstOrNull { it.route == route } ?: Dashboard
     }
