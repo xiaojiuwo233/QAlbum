@@ -1,9 +1,11 @@
 package com.xjw.qalbum.ui.gallery
 
 import android.widget.Toast
-import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
-import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Arrangement
@@ -57,6 +59,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -277,13 +280,13 @@ private fun TimelineGrid(
         state = gridState,
         columns = GridCells.Fixed(columns),
         contentPadding = PaddingValues(
-            start = 2.dp,
-            end = 2.dp,
-            top = 4.dp,
+            start = 1.5.dp,
+            end = 1.5.dp,
+            top = 2.dp,
             bottom = contentPadding.calculateBottomPadding() + 12.dp,
         ),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
+        verticalArrangement = Arrangement.spacedBy(1.5.dp),
+        horizontalArrangement = Arrangement.spacedBy(1.5.dp),
         modifier = Modifier
             .fillMaxSize()
             .onGloballyPositioned { containerBounds = it.boundsInRoot() }
@@ -313,7 +316,7 @@ private fun TimelineGrid(
                     }
                 }
             }
-            .pointerInput(selectionMode, columns) {
+            .pointerInput(columns) {
                 detectDragGesturesAfterLongPress(
                     onDragStart = { offset ->
                         val rootOffset = offset + Offset(containerBounds.left, containerBounds.top)
@@ -371,9 +374,6 @@ private fun TimelineGrid(
                     onClick = {
                         if (selectionMode) onToggleSelection(item.image.id) else onImageClick(item.image.id)
                     },
-                    onLongClick = {
-                        onSelect(item.image.id)
-                    },
                 )
                 null -> Unit
             }
@@ -396,14 +396,13 @@ private fun DateHeader(timestampMs: Long) {
         modifier = Modifier
             .fillMaxWidth()
             .background(MaterialTheme.colorScheme.background)
-            .padding(start = 14.dp, top = 18.dp, end = 14.dp, bottom = 8.dp),
-        style = MaterialTheme.typography.titleMedium,
-        fontWeight = FontWeight.SemiBold,
-        color = MaterialTheme.colorScheme.onBackground,
+            .padding(start = 16.dp, top = 20.dp, end = 16.dp, bottom = 6.dp),
+        style = MaterialTheme.typography.titleSmall,
+        fontWeight = FontWeight.Medium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun TimelinePhoto(
     image: ImageEntity,
@@ -411,19 +410,25 @@ private fun TimelinePhoto(
     selectionMode: Boolean,
     onBounds: (Rect) -> Unit,
     onClick: () -> Unit,
-    onLongClick: () -> Unit,
 ) {
     val context = LocalContext.current
+    val selectedScale by animateFloatAsState(
+        targetValue = if (selected) 0.88f else 1f,
+        animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
+        label = "selectScale",
+    )
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .aspectRatio(1f)
             .onGloballyPositioned { onBounds(it.boundsInRoot()) }
+            .graphicsLayer {
+                scaleX = selectedScale
+                scaleY = selectedScale
+            }
+            .clip(RoundedCornerShape(if (selected) 8.dp else 0.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant)
-            .combinedClickable(
-                onClick = onClick,
-                onLongClick = onLongClick,
-            ),
+            .clickable(onClick = onClick),
     ) {
         AsyncImage(
             model = ImageRequest.Builder(context)
@@ -435,20 +440,15 @@ private fun TimelinePhoto(
             modifier = Modifier.fillMaxSize(),
         )
         if (selectionMode || selected) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(if (selected) Color.Black.copy(alpha = 0.38f) else Color.Transparent),
-            )
             Icon(
                 if (selected) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
                 contentDescription = null,
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(6.dp)
-                    .size(24.dp)
+                    .padding(5.dp)
+                    .size(22.dp)
                     .clip(CircleShape)
-                    .background(Color.Black.copy(alpha = 0.36f)),
+                    .background(if (selected) MaterialTheme.colorScheme.primary else Color.Black.copy(alpha = 0.36f)),
                 tint = Color.White,
             )
         }
