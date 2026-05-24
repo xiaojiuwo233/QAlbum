@@ -163,11 +163,12 @@ private fun ImmersivePhotoViewer(
     var detailsVisible by rememberSaveable { mutableStateOf(false) }
     var confirmDelete by rememberSaveable { mutableStateOf(false) }
     var currentZoom by remember { mutableFloatStateOf(1f) }
-    val dismissOffsetY = remember { Animatable(0f) }
+    var dismissOffsetY by remember { mutableFloatStateOf(0f) }
     val scope = rememberCoroutineScope()
     val velocityTracker = remember { VelocityTracker() }
     var draggingClose by remember { mutableStateOf(false) }
-    var dismissed by remember { mutableStateOf(false) }
+    var dragDirectionDecided by remember { mutableStateOf(false) }
+    val springBack = remember { Animatable(0f) }
     val pagerState = rememberPagerState(
         initialPage = state.currentIndex,
         pageCount = { state.timeline.size },
@@ -184,13 +185,13 @@ private fun ImmersivePhotoViewer(
             .collect { page -> onPageSelected(page) }
     }
 
-    val offsetY = dismissOffsetY.value
-    val closeProgress = (offsetY / 500f).coerceIn(0f, 1f)
+    val effectiveOffsetY = if (draggingClose) dismissOffsetY else springBack.value
+    val closeProgress = (effectiveOffsetY / 400f).coerceIn(0f, 1f)
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.Black.copy(alpha = 1f - closeProgress * 0.6f))
+            .background(Color.Black.copy(alpha = 1f - closeProgress * 0.7f))
             .pointerInput(Unit) {
                 detectTapGestures {
                     chromeVisible = !chromeVisible
@@ -200,35 +201,33 @@ private fun ImmersivePhotoViewer(
             .pointerInput(detailsVisible, currentZoom) {
                 detectVerticalDragGestures(
                     onDragStart = {
-                        draggingClose = !detailsVisible && currentZoom <= 1.05f
-                        if (draggingClose) {
-                            velocityTracker.resetTracking()
-                        }
+                        dragDirectionDecided = false
+                        draggingClose = false
+                        dismissOffsetY = 0f
+                        velocityTracker.resetTracking()
                     },
                     onDragEnd = {
-                        if (!draggingClose) return@detectVerticalDragGestures
-                        draggingClose = false
+                        if (!draggingClose) {
+                            dragDirectionDecided = false
+                            return@detectVerticalDragGestures
+                        }
+                        val finalOffset = dismissOffsetY
                         val velocity = try {
                             velocityTracker.calculateVelocity().y
                         } catch (_: Exception) {
                             0f
                         }
-                        val shouldDismiss = dismissOffsetY.value > 150f || velocity > 800f
-                        if (shouldDismiss && !dismissed) {
-                            dismissed = true
-                            scope.launch {
-                                dismissOffsetY.animateTo(
-                                    1200f,
-                                    spring(stiffness = Spring.StiffnessMediumLow),
-                                )
-                                onBack()
-                            }
+                        draggingClose = false
+                        dragDirectionDecided = false
+                        if (finalOffset > 120f || velocity > 600f) {
+                            onBack()
                         } else {
                             scope.launch {
-                                dismissOffsetY.animateTo(
+                                springBack.snapTo(finalOffset)
+                                springBack.animateTo(
                                     0f,
                                     spring(
-                                        dampingRatio = Spring.DampingRatioMediumBouncy,
+                                        dampingRatio = Spring.DampingRatioLowBouncy,
                                         stiffness = Spring.StiffnessMedium,
                                     ),
                                 )
@@ -237,9 +236,12 @@ private fun ImmersivePhotoViewer(
                         }
                     },
                     onDragCancel = {
+                        val finalOffset = dismissOffsetY
                         draggingClose = false
+                        dragDirectionDecided = false
                         scope.launch {
-                            dismissOffsetY.animateTo(
+                            springBack.snapTo(finalOffset)
+                            springBack.animateTo(
                                 0f,
                                 spring(stiffness = Spring.StiffnessMedium),
                             )
@@ -247,15 +249,16 @@ private fun ImmersivePhotoViewer(
                         chromeVisible = true
                     },
                 ) { change, dragAmount ->
+                    if (!dragDirectionDecided) {
+                        dragDirectionDecided = true
+                        val canDismiss = !detailsVisible && currentZoom <= 1.05f
+                        draggingClose = canDismiss && dragAmount > 0f
+                    }
                     if (draggingClose && dragAmount > 0f) {
                         change.consume()
                         chromeVisible = false
                         velocityTracker.addPosition(change.uptimeMillis, change.position)
-                        scope.launch {
-                            dismissOffsetY.snapTo(
-                                (dismissOffsetY.value + dragAmount).coerceAtLeast(0f),
-                            )
-                        }
+                        dismissOffsetY = (dismissOffsetY + dragAmount).coerceAtLeast(0f)
                     } else if (dragAmount < -8f && !detailsVisible && !draggingClose) {
                         change.consume()
                         chromeVisible = true
@@ -271,10 +274,8 @@ private fun ImmersivePhotoViewer(
             modifier = Modifier
                 .fillMaxSize()
                 .graphicsLayer {
-                    translationY = offsetY
-                    val scale = 1f - closeProgress * 0.12f
-                    scaleX = scale
-                    scaleY = scale
+                    translationY = effectiveOffsetY
+                    alpha = 1f - closeProgress * 0.2f
                 },
         ) {
             HorizontalPager(
@@ -292,7 +293,7 @@ private fun ImmersivePhotoViewer(
             }
 
             AnimatedVisibility(
-                visible = chromeVisible && offsetY < 1f,
+                visible = chromeVisible && effectiveOffsetY < 1f,
                 enter = fadeIn(),
                 exit = fadeOut(),
                 modifier = Modifier.align(Alignment.TopCenter),
@@ -307,7 +308,7 @@ private fun ImmersivePhotoViewer(
             }
 
             AnimatedVisibility(
-                visible = chromeVisible && !detailsVisible && offsetY < 1f,
+                visible = chromeVisible && !detailsVisible && effectiveOffsetY < 1f,
                 enter = fadeIn(),
                 exit = fadeOut(),
                 modifier = Modifier.align(Alignment.BottomCenter),
