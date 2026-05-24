@@ -2,6 +2,7 @@ package com.xjw.qalbum.ui.dashboard
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.xjw.qalbum.data.db.dao.CleanupDao
 import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.repository.ImageRepository
 import com.xjw.qalbum.domain.model.ScanProgress
@@ -14,6 +15,7 @@ import kotlinx.coroutines.flow.stateIn
 class DashboardViewModel(
     private val imageRepository: ImageRepository,
     private val scanController: ScanController,
+    private val cleanupDao: CleanupDao,
 ) : ViewModel() {
 
     private data class CoreStats(val physical: Int, val logical: Int, val totalSize: Long)
@@ -24,10 +26,13 @@ class DashboardViewModel(
             imageRepository.observeLogicalCount(),
             imageRepository.observeTotalSize(),
         ) { physical, logical, totalSize -> CoreStats(physical, logical, totalSize) },
-        imageRepository.observeSourceBreakdown(),
-        imageRepository.observeAnalysisProgress(),
+        combine(
+            imageRepository.observeSourceBreakdown(),
+            imageRepository.observeAnalysisProgress(),
+        ) { breakdown, analysis -> breakdown to analysis },
         imageRepository.observeImageHealth(),
-    ) { core, breakdown, analysis, health ->
+        cleanupDao.observeQuarantineStats(),
+    ) { core, (breakdown, analysis), health, quarantine ->
         DashboardUiState(
             physicalCount = core.physical,
             logicalCount = core.logical,
@@ -35,6 +40,8 @@ class DashboardViewModel(
             breakdown = breakdown,
             analysisProgress = analysis,
             health = health,
+            quarantineCount = quarantine.count,
+            quarantineBytes = quarantine.bytes,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -57,4 +64,6 @@ data class DashboardUiState(
     val breakdown: List<ImageDao.SourceBreakdownRow> = emptyList(),
     val analysisProgress: ImageDao.AnalysisProgressRow = ImageDao.AnalysisProgressRow(0, 0, 0, 0, 0, 0),
     val health: ImageDao.ImageHealthRow = ImageDao.ImageHealthRow(0, 0, 0, 0, 0, 0L),
+    val quarantineCount: Int = 0,
+    val quarantineBytes: Long = 0L,
 )

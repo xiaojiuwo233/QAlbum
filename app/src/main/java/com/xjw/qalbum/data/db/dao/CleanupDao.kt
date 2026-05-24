@@ -47,4 +47,9 @@ interface CleanupDao {
 
     @Query("DELETE FROM quarantine WHERE id = :id")
     suspend fun deleteQuarantine(id: Long)
+
+    @Query("SELECT COUNT(*) AS count, IFNULL(SUM(size), 0) AS bytes FROM quarantine")
+    fun observeQuarantineStats(): Flow<QuarantineStatsRow>
+
+    data class QuarantineStatsRow(val count: Int, val bytes: Long)
 }

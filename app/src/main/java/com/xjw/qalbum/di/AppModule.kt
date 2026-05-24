@@ -128,7 +128,7 @@ val appModule = module {
     // ---- ViewModel ----
 
     viewModel { SettingsViewModel(settings = get(), accessManager = get(), scanController = get()) }
-    viewModel { DashboardViewModel(imageRepository = get(), scanController = get()) }
+    viewModel { DashboardViewModel(imageRepository = get(), scanController = get(), cleanupDao = get()) }
     viewModel {
         GalleryViewModel(
             imageRepository = get(),

@@ -24,7 +24,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.DeleteSweep
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Storage
@@ -128,6 +128,23 @@ fun DashboardScreen(
 
 @Composable
 private fun MetricsGrid(state: DashboardUiState) {
+    val cacheCount = state.breakdown
+        .filter { it.source in listOf("chatimg", "chatraw") }
+        .sumOf { it.count }
+    val cacheBytes = state.breakdown
+        .filter { it.source in listOf("chatimg", "chatraw") }
+        .sumOf { it.bytes }
+
+    val thumbCount = state.breakdown
+        .filter { it.source == "chatthumb" }
+        .sumOf { it.count }
+    val thumbBytes = state.breakdown
+        .filter { it.source == "chatthumb" }
+        .sumOf { it.bytes }
+
+    val cleanableCount = thumbCount + state.quarantineCount
+    val cleanableBytes = thumbBytes + state.quarantineBytes
+
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -136,15 +153,16 @@ private fun MetricsGrid(state: DashboardUiState) {
             MetricCard(
                 icon = Icons.Outlined.Image,
                 value = formatCount(state.logicalCount),
-                label = "逻辑图片",
+                label = "总图片",
                 containerColor = MaterialTheme.colorScheme.primaryContainer,
                 contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
                 modifier = Modifier.weight(1f),
             )
             MetricCard(
                 icon = Icons.Outlined.Folder,
-                value = formatCount(state.physicalCount),
-                label = "物理文件",
+                value = formatCount(cacheCount),
+                label = "缓存图片",
+                subtitle = if (cacheBytes > 0) formatBytes(cacheBytes) else null,
                 containerColor = MaterialTheme.colorScheme.secondaryContainer,
                 contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
                 modifier = Modifier.weight(1f),
@@ -163,11 +181,10 @@ private fun MetricsGrid(state: DashboardUiState) {
                 modifier = Modifier.weight(1f),
             )
             MetricCard(
-                icon = Icons.Outlined.ContentCopy,
-                value = state.health.duplicateGroups.toString(),
-                label = "重复组",
-                subtitle = if (state.health.reclaimableBytes > 0)
-                    "可释放 ${formatBytes(state.health.reclaimableBytes)}" else null,
+                icon = Icons.Outlined.DeleteSweep,
+                value = formatCount(cleanableCount),
+                label = "可清理",
+                subtitle = if (cleanableBytes > 0) formatBytes(cleanableBytes) else null,
                 containerColor = MaterialTheme.colorScheme.surfaceVariant,
                 contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.weight(1f),
@@ -294,7 +311,7 @@ private fun StorageBreakdownCard(
                         rows.forEachIndexed { i, row ->
                             LegendItem(
                                 color = chartColors[i % chartColors.size],
-                                label = row.source.ifBlank { "其他" },
+                                label = mapSourceLabel(row.source),
                                 value = formatBytes(row.bytes),
                                 percentage = if (totalBytes > 0) (row.bytes * 100f / totalBytes) else 0f,
                             )
@@ -704,6 +721,13 @@ private fun ScanCard(
 }
 
 // ── Utilities ───────────────────────────────────────────────────────
+
+private fun mapSourceLabel(source: String): String = when (source) {
+    "chatimg" -> "img"
+    "chatraw" -> "raw"
+    "chatthumb" -> "thumb"
+    else -> source.ifBlank { "其他" }
+}
 
 private fun formatCount(n: Int): String = when {
     n >= 100_000 -> "%.1f万".format(n / 10_000f)
