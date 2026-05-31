@@ -189,6 +189,14 @@ interface ImageDao {
     """)
     suspend fun listActiveTimeline(): List<ImageEntity>
 
+    /** 收藏详情页左右滑动只在收藏时间线内切换。 */
+    @Query("""
+        SELECT * FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND is_protected = 1
+        ORDER BY mtime DESC, id DESC
+    """)
+    suspend fun listFavoriteTimeline(): List<ImageEntity>
+
     @Query("""
         SELECT * FROM images
         WHERE status = 'active' AND source_type <> 'chatthumb'
@@ -245,7 +253,7 @@ interface ImageDao {
             IFNULL(SUM(CASE WHEN is_corrupt = 1 THEN 1 ELSE 0 END), 0) AS corrupt,
             IFNULL(SUM(CASE WHEN is_blank = 1 THEN 1 ELSE 0 END), 0) AS blank,
             IFNULL(SUM(CASE WHEN is_animated = 1 THEN 1 ELSE 0 END), 0) AS animated,
-            IFNULL(SUM(CASE WHEN is_protected = 1 THEN 1 ELSE 0 END), 0) AS protectedCount,
+            IFNULL(SUM(CASE WHEN is_protected = 1 THEN 1 ELSE 0 END), 0) AS favoriteCount,
             COUNT(DISTINCT duplicate_group_id) AS duplicateGroups,
             IFNULL(SUM(CASE WHEN duplicate_group_id IS NOT NULL AND is_duplicate_best = 0 THEN size ELSE 0 END), 0) AS reclaimableBytes
         FROM images
@@ -257,7 +265,7 @@ interface ImageDao {
         val corrupt: Int,
         val blank: Int,
         val animated: Int,
-        val protectedCount: Int,
+        val favoriteCount: Int,
         val duplicateGroups: Int,
         val reclaimableBytes: Long,
     )
@@ -388,8 +396,21 @@ interface ImageDao {
     @Query("UPDATE images SET user_keep = :keep WHERE id = :id")
     suspend fun setUserKeep(id: Long, keep: Boolean?)
 
-    @Query("UPDATE images SET is_protected = :isProtected WHERE id = :id")
-    suspend fun setProtected(id: Long, isProtected: Boolean)
+    @Query("UPDATE images SET is_protected = :isFavorite WHERE id = :id")
+    suspend fun setFavorite(id: Long, isFavorite: Boolean)
+
+    @Query("""
+        SELECT * FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND is_protected = 1
+        ORDER BY mtime DESC, id DESC
+    """)
+    fun pagingFavoriteTimeline(): PagingSource<Int, ImageEntity>
+
+    @Query("""
+        SELECT COUNT(*) FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND is_protected = 1
+    """)
+    fun observeFavoriteCount(): Flow<Int>
 
     /** 已完成 hash 的图片，分页拉出来用于评分 / 全库再聚合 */
     @Query("""

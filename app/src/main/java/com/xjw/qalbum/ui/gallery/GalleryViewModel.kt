@@ -8,8 +8,8 @@ import androidx.paging.insertSeparators
 import androidx.paging.map as pagingMap
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.repository.ImageRepository
+import com.xjw.qalbum.service.cleanup.ImageFileManager
 import com.xjw.qalbum.service.cleanup.QuarantineManager
-import com.xjw.qalbum.service.cleanup.VaultManager
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map as flowMap
 import kotlinx.coroutines.launch
@@ -23,38 +23,36 @@ import java.util.Calendar
  */
 class GalleryViewModel(
     private val imageRepository: ImageRepository,
-    private val vaultManager: VaultManager,
+    private val imageFileManager: ImageFileManager,
     private val quarantineManager: QuarantineManager,
 ) : ViewModel() {
 
     val timeline: Flow<PagingData<GalleryTimelineItem>> =
-        imageRepository.timelinePager()
-            .flowMap { pagingData: PagingData<ImageEntity> ->
-                pagingData
-                    .pagingMap { image: ImageEntity -> GalleryTimelineItem.Photo(image) as GalleryTimelineItem }
-                    .insertSeparators { before: GalleryTimelineItem?, after: GalleryTimelineItem? ->
-                        val afterPhoto = after as? GalleryTimelineItem.Photo ?: return@insertSeparators null
-                        val beforePhoto = before as? GalleryTimelineItem.Photo
-                        if (beforePhoto == null || dayKey(beforePhoto.image.mtime) != dayKey(afterPhoto.image.mtime)) {
-                            GalleryTimelineItem.Header(afterPhoto.image.mtime)
-                        } else {
-                            null
-                        }
-                    }
-            }
+        imageRepository.timelinePager().withDateHeaders()
             .cachedIn(viewModelScope)
+
+    val favoriteTimeline: Flow<PagingData<GalleryTimelineItem>> =
+        imageRepository.favoriteTimelinePager().withDateHeaders()
+            .cachedIn(viewModelScope)
+
+    val favoriteCount: Flow<Int> = imageRepository.observeFavoriteCount()
 
     fun exportImages(ids: Set<Long>, onDone: (Int) -> Unit = {}) {
         viewModelScope.launch {
-            val count = ids.count { vaultManager.exportToGallery(it) }
+            val count = ids.count { imageFileManager.exportToGallery(it) }
             onDone(count)
         }
     }
 
-    fun favoriteImages(ids: Set<Long>, onDone: (Int) -> Unit = {}) {
+    fun addFavorites(ids: Set<Long>, onDone: (Int) -> Unit = {}) {
         viewModelScope.launch {
-            ids.forEach { imageRepository.setProtected(it, true) }
-            onDone(ids.size)
+            onDone(setFavoriteState(ids, true))
+        }
+    }
+
+    fun removeFavorites(ids: Set<Long>, onDone: (Int) -> Unit = {}) {
+        viewModelScope.launch {
+            onDone(setFavoriteState(ids, false))
         }
     }
 
@@ -71,6 +69,19 @@ class GalleryViewModel(
             onDone(count)
         }
     }
+
+    private suspend fun setFavoriteState(ids: Set<Long>, favorite: Boolean): Int {
+        val images = imageRepository.getByIds(ids.toList()).associateBy { it.id }
+        var changed = 0
+        ids.forEach { id ->
+            val image = images[id] ?: return@forEach
+            if (image.isFavorite != favorite) {
+                imageRepository.setFavorite(id, favorite)
+                changed++
+            }
+        }
+        return changed
+    }
 }
 
 sealed class GalleryTimelineItem {
@@ -85,3 +96,18 @@ private fun dayKey(timestampMs: Long): Int {
     val day = calendar.get(Calendar.DAY_OF_YEAR)
     return year * 1000 + day
 }
+
+private fun Flow<PagingData<ImageEntity>>.withDateHeaders(): Flow<PagingData<GalleryTimelineItem>> =
+    flowMap { pagingData: PagingData<ImageEntity> ->
+        pagingData
+            .pagingMap { image: ImageEntity -> GalleryTimelineItem.Photo(image) as GalleryTimelineItem }
+            .insertSeparators { before: GalleryTimelineItem?, after: GalleryTimelineItem? ->
+                val afterPhoto = after as? GalleryTimelineItem.Photo ?: return@insertSeparators null
+                val beforePhoto = before as? GalleryTimelineItem.Photo
+                if (beforePhoto == null || dayKey(beforePhoto.image.mtime) != dayKey(afterPhoto.image.mtime)) {
+                    GalleryTimelineItem.Header(afterPhoto.image.mtime)
+                } else {
+                    null
+                }
+            }
+    }

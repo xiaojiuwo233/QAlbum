@@ -16,7 +16,7 @@ import com.xjw.qalbum.service.cleanup.CleanupController
 import com.xjw.qalbum.service.cleanup.CleanupRecommender
 import com.xjw.qalbum.service.cleanup.QuarantineManager
 import com.xjw.qalbum.service.cleanup.ThumbnailTrashManager
-import com.xjw.qalbum.service.cleanup.VaultManager
+import com.xjw.qalbum.service.cleanup.ImageFileManager
 import com.xjw.qalbum.service.indexer.ImageIndexer
 import com.xjw.qalbum.service.indexer.IncrementalScanner
 import com.xjw.qalbum.service.indexer.ScanController
@@ -107,7 +107,7 @@ val appModule = module {
         )
     }
     single { ThumbnailTrashManager(accessManager = get(), imageDao = get()) }
-    single { VaultManager(context = get(), accessManager = get(), imageDao = get()) }
+    single { ImageFileManager(context = get(), accessManager = get(), imageDao = get()) }
     single { CleanupController(recommender = get(), quarantineManager = get(), cleanupDao = get()) }
 
     // ---- Coil ImageLoader（全局单例，通过 Koin 暴露，App.onCreate 安装为 SingletonImageLoader） ----
@@ -134,14 +134,14 @@ val appModule = module {
     viewModel {
         GalleryViewModel(
             imageRepository = get(),
-            vaultManager = get(),
+            imageFileManager = get(),
             quarantineManager = get(),
         )
     }
     viewModel {
         com.xjw.qalbum.ui.detail.ImageDetailViewModel(
             imageRepository = get(),
-            vaultManager = get(),
+            imageFileManager = get(),
             quarantineManager = get(),
         )
     }

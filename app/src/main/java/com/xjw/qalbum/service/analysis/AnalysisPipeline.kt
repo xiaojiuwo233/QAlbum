@@ -298,9 +298,9 @@ class AnalysisPipeline(
                 val del = ScoringEngine.computeDeleteScore(img, ocr)
                 imageDao.updateInfoScore(img.id, info)
                 imageDao.updateDeleteScore(img.id, del)
-                // 含敏感信息（手机/金额/证件/订单）自动设置 is_protected，避免误删
+                // 含敏感信息（手机/金额/证件/订单）自动加入收藏，避免误删
                 if (ocr != null && (ocr.hasIdNumber || ocr.hasOrderNo || ocr.hasAmount)) {
-                    imageDao.setProtected(img.id, true)
+                    imageDao.setFavorite(img.id, true)
                 }
                 processed++
                 afterId = img.id

@@ -38,10 +38,10 @@ import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Favorite
+import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.IosShare
-import androidx.compose.material.icons.outlined.Lock
-import androidx.compose.material.icons.outlined.LockOpen
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
@@ -97,9 +97,10 @@ fun ImageDetailScreen(
     imageId: Long,
     onBack: () -> Unit,
     contentPadding: PaddingValues = PaddingValues(0.dp),
+    favoritesOnly: Boolean = false,
     viewModel: ImageDetailViewModel = koinViewModel(),
 ) {
-    LaunchedEffect(imageId) { viewModel.load(imageId) }
+    LaunchedEffect(imageId, favoritesOnly) { viewModel.load(imageId, favoritesOnly) }
     val state by viewModel.state.collectAsState()
     val toast by viewModel.toast.collectAsState()
     val context = LocalContext.current
@@ -124,7 +125,7 @@ fun ImageDetailScreen(
                 state = s,
                 onBack = onBack,
                 onPageSelected = viewModel::selectIndex,
-                onToggleProtection = viewModel::toggleProtection,
+                onToggleFavorite = viewModel::toggleFavorite,
                 onExport = viewModel::exportToGallery,
                 onOpenExternal = {
                     viewModel.prepareOpenExternal { target ->
@@ -152,7 +153,7 @@ private fun ImmersivePhotoViewer(
     state: ImageDetailState.Ready,
     onBack: () -> Unit,
     onPageSelected: (Int) -> Unit,
-    onToggleProtection: () -> Unit,
+    onToggleFavorite: () -> Unit,
     onExport: () -> Unit,
     onOpenExternal: () -> Unit,
     onMoveToTrash: () -> Unit,
@@ -314,7 +315,7 @@ private fun ImmersivePhotoViewer(
             ) {
                 BottomActions(
                     image = state.image,
-                    onToggleProtection = onToggleProtection,
+                    onToggleFavorite = onToggleFavorite,
                     onInfo = {
                         chromeVisible = true
                         detailsVisible = true
@@ -474,7 +475,7 @@ private fun TopChrome(
 @Composable
 private fun BottomActions(
     image: ImageEntity,
-    onToggleProtection: () -> Unit,
+    onToggleFavorite: () -> Unit,
     onInfo: () -> Unit,
     onExport: () -> Unit,
     onDelete: () -> Unit,
@@ -493,9 +494,9 @@ private fun BottomActions(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         ViewerAction(
-            icon = if (image.isProtected) Icons.Outlined.LockOpen else Icons.Outlined.Lock,
-            label = if (image.isProtected) "取消保护" else "保护",
-            onClick = onToggleProtection,
+            icon = if (image.isFavorite) Icons.Outlined.Favorite else Icons.Outlined.FavoriteBorder,
+            label = if (image.isFavorite) "取消收藏" else "收藏",
+            onClick = onToggleFavorite,
         )
         ViewerAction(Icons.Outlined.Info, "详情", onInfo)
         ViewerAction(Icons.Outlined.IosShare, "导出", onExport)

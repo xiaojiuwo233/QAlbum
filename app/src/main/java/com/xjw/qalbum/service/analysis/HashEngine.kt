@@ -184,6 +184,6 @@ object HashEngine {
     private const val PHASH_SCALE = 32   // 缩放尺寸
     private const val PHASH_LOW = 8      // 低频块尺寸
     private const val MAX_PHASH_SIDE = 256
-    private const val MAX_HASH_BYTES = 32 * 1024 * 1024   // xxHash 最多 32MB（罕见的超大图保护）
+    private const val MAX_HASH_BYTES = 32 * 1024 * 1024   // xxHash 最多 32MB（限制罕见的超大图）
     private const val MAX_DECODE_BYTES = 32 * 1024 * 1024
 }

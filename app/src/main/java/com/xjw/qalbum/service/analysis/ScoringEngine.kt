@@ -23,10 +23,10 @@ object ScoringEngine {
 
         // 用户明确标记
         if (image.userKeep == true) score += 0.5f
-        if (image.isProtected) score += 0.5f
+        if (image.isFavorite) score += 0.5f
 
         // 高分辨率小加分
-        val pixels = image.width.toLong() * image.height.toLong()
+        val pixels = CleanupSignals.pixelCount(image)
         if (pixels >= 2_000_000) score += 0.05f
         else if (pixels >= 800_000) score += 0.03f
 
@@ -49,28 +49,32 @@ object ScoringEngine {
     }
 
     fun computeDeleteScore(image: ImageEntity, ocr: OcrTextEntity? = null): Float {
-        // 用户明确保留 / 已被保护 → 直接归零
-        if (image.userKeep == true || image.isProtected) return 0f
+        // 用户明确保留 / 已收藏 → 直接归零
+        if (image.userKeep == true || image.isFavorite) return 0f
 
         var score = 0f
 
         // ---- 强信号 ----
-        if (image.duplicateGroupId != null && !image.isDuplicateBest) score += 0.45f
-        if (image.isCorrupt) score += 0.55f
-        if (image.isBlank) score += 0.40f
+        if (image.duplicateGroupId != null && !image.isDuplicateBest) score += 0.65f
+        if (image.isCorrupt) score += 0.75f
+        if (image.isBlank) score += 0.65f
 
         // ---- 中信号 ----
-        if (image.width > 0 && image.width < 100 && image.height < 100) score += 0.25f
-        image.blurScore?.let { v ->
-            if (v < 100f) score += 0.20f
-            else if (v < 300f) score += 0.10f
+        if (CleanupSignals.isVeryLowResolution(image)) {
+            score += 0.50f
+        } else if (CleanupSignals.isLowResolution(image)) {
+            score += 0.25f
         }
-        if (image.size in 1..4096) score += 0.10f
+        image.blurScore?.let { v ->
+            if (v < 100f) score += 0.25f
+            else if (v < 300f) score += 0.12f
+        }
+        if (image.size in 1..4096) score += 0.15f
 
-        // OCR 文本：完全无文本的图，价值略低；有文本则不加分（具体保护由 info_score 抵消）
+        // OCR 文本：完全无文本的图，价值略低；有文本则不加分（具体保留价值由 info_score 抵消）
         if (ocr != null && ocr.text.isBlank()) score += 0.05f
 
-        // 信息价值反向减分（保护伞）
+        // 信息价值反向减分
         val info = computeInfoScore(image, ocr)
         score -= info * 0.6f
 

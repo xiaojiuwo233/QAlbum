@@ -14,55 +14,18 @@ import timber.log.Timber
 import java.io.File
 
 /**
- * 保险箱
+ * 图片文件操作。
  *
- * 与回收站的区别：
- * - 保险箱保存的是"用户主动想保留"的图片
- * - 内容会**复制**到 App 私有目录 `filesDir/vault/{category}/`（不动 chatpic 原文件）
- * - 同时把 `is_protected = true`，让评分引擎永远不会推荐它被删除
- * - 提供"导出到系统相册"，用户随时把图片永久挪出 QQ 缓存
+ * 负责把缓存图片导出到系统相册，或生成一个可交给第三方应用预览的临时文件。
  */
-class VaultManager(
+class ImageFileManager(
     private val context: Context,
     private val accessManager: AccessManager,
     private val imageDao: ImageDao,
 ) {
 
-    private val rootDir: File by lazy {
-        File(context.filesDir, "vault").apply { if (!exists()) mkdirs() }
-    }
-
     private val externalViewDir: File by lazy {
         File(context.cacheDir, "external_view").apply { if (!exists()) mkdirs() }
-    }
-
-    /** 将图片复制到保险箱，并设置 is_protected */
-    suspend fun addToVault(imageId: Long, category: String = "default"): Boolean =
-        withContext(Dispatchers.IO) {
-            val image = imageDao.getById(imageId) ?: return@withContext false
-            val provider = accessManager.current()
-            if (!provider.isAvailable()) return@withContext false
-
-            val categoryDir = File(rootDir, category.ifBlank { "default" })
-                .apply { if (!exists()) mkdirs() }
-            val dest = File(categoryDir, "${image.id}_${image.filename}")
-
-            try {
-                provider.readFile(image.path).use { input ->
-                    dest.outputStream().use { out -> input.copyTo(out) }
-                }
-                imageDao.setProtected(image.id, true)
-                Timber.i("VaultManager: added $imageId to vault ($category)")
-                true
-            } catch (t: Throwable) {
-                Timber.e(t, "VaultManager.addToVault failed for $imageId")
-                false
-            }
-        }
-
-    /** 移除保险箱标记（不删除保险箱中的副本，留给用户自行清理） */
-    suspend fun removeProtection(imageId: Long) {
-        imageDao.setProtected(imageId, false)
     }
 
     /** 将图片导出到系统相册 Pictures/QAlbum/ */
@@ -95,10 +58,10 @@ class VaultManager(
                 values.put(MediaStore.Images.Media.IS_PENDING, 0)
                 context.contentResolver.update(uri, values, null, null)
             }
-            Timber.i("VaultManager: exported $imageId to gallery")
+            Timber.i("ImageFileManager: exported $imageId to gallery")
             true
         } catch (t: Throwable) {
-            Timber.e(t, "VaultManager.exportToGallery failed for $imageId")
+            Timber.e(t, "ImageFileManager.exportToGallery failed for $imageId")
             false
         }
     }
@@ -123,7 +86,7 @@ class VaultManager(
             )
             ExternalViewTarget(uri = uri, mimeType = image.mime.ifBlank { "image/*" })
         } catch (t: Throwable) {
-            Timber.e(t, "VaultManager.prepareExternalView failed for $imageId")
+            Timber.e(t, "ImageFileManager.prepareExternalView failed for $imageId")
             null
         }
     }

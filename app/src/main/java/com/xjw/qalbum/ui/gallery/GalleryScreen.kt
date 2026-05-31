@@ -6,7 +6,6 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
@@ -23,6 +22,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridState
@@ -31,10 +31,12 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Favorite
+import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.IosShare
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.RadioButtonUnchecked
@@ -48,6 +50,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -89,9 +92,11 @@ import java.util.Locale
 fun GalleryScreen(
     contentPadding: PaddingValues,
     onImageClick: (Long) -> Unit = {},
+    onOpenFavorites: () -> Unit = {},
     viewModel: GalleryViewModel = koinViewModel(),
 ) {
     val items = viewModel.timeline.collectAsLazyPagingItems()
+    val favoriteCount by viewModel.favoriteCount.collectAsState(initial = 0)
     val gridState = rememberLazyGridState()
     val context = LocalContext.current
     var columns by rememberSaveable { mutableIntStateOf(4) }
@@ -112,7 +117,12 @@ fun GalleryScreen(
     Scaffold(
         topBar = {
             if (selectedIds.isEmpty()) {
-                TimelineTopBar(columns = columns, onRefresh = { items.refresh() })
+                TimelineTopBar(
+                    columns = columns,
+                    favoriteCount = favoriteCount,
+                    onOpenFavorites = onOpenFavorites,
+                    onRefresh = { items.refresh() },
+                )
             } else {
                 SelectionTopBar(
                     count = selectedIds.size,
@@ -125,8 +135,9 @@ fun GalleryScreen(
                     },
                     onFavorite = {
                         val ids = selectedIds
-                        viewModel.favoriteImages(ids) { count ->
-                            Toast.makeText(context, "已收藏 $count 张", Toast.LENGTH_SHORT).show()
+                        viewModel.addFavorites(ids) { count ->
+                            val message = if (count > 0) "已收藏 $count 张" else "所选图片已在收藏中"
+                            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
                             clearSelection()
                             items.refresh()
                         }
@@ -189,7 +200,121 @@ fun GalleryScreen(
 }
 
 @Composable
-private fun TimelineTopBar(columns: Int, onRefresh: () -> Unit) {
+fun FavoriteGalleryScreen(
+    contentPadding: PaddingValues,
+    onBack: () -> Unit,
+    onImageClick: (Long) -> Unit = {},
+    viewModel: GalleryViewModel = koinViewModel(),
+) {
+    val items = viewModel.favoriteTimeline.collectAsLazyPagingItems()
+    val favoriteCount by viewModel.favoriteCount.collectAsState(initial = 0)
+    val gridState = rememberLazyGridState()
+    val context = LocalContext.current
+    var columns by rememberSaveable { mutableIntStateOf(4) }
+    var selectedIds by remember { mutableStateOf(setOf<Long>()) }
+    var showDeleteConfirm by rememberSaveable { mutableStateOf(false) }
+
+    val clearSelection = { selectedIds = emptySet() }
+    val toggleSelection: (Long) -> Unit = { id ->
+        selectedIds = if (id in selectedIds) selectedIds - id else selectedIds + id
+    }
+    val selectOne: (Long) -> Unit = { id ->
+        selectedIds = selectedIds + id
+    }
+    val applySelection: (Long, Boolean) -> Unit = { id, selected ->
+        selectedIds = if (selected) selectedIds + id else selectedIds - id
+    }
+
+    Scaffold(
+        topBar = {
+            if (selectedIds.isEmpty()) {
+                FavoritesTopBar(
+                    count = favoriteCount,
+                    onBack = onBack,
+                    onRefresh = { items.refresh() },
+                )
+            } else {
+                FavoriteSelectionTopBar(
+                    count = selectedIds.size,
+                    onClose = clearSelection,
+                    onExport = {
+                        val ids = selectedIds
+                        viewModel.exportImages(ids) { count ->
+                            Toast.makeText(context, "已导出 $count 张", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    onRemoveFavorite = {
+                        val ids = selectedIds
+                        viewModel.removeFavorites(ids) { count ->
+                            Toast.makeText(context, "已取消收藏 $count 张", Toast.LENGTH_SHORT).show()
+                            clearSelection()
+                            items.refresh()
+                        }
+                    },
+                    onDelete = { showDeleteConfirm = true },
+                )
+            }
+        },
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+    ) { topPadding ->
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(top = topPadding.calculateTopPadding()),
+        ) {
+            when {
+                items.loadState.refresh is LoadState.Loading && items.itemCount == 0 -> CenteredLoading()
+                items.itemCount == 0 -> FavoritesEmptyState()
+                else -> TimelineGrid(
+                    items = items,
+                    gridState = gridState,
+                    columns = columns,
+                    selectedIds = selectedIds,
+                    contentPadding = contentPadding,
+                    selectionMode = selectedIds.isNotEmpty(),
+                    onZoomColumns = { columns = it.coerceIn(2, 6) },
+                    onImageClick = onImageClick,
+                    onToggleSelection = toggleSelection,
+                    onSelect = selectOne,
+                    onApplySelection = applySelection,
+                )
+            }
+
+            if (showDeleteConfirm) {
+                DeleteSelectionDialog(
+                    count = selectedIds.size,
+                    onDismiss = { showDeleteConfirm = false },
+                    onTrash = {
+                        val ids = selectedIds
+                        showDeleteConfirm = false
+                        viewModel.moveImagesToTrash(ids) { count ->
+                            Toast.makeText(context, "已移到回收站 $count 张", Toast.LENGTH_SHORT).show()
+                            clearSelection()
+                            items.refresh()
+                        }
+                    },
+                    onPermanent = {
+                        val ids = selectedIds
+                        showDeleteConfirm = false
+                        viewModel.deleteImagesPermanently(ids) { count ->
+                            Toast.makeText(context, "已永久删除 $count 张", Toast.LENGTH_SHORT).show()
+                            clearSelection()
+                            items.refresh()
+                        }
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun TimelineTopBar(
+    columns: Int,
+    favoriteCount: Int,
+    onOpenFavorites: () -> Unit,
+    onRefresh: () -> Unit,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -206,6 +331,56 @@ private fun TimelineTopBar(columns: Int, onRefresh: () -> Unit) {
             )
             Text(
                 "时间线 · ${columns}列",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        IconButton(onClick = onOpenFavorites) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(Icons.Outlined.FavoriteBorder, contentDescription = "收藏图库")
+                if (favoriteCount > 0) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primary),
+                    )
+                }
+            }
+        }
+        IconButton(onClick = onRefresh) {
+            Icon(Icons.Outlined.Refresh, contentDescription = "刷新")
+        }
+    }
+}
+
+@Composable
+private fun FavoritesTopBar(
+    count: Int,
+    onBack: () -> Unit,
+    onRefresh: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .statusBarsPadding()
+            .background(MaterialTheme.colorScheme.background)
+            .padding(start = 4.dp, top = 10.dp, end = 8.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconButton(onClick = onBack) {
+            Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
+        }
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                "收藏",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onBackground,
+            )
+            Text(
+                "$count 张图片",
                 style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -245,6 +420,43 @@ private fun SelectionTopBar(
         }
         IconButton(onClick = onFavorite) {
             Icon(Icons.Outlined.Favorite, contentDescription = "收藏")
+        }
+        IconButton(onClick = onDelete) {
+            Icon(Icons.Outlined.Delete, contentDescription = "删除")
+        }
+    }
+}
+
+@Composable
+private fun FavoriteSelectionTopBar(
+    count: Int,
+    onClose: () -> Unit,
+    onExport: () -> Unit,
+    onRemoveFavorite: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .statusBarsPadding()
+            .background(MaterialTheme.colorScheme.background)
+            .padding(start = 4.dp, top = 8.dp, end = 6.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconButton(onClick = onClose) {
+            Icon(Icons.Outlined.Close, contentDescription = "取消选择")
+        }
+        Text(
+            "已选择 $count 张",
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.weight(1f),
+        )
+        IconButton(onClick = onExport) {
+            Icon(Icons.Outlined.IosShare, contentDescription = "导出")
+        }
+        IconButton(onClick = onRemoveFavorite) {
+            Icon(Icons.Outlined.FavoriteBorder, contentDescription = "取消收藏")
         }
         IconButton(onClick = onDelete) {
             Icon(Icons.Outlined.Delete, contentDescription = "删除")
@@ -376,6 +588,7 @@ private fun TimelineGrid(
                     onClick = {
                         if (selectionMode) onToggleSelection(item.image.id) else onImageClick(item.image.id)
                     },
+                    onLongClick = { onSelect(item.image.id) },
                 )
                 null -> Unit
             }
@@ -413,6 +626,7 @@ private fun TimelinePhoto(
     selectionMode: Boolean,
     onBounds: (Rect) -> Unit,
     onClick: () -> Unit,
+    onLongClick: () -> Unit,
 ) {
     val context = LocalContext.current
     val selectedScale by animateFloatAsState(
@@ -433,7 +647,7 @@ private fun TimelinePhoto(
             .background(MaterialTheme.colorScheme.surfaceVariant)
             .combinedClickable(
                 onClick = onClick,
-                onLongClick = {},
+                onLongClick = onLongClick,
             ),
     ) {
         AsyncImage(
@@ -445,6 +659,20 @@ private fun TimelinePhoto(
             contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize(),
         )
+        if (image.isFavorite && !selectionMode && !selected) {
+            Icon(
+                Icons.Outlined.Favorite,
+                contentDescription = null,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(5.dp)
+                    .size(20.dp)
+                    .clip(CircleShape)
+                    .background(Color.Black.copy(alpha = 0.42f))
+                    .padding(3.dp),
+                tint = Color.White,
+            )
+        }
         if (selectionMode || selected) {
             Icon(
                 if (selected) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
@@ -510,6 +738,34 @@ private fun EmptyState() {
             Spacer(Modifier.height(8.dp))
             Text(
                 "先到「概览」或「设置」触发扫描，QAlbum 会把 QQ chatpic 下的图片索引进来。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 32.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun FavoritesEmptyState() {
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Icon(
+                Icons.Outlined.FavoriteBorder,
+                contentDescription = null,
+                modifier = Modifier.size(80.dp),
+                tint = MaterialTheme.colorScheme.primary,
+            )
+            Spacer(Modifier.height(16.dp))
+            Text(
+                "还没有收藏",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "在图库或图片详情中点收藏后，会集中显示在这里。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,

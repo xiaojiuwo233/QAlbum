@@ -9,7 +9,7 @@ import androidx.room.PrimaryKey
  * 标签字典表
  *
  * - `type`：system（系统预置） / ai（AI 推理） / user（用户自定义）
- * - `auto_protect` / `auto_delete`：作为规则参与评分引擎计算
+ * - `auto_protect` / `auto_delete`：作为自动收藏/自动清理规则参与评分引擎计算
  */
 @Entity(
     tableName = "tags",
@@ -20,7 +20,7 @@ data class TagEntity(
     @ColumnInfo(name = "name") val name: String,
     @ColumnInfo(name = "type") val type: String,
     @ColumnInfo(name = "color") val color: String? = null,
-    @ColumnInfo(name = "auto_protect") val autoProtect: Boolean = false,
+    @ColumnInfo(name = "auto_protect") val autoFavorite: Boolean = false,
     @ColumnInfo(name = "auto_delete") val autoDelete: Boolean = false,
 )
 

@@ -25,6 +25,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.DeleteSweep
+import androidx.compose.material.icons.outlined.Favorite
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Storage
@@ -41,7 +42,6 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material.icons.outlined.Settings
-import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
@@ -547,17 +547,17 @@ private fun ImageHealthCard(state: DashboardUiState) {
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
-                if (health.protectedCount > 0) {
+                if (health.favoriteCount > 0) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(
-                            Icons.Outlined.Shield,
+                            Icons.Outlined.Favorite,
                             contentDescription = null,
                             modifier = Modifier.size(14.dp),
                             tint = Color(0xFFAB47BC),
                         )
                         Spacer(Modifier.width(4.dp))
                         Text(
-                            "${health.protectedCount} 受保护",
+                            "${health.favoriteCount} 已收藏",
                             style = MaterialTheme.typography.labelSmall,
                             color = Color(0xFFAB47BC),
                         )

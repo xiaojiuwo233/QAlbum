@@ -35,7 +35,20 @@ class ImageRepository(
         ).flow
     }
 
+    fun favoriteTimelinePager(): Flow<PagingData<ImageEntity>> {
+        return Pager(
+            config = PagingConfig(
+                pageSize = 50,
+                prefetchDistance = 100,
+                initialLoadSize = 50,
+                enablePlaceholders = false,
+            ),
+            pagingSourceFactory = { imageDao.pagingFavoriteTimeline() },
+        ).flow
+    }
+
     suspend fun timelineSnapshot(): List<ImageEntity> = imageDao.listActiveTimeline()
+    suspend fun favoriteTimelineSnapshot(): List<ImageEntity> = imageDao.listFavoriteTimeline()
 
     // ---- 详情 ----
 
@@ -51,8 +64,8 @@ class ImageRepository(
 
     suspend fun setUserKeep(imageId: Long, keep: Boolean?) = imageDao.setUserKeep(imageId, keep)
 
-    suspend fun setProtected(imageId: Long, isProtected: Boolean) =
-        imageDao.setProtected(imageId, isProtected)
+    suspend fun setFavorite(imageId: Long, isFavorite: Boolean) =
+        imageDao.setFavorite(imageId, isFavorite)
 
     // ---- 搜索（Phase 3 起） ----
 
@@ -68,6 +81,7 @@ class ImageRepository(
     fun observeSourceBreakdown(): Flow<List<ImageDao.SourceBreakdownRow>> = imageDao.observeSourceBreakdown()
     fun observeAnalysisProgress(): Flow<ImageDao.AnalysisProgressRow> = imageDao.observeAnalysisProgress()
     fun observeImageHealth(): Flow<ImageDao.ImageHealthRow> = imageDao.observeImageHealth()
+    fun observeFavoriteCount(): Flow<Int> = imageDao.observeFavoriteCount()
     fun observeThumbnailTrashSummary(): Flow<ImageDao.ThumbnailTrashSummary> =
         imageDao.observeThumbnailTrashSummary()
 }

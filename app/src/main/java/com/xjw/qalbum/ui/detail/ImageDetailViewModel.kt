@@ -6,8 +6,8 @@ import android.net.Uri
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.db.entity.OcrTextEntity
 import com.xjw.qalbum.data.repository.ImageRepository
+import com.xjw.qalbum.service.cleanup.ImageFileManager
 import com.xjw.qalbum.service.cleanup.QuarantineManager
-import com.xjw.qalbum.service.cleanup.VaultManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -17,11 +17,11 @@ import kotlinx.coroutines.launch
  * 图片详情页 ViewModel
  *
  * 加载当前图片 + OCR 文本；
- * 提供"加入保险箱 / 解除保护 / 导出到相册 / 标记保留" 几个动作。
+ * 提供"收藏 / 取消收藏 / 导出到相册 / 删除"几个动作。
  */
 class ImageDetailViewModel(
     private val imageRepository: ImageRepository,
-    private val vaultManager: VaultManager,
+    private val imageFileManager: ImageFileManager,
     private val quarantineManager: QuarantineManager,
 ) : ViewModel() {
 
@@ -30,10 +30,16 @@ class ImageDetailViewModel(
 
     private val _toast = MutableStateFlow<String?>(null)
     val toast: StateFlow<String?> = _toast.asStateFlow()
+    private var favoritesOnly = false
 
-    fun load(imageId: Long) {
+    fun load(imageId: Long, favoritesOnly: Boolean = false) {
+        this.favoritesOnly = favoritesOnly
         viewModelScope.launch {
-            val timeline = imageRepository.timelineSnapshot()
+            val timeline = if (favoritesOnly) {
+                imageRepository.favoriteTimelineSnapshot()
+            } else {
+                imageRepository.timelineSnapshot()
+            }
             val initialIndex = timeline.indexOfFirst { it.id == imageId }
             if (initialIndex < 0) {
                 _state.value = ImageDetailState.NotFound
@@ -63,27 +69,20 @@ class ImageDetailViewModel(
         )
     }
 
-    fun addToVault() {
+    fun toggleFavorite() {
         val image = (_state.value as? ImageDetailState.Ready)?.image ?: return
         viewModelScope.launch {
-            val ok = vaultManager.addToVault(image.id)
-            _toast.value = if (ok) "已加入保险箱" else "加入保险箱失败"
-            load(image.id)
-        }
-    }
-
-    fun toggleProtection() {
-        val image = (_state.value as? ImageDetailState.Ready)?.image ?: return
-        viewModelScope.launch {
-            imageRepository.setProtected(image.id, !image.isProtected)
-            load(image.id)
+            val next = !image.isFavorite
+            imageRepository.setFavorite(image.id, next)
+            _toast.value = if (next) "已收藏" else "已取消收藏"
+            load(image.id, favoritesOnly)
         }
     }
 
     fun exportToGallery() {
         val image = (_state.value as? ImageDetailState.Ready)?.image ?: return
         viewModelScope.launch {
-            val ok = vaultManager.exportToGallery(image.id)
+            val ok = imageFileManager.exportToGallery(image.id)
             _toast.value = if (ok) "已导出到系统相册（Pictures/QAlbum）" else "导出失败"
         }
     }
@@ -91,7 +90,7 @@ class ImageDetailViewModel(
     fun prepareOpenExternal(onReady: (ExternalOpenTarget?) -> Unit) {
         val image = (_state.value as? ImageDetailState.Ready)?.image ?: return
         viewModelScope.launch {
-            val target = vaultManager.prepareExternalView(image.id)
+            val target = imageFileManager.prepareExternalView(image.id)
             if (target == null) {
                 _toast.value = "无法打开第三方应用"
                 onReady(null)

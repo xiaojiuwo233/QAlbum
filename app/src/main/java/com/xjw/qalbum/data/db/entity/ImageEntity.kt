@@ -75,6 +75,6 @@ data class ImageEntity(
 
     // --- 用户操作状态 ---
     @ColumnInfo(name = "status") val status: String = "active",
-    @ColumnInfo(name = "is_protected") val isProtected: Boolean = false,
+    @ColumnInfo(name = "is_protected") val isFavorite: Boolean = false,
     @ColumnInfo(name = "user_keep") val userKeep: Boolean? = null,
 )

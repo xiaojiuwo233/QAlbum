@@ -56,9 +56,9 @@ class AiTaggingService(
             tagDao.linkTag(ImageTagEntity(imageId = imageId, tagId = tag.id, source = "ai"))
         }
 
-        // 含敏感信息的图片自动保护
+        // 含敏感信息的图片自动加入收藏
         if (parsed.riskTags.isNotEmpty()) {
-            imageDao.setProtected(imageId, true)
+            imageDao.setFavorite(imageId, true)
         }
 
         return Result.Success(parsed)

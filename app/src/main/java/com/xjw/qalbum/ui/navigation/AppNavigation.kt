@@ -25,6 +25,7 @@ import androidx.navigation.navArgument
 import com.xjw.qalbum.ui.cleanup.CleanupScreen
 import com.xjw.qalbum.ui.dashboard.DashboardScreen
 import com.xjw.qalbum.ui.detail.ImageDetailScreen
+import com.xjw.qalbum.ui.gallery.FavoriteGalleryScreen
 import com.xjw.qalbum.ui.gallery.GalleryScreen
 import com.xjw.qalbum.ui.search.SearchScreen
 import com.xjw.qalbum.ui.settings.SettingsScreen
@@ -101,6 +102,14 @@ fun AppNavigation() {
                 GalleryScreen(
                     contentPadding = innerPadding.bottomOnly(),
                     onImageClick = { id -> navController.navigate("image/$id") },
+                    onOpenFavorites = { navController.navigate("favorites") },
+                )
+            }
+            composable("favorites") {
+                FavoriteGalleryScreen(
+                    contentPadding = innerPadding.bottomOnly(),
+                    onBack = { navController.popBackStack() },
+                    onImageClick = { id -> navController.navigate("favorites/image/$id") },
                 )
             }
             composable(NavDestination.Search.route) {
@@ -122,6 +131,17 @@ fun AppNavigation() {
                 val id = entry.arguments?.getLong("imageId") ?: 0L
                 ImageDetailScreen(
                     imageId = id,
+                    onBack = { navController.popBackStack() },
+                )
+            }
+            composable(
+                route = "favorites/image/{imageId}",
+                arguments = listOf(navArgument("imageId") { type = NavType.LongType }),
+            ) { entry ->
+                val id = entry.arguments?.getLong("imageId") ?: 0L
+                ImageDetailScreen(
+                    imageId = id,
+                    favoritesOnly = true,
                     onBack = { navController.popBackStack() },
                 )
             }

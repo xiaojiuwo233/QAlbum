@@ -5,6 +5,7 @@ import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.db.entity.CleanupBatchEntity
 import com.xjw.qalbum.data.db.entity.CleanupCandidateEntity
 import com.xjw.qalbum.data.db.entity.ImageEntity
+import com.xjw.qalbum.service.analysis.CleanupSignals
 import timber.log.Timber
 
 /**
@@ -105,7 +106,8 @@ class CleanupRecommender(
         img.isCorrupt -> "损坏"
         img.isBlank -> "空白/纯色"
         img.duplicateGroupId != null && !img.isDuplicateBest -> "重复"
-        img.width > 0 && img.width < 100 && img.height < 100 -> "极低分辨率"
+        CleanupSignals.isVeryLowResolution(img) -> "极低分辨率"
+        CleanupSignals.isLowResolution(img) -> "低分辨率"
         (img.blurScore ?: 1000f) < 100f -> "模糊"
         img.size <= 4096 -> "极小文件"
         else -> "其他"
