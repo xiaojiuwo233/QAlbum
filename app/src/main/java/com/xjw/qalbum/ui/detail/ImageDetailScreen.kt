@@ -29,7 +29,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
@@ -334,7 +333,6 @@ private fun ImmersivePhotoViewer(
         ) {
             DetailsSheet(
                 image = state.image,
-                variants = state.variants,
                 ocr = state.ocr,
                 onClose = { detailsVisible = false },
             )
@@ -530,7 +528,6 @@ private fun DeleteConfirmDialog(
 @Composable
 private fun DetailsSheet(
     image: ImageEntity,
-    variants: List<ImageEntity>,
     ocr: OcrTextEntity?,
     onClose: () -> Unit,
 ) {
@@ -586,18 +583,6 @@ private fun DetailsSheet(
             ocr?.takeIf { it.text.isNotBlank() }?.let { text ->
                 item { OcrBlock(text) }
             }
-            if (variants.size > 1) {
-                item {
-                    Text(
-                        "同源变体（${variants.size} 个）",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                }
-                items(variants, key = { it.id }) { variant ->
-                    VariantRow(variant, isPrimary = variant.id == image.id)
-                }
-            }
         }
     }
 }
@@ -623,9 +608,6 @@ private fun MetadataBlock(image: ImageEntity) {
         InfoRow("修改时间", formatTime(image.mtime))
         InfoRow("首次扫描", formatTime(image.firstSeen))
         InfoRow("路径", image.path)
-        image.variantGroup?.let {
-            InfoRow("变体组", "#$it" + if (image.isVariantPrimary) "（主图）" else "")
-        }
         image.duplicateGroupId?.let {
             InfoRow("重复组", "#$it")
         }
@@ -666,48 +648,6 @@ private fun OcrBlock(ocr: OcrTextEntity) {
             color = MaterialTheme.colorScheme.onSurface,
             maxLines = 12,
         )
-    }
-}
-
-@Composable
-private fun VariantRow(image: ImageEntity, isPrimary: Boolean) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .background(
-                if (isPrimary) MaterialTheme.colorScheme.primaryContainer
-                else MaterialTheme.colorScheme.surfaceContainer,
-            )
-            .padding(10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        val context = LocalContext.current
-        Box(
-            modifier = Modifier
-                .size(54.dp)
-                .clip(RoundedCornerShape(10.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant),
-        ) {
-            AsyncImage(
-                model = ImageRequest.Builder(context).data(ImageEntityModel(image)).crossfade(true).build(),
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize(),
-            )
-        }
-        Spacer(Modifier.size(12.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(image.sourceType, style = MaterialTheme.typography.titleSmall)
-            Text(
-                "${formatBytes(image.size)} · ${if (image.width > 0) "${image.width} x ${image.height}" else "尺寸待解析"}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        if (isPrimary) {
-            AssistChip(onClick = {}, label = { Text("主图") })
-        }
     }
 }
 

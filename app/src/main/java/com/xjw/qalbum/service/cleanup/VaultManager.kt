@@ -16,7 +16,7 @@ import java.io.File
 /**
  * 保险箱
  *
- * 与隔离区的区别：
+ * 与回收站的区别：
  * - 保险箱保存的是"用户主动想保留"的图片
  * - 内容会**复制**到 App 私有目录 `filesDir/vault/{category}/`（不动 chatpic 原文件）
  * - 同时把 `is_protected = true`，让评分引擎永远不会推荐它被删除

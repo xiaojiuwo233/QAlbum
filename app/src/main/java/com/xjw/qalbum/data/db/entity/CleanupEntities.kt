@@ -32,7 +32,7 @@ data class CleanupCandidateEntity(
     @ColumnInfo(name = "user_decision") val userDecision: String? = null,
 )
 
-/** 隔离区：被"删除"的图片实际上是被移动到这里，可恢复 */
+/** 回收站：被"删除"的图片实际上是被移动到这里，可恢复 */
 @Entity(tableName = "quarantine")
 data class QuarantineEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,

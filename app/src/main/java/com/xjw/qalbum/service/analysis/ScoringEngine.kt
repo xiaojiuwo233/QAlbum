@@ -56,7 +56,6 @@ object ScoringEngine {
 
         // ---- 强信号 ----
         if (image.duplicateGroupId != null && !image.isDuplicateBest) score += 0.45f
-        if (image.sourceType == "chatthumb") score += 0.20f
         if (image.isCorrupt) score += 0.55f
         if (image.isBlank) score += 0.40f
 

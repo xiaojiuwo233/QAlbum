@@ -16,7 +16,7 @@ import kotlinx.coroutines.launch
 /**
  * 图片详情页 ViewModel
  *
- * 加载主图 + 变体组成员 + OCR 文本；
+ * 加载当前图片 + OCR 文本；
  * 提供"加入保险箱 / 解除保护 / 导出到相册 / 标记保留" 几个动作。
  */
 class ImageDetailViewModel(
@@ -54,13 +54,11 @@ class ImageDetailViewModel(
     private suspend fun loadAtIndex(timeline: List<ImageEntity>, index: Int) {
         val timelineImage = timeline[index]
         val image = imageRepository.getById(timelineImage.id) ?: timelineImage
-        val variants = image.variantGroup?.let { imageRepository.getVariants(it) } ?: listOf(image)
         val ocr = imageRepository.getOcr(image.id)
         _state.value = ImageDetailState.Ready(
             image = image,
             timeline = timeline,
             currentIndex = index,
-            variants = variants,
             ocr = ocr,
         )
     }
@@ -133,7 +131,6 @@ sealed class ImageDetailState {
         val image: ImageEntity,
         val timeline: List<ImageEntity>,
         val currentIndex: Int,
-        val variants: List<ImageEntity>,
         val ocr: OcrTextEntity? = null,
     ) : ImageDetailState()
 }

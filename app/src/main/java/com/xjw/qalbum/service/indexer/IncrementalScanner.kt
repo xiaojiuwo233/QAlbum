@@ -26,7 +26,6 @@ import timber.log.Timber
 class IncrementalScanner(
     private val accessManager: AccessManager,
     private val imageDao: ImageDao,
-    private val indexer: ImageIndexer,
 ) {
 
     suspend fun scan(chatpicRoot: String): Flow<ScanProgress> = flow {
@@ -81,8 +80,8 @@ class IncrementalScanner(
             dbSnapshot[path]?.let { imageDao.touchLastSeen(it.id, now) }
         }
 
-        // 6. 新增变体组（只对新增的部分做增量分组）
-        indexer.buildVariantGroups()
+        // 6. 历史/新增缩略图收进独立回收站
+        imageDao.markThumbnailsAsTrash()
 
         emit(ScanProgress.Done(processed))
     }

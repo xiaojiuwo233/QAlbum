@@ -15,7 +15,7 @@ import timber.log.Timber
 import java.io.File
 
 /**
- * 隔离区（回收站）
+ * 回收站
  *
  * 删除操作的实际语义：把文件从 chatpic 移动到 App 私有目录 `filesDir/quarantine/`，
  * 并保留一份缩略图（让用户事后查看回收站时不需要再次读 chatpic）。
@@ -30,7 +30,7 @@ class QuarantineManager(
     private val settings: SettingsRepository,
 ) {
 
-    /** 隔离区根目录 */
+    /** 回收站根目录 */
     private val rootDir: File by lazy {
         File(context.filesDir, "quarantine").apply { if (!exists()) mkdirs() }
     }
@@ -40,127 +40,91 @@ class QuarantineManager(
         File(rootDir, "thumb").apply { if (!exists()) mkdirs() }
     }
 
-    /**
-     * 把指定图片移到隔离区。
-     * 若该图属于变体组，会把整组所有变体一起处理（保持"逻辑图片"一致性）。
-     */
+    /** 把指定图片移到回收站。 */
     suspend fun quarantine(imageId: Long, reason: String): Boolean = withContext(Dispatchers.IO) {
         val image = imageDao.getById(imageId) ?: return@withContext false
         val provider = accessManager.current()
         if (!provider.isAvailable()) return@withContext false
 
-        // 同变体组所有成员一起处理
-        val targets = image.variantGroup
-            ?.let { imageDao.getByVariantGroup(it) }
-            ?: listOf(image)
-
-        // 缩略图取主图
-        val primary = targets.firstOrNull { it.isVariantPrimary } ?: image
-        val thumbPath = runCatching { generateThumbnail(provider, primary.path, primary.id) }
+        val thumbPath = runCatching { generateThumbnail(provider, image.path, image.id) }
             .getOrNull()
 
         val retentionDays = settings.quarantineRetentionDays.first()
         val expiresAt = System.currentTimeMillis() + retentionDays * ONE_DAY_MS
-        var totalSize = 0L
-        val originalPaths = mutableListOf<String>()
 
-        for (variant in targets) {
-            val dest = File(rootDir, "${variant.id}_${variant.sourceType}_${variant.filename}")
-            val moved = provider.moveFile(variant.path, dest.absolutePath)
-            if (!moved) {
-                Timber.w("Quarantine moveFile failed for ${variant.path}")
-                // 尝试"复制 + 删源"的回退策略
-                try {
-                    provider.readFile(variant.path).use { input ->
-                        dest.outputStream().use { output -> input.copyTo(output) }
-                    }
-                    provider.deleteFile(variant.path)
-                } catch (t: Throwable) {
-                    Timber.e(t, "Quarantine fallback copy failed for ${variant.path}")
-                    continue
+        val dest = File(rootDir, "${image.id}_${image.sourceType}_${image.filename}")
+        val moved = provider.moveFile(image.path, dest.absolutePath)
+        if (!moved) {
+            Timber.w("Quarantine moveFile failed for ${image.path}")
+            try {
+                provider.readFile(image.path).use { input ->
+                    dest.outputStream().use { output -> input.copyTo(output) }
                 }
+                provider.deleteFile(image.path)
+            } catch (t: Throwable) {
+                Timber.e(t, "Quarantine fallback copy failed for ${image.path}")
+                return@withContext false
             }
-            imageDao.updateStatus(variant.id, "quarantined")
-            originalPaths.add(variant.path)
-            totalSize += variant.size
         }
+        imageDao.updateStatus(image.id, "quarantined")
 
         cleanupDao.insertQuarantine(
             QuarantineEntity(
                 imageId = imageId,
-                originalPath = originalPaths.joinToString("|"),
+                originalPath = image.path,
                 quarantinePath = rootDir.absolutePath,
                 thumbnailPath = thumbPath,
                 reason = reason,
                 ocrSummary = null,    // Phase 3 OCR 接入后填充
-                size = totalSize,
+                size = image.size,
                 quarantinedAt = System.currentTimeMillis(),
                 expiresAt = expiresAt,
             )
         )
-        Timber.i("Quarantine: $imageId moved, ${targets.size} variants, size=$totalSize")
+        Timber.i("Quarantine: $imageId moved, size=${image.size}")
         true
     }
 
-    /** 直接从原位置永久删除，不进入隔离区。 */
+    /** 直接从原位置永久删除，不进入回收站。 */
     suspend fun deletePermanently(imageId: Long): Boolean = withContext(Dispatchers.IO) {
         val image = imageDao.getById(imageId) ?: return@withContext false
         val provider = accessManager.current()
         if (!provider.isAvailable()) return@withContext false
 
-        val targets = image.variantGroup
-            ?.let { imageDao.getByVariantGroup(it) }
-            ?: listOf(image)
-
-        var deletedAny = false
-        for (variant in targets) {
-            val deleted = runCatching { provider.deleteFile(variant.path) }.getOrDefault(false)
-            if (deleted) {
-                deletedAny = true
-                imageDao.updateStatus(variant.id, "deleted")
-            } else {
-                Timber.w("Permanent delete failed for ${variant.path}")
-            }
+        val deleted = runCatching { provider.deleteFile(image.path) }.getOrDefault(false)
+        if (deleted) {
+            imageDao.updateStatus(image.id, "deleted")
+        } else {
+            Timber.w("Permanent delete failed for ${image.path}")
         }
-        deletedAny
+        deleted
     }
 
-    /** 从隔离区恢复（把所有变体移回原 chatpic 路径） */
+    /** 从回收站恢复。 */
     suspend fun restore(quarantineId: Long): Boolean = withContext(Dispatchers.IO) {
         val record = cleanupDao.getQuarantineById(quarantineId) ?: return@withContext false
         val provider = accessManager.current()
         if (!provider.isAvailable()) return@withContext false
 
         val image = imageDao.getById(record.imageId) ?: return@withContext false
-        val targets = image.variantGroup
-            ?.let { imageDao.getByVariantGroup(it) }
-            ?: listOf(image)
-
-        for (variant in targets) {
-            val src = File(rootDir, "${variant.id}_${variant.sourceType}_${variant.filename}")
-            if (!src.exists()) continue
-            val ok = provider.moveFile(src.absolutePath, variant.path)
-            if (ok) {
-                imageDao.updateStatus(variant.id, "active")
-            }
+        val src = File(rootDir, "${image.id}_${image.sourceType}_${image.filename}")
+        if (!src.exists()) return@withContext false
+        val ok = provider.moveFile(src.absolutePath, image.path)
+        if (ok) {
+            imageDao.updateStatus(image.id, "active")
         }
         record.thumbnailPath?.let { File(it).delete() }
-        cleanupDao.deleteQuarantine(quarantineId)
-        true
+        if (ok) cleanupDao.deleteQuarantine(quarantineId)
+        ok
     }
 
-    /** 立即从隔离区永久删除（不可恢复） */
+    /** 立即从回收站永久删除（不可恢复） */
     suspend fun purge(quarantineId: Long): Boolean = withContext(Dispatchers.IO) {
         val record = cleanupDao.getQuarantineById(quarantineId) ?: return@withContext false
         val image = imageDao.getById(record.imageId) ?: return@withContext false
-        val targets = image.variantGroup
-            ?.let { imageDao.getByVariantGroup(it) }
-            ?: listOf(image)
-        for (variant in targets) {
-            val src = File(rootDir, "${variant.id}_${variant.sourceType}_${variant.filename}")
-            src.delete()
-            imageDao.updateStatus(variant.id, "deleted")
-        }
+        val src = File(rootDir, "${image.id}_${image.sourceType}_${image.filename}")
+        src.delete()
+        imageDao.updateStatus(image.id, "deleted")
         record.thumbnailPath?.let { File(it).delete() }
         cleanupDao.deleteQuarantine(quarantineId)
         true

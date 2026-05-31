@@ -24,7 +24,7 @@ import timber.log.Timber
  * ```
  * 关键策略：
  * - 文件**无扩展名**，必须用 [MagicBytesDetector] 检测格式
- * - 同一 `cache_key` 跨 source_type 出现的记录组成「变体组」（同图不同分辨率）
+ * - chatthumb 缩略图只进入缩略图入口，不参与图库、OCR、AI 或重复分析
  * - 批量写入（每 500 条一个 transaction），保证 10 万张图也能稳定完成
  *
  * 真正的"图片分析"（hash / OCR / AI）在后续 Phase 中完成，本类只负责"发现并入库"。
@@ -91,36 +91,9 @@ class ImageIndexer(
         }
         Timber.i("Indexer: indexed ${all.size - skipped} images, skipped $skipped non-image files")
 
-        // ---- Step 3: 建立变体组 ----
-        buildVariantGroups()
+        // ---- Step 3: 历史数据中的缩略图也收进缩略图入口 ----
+        imageDao.markThumbnailsAsTrash()
         emit(ScanProgress.Done(all.size - skipped))
-    }
-
-    /**
-     * 变体组建立：把跨 source_type 共享 cache_key 的记录归到同一 variant_group，
-     * 并按优先级（raw > img > thumb > temp）挑出主图。
-     */
-    suspend fun buildVariantGroups() {
-        val keys = imageDao.cacheKeysWithMultipleEntries()
-        if (keys.isEmpty()) {
-            Timber.i("Variant grouping: no shared cache_keys")
-            return
-        }
-
-        var nextGroupId = imageDao.maxVariantGroupId() + 1
-        var grouped = 0
-        for (key in keys) {
-            val members = imageDao.getByCacheKey(key)
-            if (members.size <= 1) continue
-            // 主图优先级：chatraw > chatimg > chatthumb > temp
-            val primary = members.maxByOrNull { SOURCE_PRIORITY[it.sourceType] ?: 0 } ?: members.first()
-            members.forEach { m ->
-                imageDao.assignVariant(m.id, nextGroupId, isPrimary = m.id == primary.id)
-            }
-            nextGroupId++
-            grouped += members.size
-        }
-        Timber.i("Variant grouping: assigned $grouped rows into ${nextGroupId - 1} groups")
     }
 
     /**
@@ -165,14 +138,6 @@ class ImageIndexer(
     companion object {
         /** 扫描的子目录，按优先级排列 */
         val SOURCE_DIRS = listOf("chatimg", "chatraw", "chatthumb", "temp")
-
-        /** 同一变体组内的主图优先级 */
-        val SOURCE_PRIORITY = mapOf(
-            "chatraw" to 3,
-            "chatimg" to 2,
-            "chatthumb" to 1,
-            "temp" to 0,
-        )
 
         const val BATCH_SIZE = 500
     }

@@ -39,6 +39,13 @@
         tools:targetApi="34">
 
         <activity
+            android:name=".ThumbnailTrashActivity"
+            android:exported="false"
+            android:label="缩略图"
+            android:parentActivityName=".MainActivity"
+            android:theme="@style/Theme.QAlbum" />
+
+        <activity
             android:name=".MainActivity"
             android:exported="true"
             android:label="@string/app_name"

@@ -18,30 +18,31 @@ class DashboardViewModel(
     private val cleanupDao: CleanupDao,
 ) : ViewModel() {
 
-    private data class CoreStats(val physical: Int, val logical: Int, val totalSize: Long)
+    private data class CoreStats(val imageCount: Int, val totalSize: Long)
 
     val uiState: StateFlow<DashboardUiState> = combine(
         combine(
-            imageRepository.observePhysicalCount(),
-            imageRepository.observeLogicalCount(),
+            imageRepository.observeImageCount(),
             imageRepository.observeTotalSize(),
-        ) { physical, logical, totalSize -> CoreStats(physical, logical, totalSize) },
+        ) { imageCount, totalSize -> CoreStats(imageCount, totalSize) },
         combine(
             imageRepository.observeSourceBreakdown(),
             imageRepository.observeAnalysisProgress(),
         ) { breakdown, analysis -> breakdown to analysis },
         imageRepository.observeImageHealth(),
         cleanupDao.observeQuarantineStats(),
-    ) { core, (breakdown, analysis), health, quarantine ->
+        imageRepository.observeThumbnailTrashSummary(),
+    ) { core, (breakdown, analysis), health, quarantine, thumbnailTrash ->
         DashboardUiState(
-            physicalCount = core.physical,
-            logicalCount = core.logical,
+            imageCount = core.imageCount,
             totalSizeBytes = core.totalSize,
             breakdown = breakdown,
             analysisProgress = analysis,
             health = health,
             quarantineCount = quarantine.count,
             quarantineBytes = quarantine.bytes,
+            thumbnailTrashCount = thumbnailTrash.count,
+            thumbnailTrashBytes = thumbnailTrash.bytes,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -58,12 +59,13 @@ class DashboardViewModel(
 }
 
 data class DashboardUiState(
-    val physicalCount: Int = 0,
-    val logicalCount: Int = 0,
+    val imageCount: Int = 0,
     val totalSizeBytes: Long = 0L,
     val breakdown: List<ImageDao.SourceBreakdownRow> = emptyList(),
-    val analysisProgress: ImageDao.AnalysisProgressRow = ImageDao.AnalysisProgressRow(0, 0, 0, 0, 0, 0),
+    val analysisProgress: ImageDao.AnalysisProgressRow = ImageDao.AnalysisProgressRow(0, 0, 0, 0, 0),
     val health: ImageDao.ImageHealthRow = ImageDao.ImageHealthRow(0, 0, 0, 0, 0, 0L),
     val quarantineCount: Int = 0,
     val quarantineBytes: Long = 0L,
+    val thumbnailTrashCount: Int = 0,
+    val thumbnailTrashBytes: Long = 0L,
 )

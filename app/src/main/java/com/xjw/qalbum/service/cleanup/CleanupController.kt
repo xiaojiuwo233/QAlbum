@@ -2,6 +2,7 @@ package com.xjw.qalbum.service.cleanup
 
 import com.xjw.qalbum.data.db.dao.CleanupDao
 import com.xjw.qalbum.data.db.entity.CleanupBatchEntity
+import com.xjw.qalbum.data.db.entity.CleanupCandidateEntity
 import com.xjw.qalbum.data.db.entity.QuarantineEntity
 import kotlinx.coroutines.flow.Flow
 
@@ -9,7 +10,7 @@ import kotlinx.coroutines.flow.Flow
  * 清理流程的统一外观接口（给 ViewModel 用）
  *
  * - 生成清理批次
- * - 列出隔离区
+ * - 列出回收站
  * - 执行 / 取消批次
  */
 class CleanupController(
@@ -29,6 +30,17 @@ class CleanupController(
             if (candidate.userDecision == "keep") continue
             val ok = quarantineManager.quarantine(candidate.imageId, candidate.reason)
             if (ok) moved++
+        }
+        return moved
+    }
+
+    suspend fun listCandidates(batchId: Long): List<CleanupCandidateEntity> =
+        cleanupDao.getCandidates(batchId)
+
+    suspend fun moveToTrash(items: List<Pair<Long, String>>): Int {
+        var moved = 0
+        for ((imageId, reason) in items) {
+            if (quarantineManager.quarantine(imageId, reason)) moved++
         }
         return moved
     }

@@ -75,7 +75,7 @@ class SettingsRepository(private val context: Context) {
         ds.edit { it[Keys.AI_EMBEDDING_MODEL] = model }
     }
 
-    // ---- 隔离区保留时长 ----
+    // ---- 回收站保留时长 ----
 
     val quarantineRetentionDays: Flow<Int> = ds.data.map { it[Keys.QUARANTINE_DAYS] ?: 30 }
 

@@ -10,17 +10,13 @@ import timber.log.Timber
  * 1. **精确重复**：xxHash 完全相同 —— 一定是同一个内容
  * 2. **视觉相似**：pHash 距离 < 阈值 —— 不同文件但内容近似
  *
- * 重要：**重复组**与**变体组**是两个独立维度。
- * - 变体组：同一 `cache_key` 跨 chatimg/chatraw/chatthumb 出现，表示"同一张图的不同分辨率"
- * - 重复组：不同 cache_key 但内容相同/相似，表示"不同来源的同一张图"
- *
- * 排除规则：同变体组内的多个文件**不**参与"重复检测"——它们本来就是同一张图。
+ * chatthumb 缩略图已在 DAO 层排除；这里仅聚类主图库里的真实图片记录。
  */
 class DuplicateDetector(private val imageDao: ImageDao) {
 
     /**
      * 基于 xxHash 做精确重复聚类
-     * - 同一 xxhash 的图片视为重复组（排除同变体组内的）
+     * - 同一 xxhash 的图片视为重复组
      * - 主图按 (像素数, size) 取最大
      */
     suspend fun clusterExact() {
@@ -36,11 +32,8 @@ class DuplicateDetector(private val imageDao: ImageDao) {
             val ids = row.ids.split(',').mapNotNull { it.toLongOrNull() }
             if (ids.size <= 1) continue
 
-            // 把同一 variant_group 视为单个逻辑图，过滤后再判定
             val members = ids.mapNotNull { imageDao.getById(it) }
-            val unique = members
-                .distinctBy { it.variantGroup ?: -it.id }   // 同变体组合并；无变体组则用自身 id
-            if (unique.size <= 1) continue   // 同变体组内的多文件不算"重复"
+            if (members.size <= 1) continue
 
             val best = members.maxByOrNull { it.width.toLong() * it.height * 1000 + it.size }!!
             members.forEach { m ->
@@ -53,7 +46,7 @@ class DuplicateDetector(private val imageDao: ImageDao) {
     }
 
     /**
-     * 基于 pHash 做视觉相似聚类（仅对每个变体组的主图）
+     * 基于 pHash 做视觉相似聚类
      * 用"高 16 位分桶"做近邻初筛，再桶内两两比较，避免 O(N²)
      */
     suspend fun clusterVisual(threshold: Int = 10) {

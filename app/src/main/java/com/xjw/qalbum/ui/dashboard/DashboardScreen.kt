@@ -111,8 +111,6 @@ fun DashboardScreen(
         ) {
             MetricsGrid(state)
             StorageBreakdownCard(state.breakdown, state.totalSizeBytes)
-            AnalysisPipelineCard(state.analysisProgress)
-            ImageHealthCard(state)
             ScanCard(
                 running = running,
                 progress = progress,
@@ -120,6 +118,8 @@ fun DashboardScreen(
                 onFull = viewModel::startFullScan,
                 onCancel = viewModel::cancelScan,
             )
+            AnalysisPipelineCard(state.analysisProgress)
+            ImageHealthCard(state)
         }
     }
 }
@@ -128,22 +128,11 @@ fun DashboardScreen(
 
 @Composable
 private fun MetricsGrid(state: DashboardUiState) {
-    val cacheCount = state.breakdown
-        .filter { it.source in listOf("chatimg", "chatraw") }
-        .sumOf { it.count }
-    val cacheBytes = state.breakdown
-        .filter { it.source in listOf("chatimg", "chatraw") }
-        .sumOf { it.bytes }
+    val cachedThumbCount = state.thumbnailTrashCount
+    val cachedThumbBytes = state.thumbnailTrashBytes
 
-    val thumbCount = state.breakdown
-        .filter { it.source == "chatthumb" }
-        .sumOf { it.count }
-    val thumbBytes = state.breakdown
-        .filter { it.source == "chatthumb" }
-        .sumOf { it.bytes }
-
-    val cleanableCount = thumbCount + state.quarantineCount
-    val cleanableBytes = thumbBytes + state.quarantineBytes
+    val cleanableCount = state.thumbnailTrashCount + state.quarantineCount
+    val cleanableBytes = state.thumbnailTrashBytes + state.quarantineBytes
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Row(
@@ -152,19 +141,18 @@ private fun MetricsGrid(state: DashboardUiState) {
         ) {
             MetricCard(
                 icon = Icons.Outlined.Image,
-                value = formatCount(state.logicalCount),
+                value = formatCount(state.imageCount),
                 label = "总图片",
                 containerColor = MaterialTheme.colorScheme.primaryContainer,
                 contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
                 modifier = Modifier.weight(1f),
             )
             MetricCard(
-                icon = Icons.Outlined.Folder,
-                value = formatCount(cacheCount),
-                label = "缓存图片",
-                subtitle = if (cacheBytes > 0) formatBytes(cacheBytes) else null,
-                containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                icon = Icons.Outlined.Storage,
+                value = formatBytes(state.totalSizeBytes),
+                label = "占用空间",
+                containerColor = MaterialTheme.colorScheme.tertiaryContainer,
+                contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
                 modifier = Modifier.weight(1f),
             )
         }
@@ -173,11 +161,12 @@ private fun MetricsGrid(state: DashboardUiState) {
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             MetricCard(
-                icon = Icons.Outlined.Storage,
-                value = formatBytes(state.totalSizeBytes),
-                label = "占用空间",
-                containerColor = MaterialTheme.colorScheme.tertiaryContainer,
-                contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                icon = Icons.Outlined.Folder,
+                value = formatCount(cachedThumbCount),
+                label = "缓存图片",
+                subtitle = if (cachedThumbBytes > 0) formatBytes(cachedThumbBytes) else null,
+                containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
                 modifier = Modifier.weight(1f),
             )
             MetricCard(
@@ -399,8 +388,7 @@ private fun LegendItem(
 
 @Composable
 private fun AnalysisPipelineCard(progress: ImageDao.AnalysisProgressRow) {
-    val totalPhysical = progress.totalPhysical.coerceAtLeast(1)
-    val totalLogical = progress.totalLogical.coerceAtLeast(1)
+    val totalImages = progress.totalImages.coerceAtLeast(1)
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(20.dp)) {
@@ -417,28 +405,28 @@ private fun AnalysisPipelineCard(progress: ImageDao.AnalysisProgressRow) {
                 PipelineRing(
                     label = "Hash",
                     done = progress.hashDone,
-                    total = totalPhysical,
+                    total = totalImages,
                     color = MaterialTheme.colorScheme.primary,
                     delayIndex = 0,
                 )
                 PipelineRing(
                     label = "OCR",
                     done = progress.ocrDone,
-                    total = totalLogical,
+                    total = totalImages,
                     color = Color(0xFF66BB6A),
                     delayIndex = 1,
                 )
                 PipelineRing(
                     label = "AI",
                     done = progress.aiDone,
-                    total = totalLogical,
+                    total = totalImages,
                     color = Color(0xFFAB47BC),
                     delayIndex = 2,
                 )
                 PipelineRing(
                     label = "向量",
                     done = progress.embeddingDone,
-                    total = totalLogical,
+                    total = totalImages,
                     color = MaterialTheme.colorScheme.tertiary,
                     delayIndex = 3,
                 )
@@ -542,9 +530,9 @@ private fun ProgressRing(
 
 @Composable
 private fun ImageHealthCard(state: DashboardUiState) {
-    val total = state.physicalCount.coerceAtLeast(1)
+    val total = state.imageCount.coerceAtLeast(1)
     val health = state.health
-    val normalCount = (state.physicalCount - health.corrupt - health.blank - health.animated)
+    val normalCount = (state.imageCount - health.corrupt - health.blank - health.animated)
         .coerceAtLeast(0)
 
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -665,7 +653,7 @@ private fun ScanCard(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    "扫描 chatpic",
+                    "扫描图片",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.weight(1f),

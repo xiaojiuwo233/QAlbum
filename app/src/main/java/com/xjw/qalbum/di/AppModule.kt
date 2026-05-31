@@ -15,6 +15,7 @@ import com.xjw.qalbum.service.analysis.DuplicateDetector
 import com.xjw.qalbum.service.cleanup.CleanupController
 import com.xjw.qalbum.service.cleanup.CleanupRecommender
 import com.xjw.qalbum.service.cleanup.QuarantineManager
+import com.xjw.qalbum.service.cleanup.ThumbnailTrashManager
 import com.xjw.qalbum.service.cleanup.VaultManager
 import com.xjw.qalbum.service.indexer.ImageIndexer
 import com.xjw.qalbum.service.indexer.IncrementalScanner
@@ -64,7 +65,7 @@ val appModule = module {
     // ---- 索引服务 ----
 
     single { ImageIndexer(accessManager = get(), imageDao = get()) }
-    single { IncrementalScanner(accessManager = get(), imageDao = get(), indexer = get()) }
+    single { IncrementalScanner(accessManager = get(), imageDao = get()) }
     single { ScanController(settings = get(), indexer = get(), incrementalScanner = get()) }
 
     // ---- 分析 / 清理 / OCR / AI 服务 ----
@@ -105,6 +106,7 @@ val appModule = module {
             settings = get(),
         )
     }
+    single { ThumbnailTrashManager(accessManager = get(), imageDao = get()) }
     single { VaultManager(context = get(), accessManager = get(), imageDao = get()) }
     single { CleanupController(recommender = get(), quarantineManager = get(), cleanupDao = get()) }
 
@@ -147,6 +149,8 @@ val appModule = module {
         com.xjw.qalbum.ui.cleanup.CleanupViewModel(
             cleanupController = get(),
             analysisPipeline = get(),
+            thumbnailTrashManager = get(),
+            imageRepository = get(),
         )
     }
     viewModel {

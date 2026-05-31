@@ -9,12 +9,10 @@ import androidx.room.PrimaryKey
  * 图片索引表 —— QAlbum 的核心实体。
  *
  * 设计要点：
- * - `cache_key`：从 `Cache_{hash}` 文件名中提取的 hash 部分，
- *   同一张图的不同分辨率（chatimg / chatraw / chatthumb）共享该值。
- * - `variant_group` / `is_variant_primary`：基于 cache_key 自动建立的"同源变体组"，
- *   UI 默认以主图代表整组展示。
- * - `duplicate_group_id` / `is_duplicate_best`：基于 xxHash + pHash 检测出的"重复组"，
- *   与变体组是两个独立维度。
+ * - `cache_key`：从 `Cache_{hash}` 文件名中提取的 hash 部分。
+ * - `variant_group` / `is_variant_primary`：仅保留历史 cache_key 变体能力，不再用来匹配缩略图与原图。
+ * - `duplicate_group_id` / `is_duplicate_best`：基于 xxHash + pHash 检测出的"重复组"。
+ * - `status = thumbnail_trash`：chatthumb 缩略图自动进入独立回收站，不参与图库和分析。
  */
 @Entity(
     tableName = "images",

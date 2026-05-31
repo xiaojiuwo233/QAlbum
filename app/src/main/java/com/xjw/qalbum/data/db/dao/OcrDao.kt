@@ -58,7 +58,7 @@ interface OcrDao {
         INNER JOIN ocr_fts ON ocr_fts.rowid = i.id
         WHERE ocr_fts MATCH :query
           AND i.status = 'active'
-          AND (i.variant_group IS NULL OR i.is_variant_primary = 1)
+          AND i.source_type <> 'chatthumb'
         ORDER BY i.mtime DESC
         LIMIT :limit OFFSET :offset
     """)
@@ -76,7 +76,7 @@ interface OcrDao {
         INNER JOIN images i ON i.id = ocr_fts.rowid
         WHERE ocr_fts MATCH :query
           AND i.status = 'active'
-          AND (i.variant_group IS NULL OR i.is_variant_primary = 1)
+          AND i.source_type <> 'chatthumb'
         ORDER BY i.mtime DESC
         LIMIT :limit OFFSET :offset
     """)
@@ -90,6 +90,13 @@ interface OcrDao {
         val mtime: Long,
     )
 
-    @Query("SELECT COUNT(*) FROM ocr_fts WHERE ocr_fts MATCH :query")
+    @Query("""
+        SELECT COUNT(*)
+        FROM ocr_fts
+        INNER JOIN images i ON i.id = ocr_fts.rowid
+        WHERE ocr_fts MATCH :query
+          AND i.status = 'active'
+          AND i.source_type <> 'chatthumb'
+    """)
     suspend fun countMatches(query: String): Int
 }

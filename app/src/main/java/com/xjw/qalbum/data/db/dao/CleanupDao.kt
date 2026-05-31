@@ -34,7 +34,7 @@ interface CleanupDao {
     @Query("SELECT * FROM cleanup_candidates WHERE batch_id = :batchId")
     suspend fun getCandidates(batchId: Long): List<CleanupCandidateEntity>
 
-    // ---- 隔离区 ----
+    // ---- 回收站 ----
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertQuarantine(item: QuarantineEntity): Long

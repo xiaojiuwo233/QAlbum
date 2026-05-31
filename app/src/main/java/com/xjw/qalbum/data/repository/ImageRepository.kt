@@ -44,7 +44,8 @@ class ImageRepository(
     suspend fun getByIds(ids: List<Long>): List<ImageEntity> =
         if (ids.isEmpty()) emptyList() else imageDao.getByIds(ids)
 
-    suspend fun getVariants(groupId: Long): List<ImageEntity> = imageDao.getByVariantGroup(groupId)
+    suspend fun getByDuplicateGroup(groupId: Long): List<ImageEntity> =
+        imageDao.getByDuplicateGroup(groupId)
 
     suspend fun getOcr(imageId: Long): OcrTextEntity? = ocrDao.getByImageId(imageId)
 
@@ -62,10 +63,11 @@ class ImageRepository(
 
     // ---- 仪表盘统计 ----
 
-    fun observePhysicalCount(): Flow<Int> = imageDao.observeActiveCount()
-    fun observeLogicalCount(): Flow<Int> = imageDao.observeLogicalCount()
+    fun observeImageCount(): Flow<Int> = imageDao.observeImageCount()
     fun observeTotalSize(): Flow<Long> = imageDao.observeTotalSize()
     fun observeSourceBreakdown(): Flow<List<ImageDao.SourceBreakdownRow>> = imageDao.observeSourceBreakdown()
     fun observeAnalysisProgress(): Flow<ImageDao.AnalysisProgressRow> = imageDao.observeAnalysisProgress()
     fun observeImageHealth(): Flow<ImageDao.ImageHealthRow> = imageDao.observeImageHealth()
+    fun observeThumbnailTrashSummary(): Flow<ImageDao.ThumbnailTrashSummary> =
+        imageDao.observeThumbnailTrashSummary()
 }

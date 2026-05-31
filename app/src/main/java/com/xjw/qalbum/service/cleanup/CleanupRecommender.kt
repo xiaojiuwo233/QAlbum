@@ -105,7 +105,6 @@ class CleanupRecommender(
         img.isCorrupt -> "损坏"
         img.isBlank -> "空白/纯色"
         img.duplicateGroupId != null && !img.isDuplicateBest -> "重复"
-        img.sourceType == "chatthumb" -> "缩略图副本"
         img.width > 0 && img.width < 100 && img.height < 100 -> "极低分辨率"
         (img.blurScore ?: 1000f) < 100f -> "模糊"
         img.size <= 4096 -> "极小文件"
@@ -113,9 +112,8 @@ class CleanupRecommender(
     }
 
     private fun isRisky(img: ImageEntity): Boolean {
-        // OCR / AI 标签接入后会扩展该判定。Phase 2 简化：把"重复非最优"+"chatthumb"视为低风险，其它都视作中高风险
+        // OCR / AI 标签接入后会扩展该判定。Phase 2 简化：把"重复非最优"视为低风险，其它都视作中高风险
         return !(img.duplicateGroupId != null && !img.isDuplicateBest ||
-            img.sourceType == "chatthumb" ||
             img.isBlank ||
             img.isCorrupt)
     }

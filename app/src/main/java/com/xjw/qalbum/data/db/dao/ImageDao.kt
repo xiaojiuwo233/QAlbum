@@ -13,7 +13,7 @@ import kotlinx.coroutines.flow.Flow
 /**
  * 图片表 DAO
  *
- * Phase 1 重点：扫描 / 变体组 / 时间线分页 / 仪表盘统计
+ * Phase 1 重点：扫描 / 时间线分页 / 仪表盘统计
  * Phase 2 起会补充：xxhash/phash 查询、重复组聚类、模糊度统计等
  */
 @Dao
@@ -22,10 +22,7 @@ interface ImageDao {
     // ---- 写入 ----
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun upsert(image: ImageEntity): Long
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun upsertAll(images: List<ImageEntity>): List<Long>
+    suspend fun insert(image: ImageEntity): Long
 
     @Update
     suspend fun update(image: ImageEntity)
@@ -33,13 +30,84 @@ interface ImageDao {
     @Query("UPDATE images SET status = :status WHERE id = :id")
     suspend fun updateStatus(id: Long, status: String)
 
+    @Query("UPDATE images SET status = 'deleted' WHERE id IN (:ids)")
+    suspend fun markDeleted(ids: List<Long>)
+
     @Query("UPDATE images SET last_seen = :ts WHERE id = :id")
     suspend fun touchLastSeen(id: Long, ts: Long)
+
+    @Query("""
+        UPDATE images
+        SET filename = :filename,
+            parent_dir = :parentDir,
+            source_type = :sourceType,
+            cache_key = :cacheKey,
+            size = :size,
+            mtime = :mtime,
+            last_seen = :lastSeen,
+            mime = :mime,
+            is_animated = :isAnimated,
+            status = CASE
+                WHEN :sourceType = 'chatthumb' AND status != 'deleted' THEN 'thumbnail_trash'
+                WHEN status = 'missing' THEN 'active'
+                ELSE status
+            END,
+            hash_done = CASE WHEN size != :size OR mtime != :mtime THEN 0 ELSE hash_done END,
+            xxhash = CASE WHEN size != :size OR mtime != :mtime THEN NULL ELSE xxhash END,
+            phash = CASE WHEN size != :size OR mtime != :mtime THEN NULL ELSE phash END,
+            blur_score = CASE WHEN size != :size OR mtime != :mtime THEN NULL ELSE blur_score END,
+            width = CASE WHEN size != :size OR mtime != :mtime THEN 0 ELSE width END,
+            height = CASE WHEN size != :size OR mtime != :mtime THEN 0 ELSE height END,
+            is_blank = CASE WHEN size != :size OR mtime != :mtime THEN 0 ELSE is_blank END,
+            is_corrupt = CASE WHEN size != :size OR mtime != :mtime THEN 0 ELSE is_corrupt END,
+            ocr_done = CASE WHEN size != :size OR mtime != :mtime THEN 0 ELSE ocr_done END,
+            ai_done = CASE WHEN size != :size OR mtime != :mtime THEN 0 ELSE ai_done END,
+            embedding_done = CASE WHEN size != :size OR mtime != :mtime THEN 0 ELSE embedding_done END,
+            duplicate_group_id = CASE WHEN size != :size OR mtime != :mtime THEN NULL ELSE duplicate_group_id END,
+            is_duplicate_best = CASE WHEN size != :size OR mtime != :mtime THEN 0 ELSE is_duplicate_best END
+        WHERE path = :path
+    """)
+    suspend fun updateFromScanByPath(
+        path: String,
+        filename: String,
+        parentDir: String,
+        sourceType: String,
+        cacheKey: String,
+        size: Long,
+        mtime: Long,
+        lastSeen: Long,
+        mime: String,
+        isAnimated: Boolean,
+    )
 
     @Transaction
     suspend fun insertBatch(images: List<ImageEntity>) {
         if (images.isEmpty()) return
-        upsertAll(images)
+        images.forEach { image ->
+            val existing = getByPath(image.path)
+            if (existing == null) {
+                insert(
+                    if (image.sourceType == "chatthumb") {
+                        image.copy(status = "thumbnail_trash")
+                    } else {
+                        image
+                    }
+                )
+            } else {
+                updateFromScanByPath(
+                    path = image.path,
+                    filename = image.filename,
+                    parentDir = image.parentDir,
+                    sourceType = image.sourceType,
+                    cacheKey = image.cacheKey,
+                    size = image.size,
+                    mtime = image.mtime,
+                    lastSeen = image.lastSeen,
+                    mime = image.mime,
+                    isAnimated = image.isAnimated,
+                )
+            }
+        }
     }
 
     // ---- 单条 / 路径查询 ----
@@ -62,39 +130,53 @@ interface ImageDao {
         val last_seen: Long,
     )
 
-    // ---- 变体组建立 ----
-
-    /** 找出 cache_key 在多条记录间共享的（跨 chatimg/chatraw/chatthumb） */
-    @Query("""
-        SELECT cache_key FROM images
-        WHERE cache_key <> ''
-        GROUP BY cache_key
-        HAVING COUNT(*) > 1
-    """)
-    suspend fun cacheKeysWithMultipleEntries(): List<String>
-
-    @Query("SELECT * FROM images WHERE cache_key = :cacheKey")
-    suspend fun getByCacheKey(cacheKey: String): List<ImageEntity>
-
-    @Query("SELECT * FROM images WHERE variant_group = :groupId")
-    suspend fun getByVariantGroup(groupId: Long): List<ImageEntity>
-
-    @Query("SELECT IFNULL(MAX(variant_group), 0) FROM images")
-    suspend fun maxVariantGroupId(): Long
-
     @Query("""
         UPDATE images
-        SET variant_group = :groupId, is_variant_primary = :isPrimary
-        WHERE id = :id
+        SET status = 'thumbnail_trash',
+            hash_done = 0,
+            ocr_done = 0,
+            ai_done = 0,
+            embedding_done = 0,
+            variant_group = NULL,
+            is_variant_primary = 0,
+            duplicate_group_id = NULL,
+            is_duplicate_best = 0
+        WHERE source_type = 'chatthumb' AND status NOT IN ('deleted', 'quarantined')
     """)
-    suspend fun assignVariant(id: Long, groupId: Long, isPrimary: Boolean)
+    suspend fun markThumbnailsAsTrash()
+
+    @Query("""
+        SELECT COUNT(*) AS count, IFNULL(SUM(size), 0) AS bytes
+        FROM images
+        WHERE source_type = 'chatthumb' AND status = 'thumbnail_trash'
+    """)
+    fun observeThumbnailTrashSummary(): Flow<ThumbnailTrashSummary>
+
+    @Query("""
+        SELECT * FROM images
+        WHERE source_type = 'chatthumb' AND status = 'thumbnail_trash'
+        ORDER BY mtime DESC, id DESC
+    """)
+    fun observeThumbnailTrash(): Flow<List<ImageEntity>>
+
+    @Query("""
+        SELECT * FROM images
+        WHERE source_type = 'chatthumb' AND status = 'thumbnail_trash'
+        ORDER BY mtime DESC, id DESC
+    """)
+    suspend fun listThumbnailTrash(): List<ImageEntity>
+
+    data class ThumbnailTrashSummary(
+        val count: Int,
+        val bytes: Long,
+    )
 
     // ---- 时间线分页 ----
 
-    /** 时间线视图：默认按 mtime 倒序，变体组合并（同组仅主图出现） */
+    /** 时间线视图：缩略图不进入图库。 */
     @Query("""
         SELECT * FROM images
-        WHERE status = 'active' AND (variant_group IS NULL OR is_variant_primary = 1)
+        WHERE status = 'active' AND source_type <> 'chatthumb'
         ORDER BY mtime DESC, id DESC
     """)
     fun pagingActiveTimeline(): PagingSource<Int, ImageEntity>
@@ -102,33 +184,32 @@ interface ImageDao {
     /** 详情页左右滑动使用同一套时间线排序。 */
     @Query("""
         SELECT * FROM images
-        WHERE status = 'active' AND (variant_group IS NULL OR is_variant_primary = 1)
+        WHERE status = 'active' AND source_type <> 'chatthumb'
         ORDER BY mtime DESC, id DESC
     """)
     suspend fun listActiveTimeline(): List<ImageEntity>
 
-    @Query("SELECT * FROM images ORDER BY mtime DESC LIMIT :limit")
+    @Query("""
+        SELECT * FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb'
+        ORDER BY mtime DESC
+        LIMIT :limit
+    """)
     fun observeRecent(limit: Int = 50): Flow<List<ImageEntity>>
 
     // ---- 仪表盘统计 ----
 
-    /** 物理文件总数（含变体所有副本） */
-    @Query("SELECT COUNT(*) FROM images WHERE status = 'active'")
-    fun observeActiveCount(): Flow<Int>
+    /** 主图库图片数（不含 chatthumb 缩略图） */
+    @Query("SELECT COUNT(*) FROM images WHERE status = 'active' AND source_type <> 'chatthumb'")
+    fun observeImageCount(): Flow<Int>
 
-    /** 逻辑图片数（变体合并后） */
-    @Query("""
-        SELECT COUNT(*) FROM images
-        WHERE status = 'active' AND (variant_group IS NULL OR is_variant_primary = 1)
-    """)
-    fun observeLogicalCount(): Flow<Int>
-
-    @Query("SELECT IFNULL(SUM(size), 0) FROM images WHERE status = 'active'")
+    @Query("SELECT IFNULL(SUM(size), 0) FROM images WHERE status = 'active' AND source_type <> 'chatthumb'")
     fun observeTotalSize(): Flow<Long>
 
     @Query("""
         SELECT source_type AS source, COUNT(*) AS count, IFNULL(SUM(size), 0) AS bytes
-        FROM images WHERE status = 'active'
+        FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb'
         GROUP BY source_type
     """)
     fun observeSourceBreakdown(): Flow<List<SourceBreakdownRow>>
@@ -141,20 +222,19 @@ interface ImageDao {
 
     @Query("""
         SELECT
-            COUNT(*) AS totalPhysical,
+            COUNT(*) AS totalImages,
             IFNULL(SUM(CASE WHEN hash_done = 1 THEN 1 ELSE 0 END), 0) AS hashDone,
-            IFNULL(SUM(CASE WHEN (variant_group IS NULL OR is_variant_primary = 1) THEN 1 ELSE 0 END), 0) AS totalLogical,
-            IFNULL(SUM(CASE WHEN (variant_group IS NULL OR is_variant_primary = 1) AND ocr_done = 1 THEN 1 ELSE 0 END), 0) AS ocrDone,
-            IFNULL(SUM(CASE WHEN (variant_group IS NULL OR is_variant_primary = 1) AND ai_done = 1 THEN 1 ELSE 0 END), 0) AS aiDone,
-            IFNULL(SUM(CASE WHEN (variant_group IS NULL OR is_variant_primary = 1) AND embedding_done = 1 THEN 1 ELSE 0 END), 0) AS embeddingDone
-        FROM images WHERE status = 'active'
+            IFNULL(SUM(CASE WHEN ocr_done = 1 THEN 1 ELSE 0 END), 0) AS ocrDone,
+            IFNULL(SUM(CASE WHEN ai_done = 1 THEN 1 ELSE 0 END), 0) AS aiDone,
+            IFNULL(SUM(CASE WHEN embedding_done = 1 THEN 1 ELSE 0 END), 0) AS embeddingDone
+        FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb'
     """)
     fun observeAnalysisProgress(): Flow<AnalysisProgressRow>
 
     data class AnalysisProgressRow(
-        val totalPhysical: Int,
+        val totalImages: Int,
         val hashDone: Int,
-        val totalLogical: Int,
         val ocrDone: Int,
         val aiDone: Int,
         val embeddingDone: Int,
@@ -168,7 +248,8 @@ interface ImageDao {
             IFNULL(SUM(CASE WHEN is_protected = 1 THEN 1 ELSE 0 END), 0) AS protectedCount,
             COUNT(DISTINCT duplicate_group_id) AS duplicateGroups,
             IFNULL(SUM(CASE WHEN duplicate_group_id IS NOT NULL AND is_duplicate_best = 0 THEN size ELSE 0 END), 0) AS reclaimableBytes
-        FROM images WHERE status = 'active'
+        FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb'
     """)
     fun observeImageHealth(): Flow<ImageHealthRow>
 
@@ -190,18 +271,17 @@ interface ImageDao {
     /** 找出待计算 hash 的活跃图片（按 mtime 倒序，最近的优先） */
     @Query("""
         SELECT * FROM images
-        WHERE status = 'active' AND hash_done = 0
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND hash_done = 0
         ORDER BY mtime DESC
         LIMIT :limit
     """)
     suspend fun pendingHash(limit: Int = 200): List<ImageEntity>
 
-    /** 待做质量分析的主图（仅对主图执行，避免变体重复算） */
+    /** 待做质量分析的图片 */
     @Query("""
         SELECT * FROM images
-        WHERE status = 'active' AND hash_done = 1
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND hash_done = 1
           AND blur_score IS NULL AND width = 0
-          AND (variant_group IS NULL OR is_variant_primary = 1)
         ORDER BY mtime DESC
         LIMIT :limit
     """)
@@ -226,7 +306,7 @@ interface ImageDao {
     @Query("""
         SELECT xxhash AS hash, GROUP_CONCAT(id) AS ids
         FROM images
-        WHERE status = 'active' AND xxhash IS NOT NULL
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND xxhash IS NOT NULL
         GROUP BY xxhash
         HAVING COUNT(*) > 1
     """)
@@ -247,18 +327,23 @@ interface ImageDao {
     """)
     suspend fun assignDuplicate(id: Long, groupId: Long, isBest: Boolean)
 
-    /** 已有 pHash 的主图（每变体组只取主图，避免视觉相似检测重复处理） */
     @Query("""
-        SELECT id, phash, variant_group FROM images
-        WHERE status = 'active' AND phash IS NOT NULL
-          AND (variant_group IS NULL OR is_variant_primary = 1)
+        UPDATE images
+        SET duplicate_group_id = NULL, is_duplicate_best = 0
+        WHERE duplicate_group_id IS NOT NULL OR is_duplicate_best = 1
+    """)
+    suspend fun clearDuplicateAssignments()
+
+    /** 已有 pHash 的图片 */
+    @Query("""
+        SELECT id, phash FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND phash IS NOT NULL
     """)
     suspend fun primaryPhashes(): List<PhashRow>
 
     data class PhashRow(
         val id: Long,
         val phash: Long?,
-        val variant_group: Long?,
     )
 
     @Query("UPDATE images SET delete_score = :score WHERE id = :id")
@@ -267,11 +352,10 @@ interface ImageDao {
     @Query("UPDATE images SET info_score = :score WHERE id = :id")
     suspend fun updateInfoScore(id: Long, score: Float)
 
-    /** 删除分数高于阈值的候选（按变体组主图） */
+    /** 删除分数高于阈值的候选 */
     @Query("""
         SELECT * FROM images
-        WHERE status = 'active' AND delete_score >= :threshold
-          AND (variant_group IS NULL OR is_variant_primary = 1)
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND delete_score >= :threshold
           AND is_protected = 0 AND (user_keep IS NULL OR user_keep = 0)
         ORDER BY delete_score DESC
         LIMIT :limit
@@ -282,7 +366,7 @@ interface ImageDao {
     @Query("""
         SELECT duplicate_group_id AS groupId, COUNT(*) AS count, IFNULL(SUM(size), 0) AS bytes
         FROM images
-        WHERE status = 'active' AND duplicate_group_id IS NOT NULL
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND duplicate_group_id IS NOT NULL
         GROUP BY duplicate_group_id
         ORDER BY count DESC
     """)
@@ -294,7 +378,11 @@ interface ImageDao {
         val bytes: Long,
     )
 
-    @Query("SELECT * FROM images WHERE duplicate_group_id = :groupId ORDER BY is_duplicate_best DESC, size DESC")
+    @Query("""
+        SELECT * FROM images
+        WHERE duplicate_group_id = :groupId AND source_type <> 'chatthumb'
+        ORDER BY is_duplicate_best DESC, size DESC
+    """)
     suspend fun getByDuplicateGroup(groupId: Long): List<ImageEntity>
 
     @Query("UPDATE images SET user_keep = :keep WHERE id = :id")
@@ -303,11 +391,10 @@ interface ImageDao {
     @Query("UPDATE images SET is_protected = :isProtected WHERE id = :id")
     suspend fun setProtected(id: Long, isProtected: Boolean)
 
-    /** 已完成 hash 的主图，分页拉出来用于评分 / 全库再聚合 */
+    /** 已完成 hash 的图片，分页拉出来用于评分 / 全库再聚合 */
     @Query("""
         SELECT * FROM images
-        WHERE status = 'active' AND hash_done = 1
-          AND (variant_group IS NULL OR is_variant_primary = 1)
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND hash_done = 1
           AND id > :afterId
         ORDER BY id
         LIMIT :limit
@@ -316,11 +403,10 @@ interface ImageDao {
 
     // ---- Phase 3：OCR ----
 
-    /** 待 OCR 的主图（仅主图执行，质量分析完成的优先） */
+    /** 待 OCR 的图片（质量分析完成的优先） */
     @Query("""
         SELECT * FROM images
-        WHERE status = 'active' AND ocr_done = 0
-          AND (variant_group IS NULL OR is_variant_primary = 1)
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND ocr_done = 0
           AND is_corrupt = 0
           AND width >= 64 AND height >= 64
         ORDER BY mtime DESC
@@ -333,7 +419,7 @@ interface ImageDao {
 
     @Query("""
         SELECT * FROM images
-        WHERE status = 'active' AND id IN (:ids)
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND id IN (:ids)
     """)
     suspend fun getByIds(ids: List<Long>): List<ImageEntity>
 }

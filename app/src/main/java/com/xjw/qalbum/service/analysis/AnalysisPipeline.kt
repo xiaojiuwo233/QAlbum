@@ -27,9 +27,9 @@ import timber.log.Timber
  *
  * 阶段顺序（每阶段处理 N 条后再切下一阶段，避免一阶段卡死整体进度）：
  * 1. HASH      —— 所有活跃图片：xxHash + pHash
- * 2. QUALITY   —— 主图：宽高 + 模糊度 + 纯色 + 损坏
+ * 2. QUALITY   —— 图片宽高 + 模糊度 + 纯色 + 损坏
  * 3. DUPLICATE —— 全库：xxHash 完全重复 + pHash 视觉相似
- * 4. SCORE     —— 每张主图：computeDeleteScore / computeInfoScore
+ * 4. SCORE     —— 每张图片：computeDeleteScore / computeInfoScore
  *
  * Phase 3+ 会在 SCORE 之前增加 OCR 阶段；Phase 4 增加 AI_TAG / EMBEDDING。
  */
@@ -137,6 +137,7 @@ class AnalysisPipeline(
 
     private suspend fun runDuplicate() {
         _progress.value = AnalysisProgress(AnalysisPhase.DUPLICATE, 0, 0, msg = "聚类中…")
+        imageDao.clearDuplicateAssignments()
         duplicateDetector.clusterExact()
         duplicateDetector.clusterVisual()
         _progress.value = AnalysisProgress(AnalysisPhase.DUPLICATE, 1, 1, msg = "完成")
