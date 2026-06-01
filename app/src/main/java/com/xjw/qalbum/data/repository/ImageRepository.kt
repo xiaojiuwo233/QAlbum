@@ -50,6 +50,10 @@ class ImageRepository(
     suspend fun timelineSnapshot(): List<ImageEntity> = imageDao.listActiveTimeline()
     suspend fun favoriteTimelineSnapshot(): List<ImageEntity> = imageDao.listFavoriteTimeline()
 
+    /** 详情页时间线 id 列表（轻量，支撑左右滑动按需加载） */
+    suspend fun timelineIds(): List<Long> = imageDao.timelineIds()
+    suspend fun favoriteTimelineIds(): List<Long> = imageDao.favoriteTimelineIds()
+
     // ---- 详情 ----
 
     suspend fun getById(id: Long): ImageEntity? = imageDao.getById(id)

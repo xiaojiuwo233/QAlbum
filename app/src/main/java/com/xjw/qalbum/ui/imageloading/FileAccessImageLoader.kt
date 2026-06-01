@@ -93,13 +93,13 @@ fun buildImageLoader(context: Context, accessManager: AccessManager): ImageLoade
         .diskCachePolicy(CachePolicy.ENABLED)
         .memoryCache {
             MemoryCache.Builder()
-                .maxSizePercent(platform, 0.20)  // 内存缓存最多占 20% 可用堆
+                .maxSizePercent(platform, 0.30)  // 内存缓存占 30% 
                 .build()
         }
         .diskCache {
             DiskCache.Builder()
                 .directory(File(context.cacheDir, "image_cache").toOkioPath())
-                .maxSizeBytes(256L * 1024 * 1024) // 256 MB 磁盘缓存
+                .maxSizeBytes(512L * 1024 * 1024) // 512 MB 磁盘缓存：缓解大图库滑动时频繁回读原图（IPC）
                 .build()
         }
         .crossfade(180)

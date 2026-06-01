@@ -58,6 +58,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -123,6 +124,7 @@ fun ImageDetailScreen(
             ImageDetailState.NotFound -> CenteredText("图片不存在或已被清理")
             is ImageDetailState.Ready -> ImmersivePhotoViewer(
                 state = s,
+                entityFor = viewModel::entityFor,
                 onBack = onBack,
                 onPageSelected = viewModel::selectIndex,
                 onToggleFavorite = viewModel::toggleFavorite,
@@ -151,6 +153,7 @@ fun ImageDetailScreen(
 @Composable
 private fun ImmersivePhotoViewer(
     state: ImageDetailState.Ready,
+    entityFor: suspend (Long) -> ImageEntity?,
     onBack: () -> Unit,
     onPageSelected: (Int) -> Unit,
     onToggleFavorite: () -> Unit,
@@ -171,7 +174,7 @@ private fun ImmersivePhotoViewer(
     val springBack = remember { Animatable(0f) }
     val pagerState = rememberPagerState(
         initialPage = state.currentIndex,
-        pageCount = { state.timeline.size },
+        pageCount = { state.ids.size },
     )
 
     LaunchedEffect(state.currentIndex) {
@@ -281,11 +284,12 @@ private fun ImmersivePhotoViewer(
             HorizontalPager(
                 state = pagerState,
                 modifier = Modifier.fillMaxSize(),
-                key = { index -> state.timeline[index].id },
+                key = { index -> state.ids[index] },
             ) { page ->
-                val image = if (page == state.currentIndex) state.image else state.timeline[page]
                 FullscreenPhoto(
-                    image = image,
+                    id = state.ids[page],
+                    fallback = if (page == state.currentIndex) state.current else null,
+                    entityFor = entityFor,
                     onZoomChanged = { zoom ->
                         if (page == state.currentIndex) currentZoom = zoom
                     },
@@ -299,9 +303,9 @@ private fun ImmersivePhotoViewer(
                 modifier = Modifier.align(Alignment.TopCenter),
             ) {
                 TopChrome(
-                    image = state.image,
+                    image = state.current,
                     index = state.currentIndex,
-                    total = state.timeline.size,
+                    total = state.ids.size,
                     onBack = onBack,
                     onOpenExternal = onOpenExternal,
                 )
@@ -314,7 +318,7 @@ private fun ImmersivePhotoViewer(
                 modifier = Modifier.align(Alignment.BottomCenter),
             ) {
                 BottomActions(
-                    image = state.image,
+                    image = state.current,
                     onToggleFavorite = onToggleFavorite,
                     onInfo = {
                         chromeVisible = true
@@ -333,7 +337,7 @@ private fun ImmersivePhotoViewer(
             modifier = Modifier.align(Alignment.BottomCenter),
         ) {
             DetailsSheet(
-                image = state.image,
+                image = state.current,
                 ocr = state.ocr,
                 onClose = { detailsVisible = false },
             )
@@ -357,24 +361,35 @@ private fun ImmersivePhotoViewer(
 
 @Composable
 private fun FullscreenPhoto(
-    image: ImageEntity,
+    id: Long,
+    fallback: ImageEntity?,
+    entityFor: suspend (Long) -> ImageEntity?,
     onZoomChanged: (Float) -> Unit,
 ) {
     val context = LocalContext.current
-    var scale by remember(image.id) { mutableFloatStateOf(1f) }
-    var offset by remember(image.id) { mutableStateOf(Offset.Zero) }
+    // 当前页用 fallback（已加载的 current）立即显示；相邻页按 id 异步取实体
+    val image by produceState<ImageEntity?>(initialValue = fallback, key1 = id) {
+        if (value == null) value = entityFor(id)
+    }
+    var scale by remember(id) { mutableFloatStateOf(1f) }
+    var offset by remember(id) { mutableStateOf(Offset.Zero) }
     LaunchedEffect(scale) { onZoomChanged(scale) }
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        val entity = image
+        if (entity == null) {
+            CircularProgressIndicator(color = Color.White)
+            return@Box
+        }
         AsyncImage(
             model = ImageRequest.Builder(context)
-                .data(ImageEntityModel(image))
+                .data(ImageEntityModel(entity))
                 .crossfade(true)
                 .build(),
-            contentDescription = image.filename,
+            contentDescription = entity.filename,
             contentScale = ContentScale.Fit,
             modifier = Modifier
                 .fillMaxSize()
-                .pointerInput(image.id) {
+                .pointerInput(id) {
                     awaitEachGesture {
                         var lastDistance = 0f
                         var lastCentroid: Offset? = null

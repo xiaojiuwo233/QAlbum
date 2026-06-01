@@ -203,6 +203,25 @@ interface ImageDao {
     """)
     suspend fun listFavoriteTimeline(): List<ImageEntity>
 
+    /**
+     * 详情页时间线：**只取 id**（轻量），用于左右滑动的分页定位。
+     * 绝不能用 listActiveTimeline 那样的 SELECT * 全量装载（会卡死详情页）。
+     */
+    @Query("""
+        SELECT id FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb'
+        ORDER BY mtime DESC, id DESC
+    """)
+    suspend fun timelineIds(): List<Long>
+
+    /** 收藏详情页时间线：只取 id。 */
+    @Query("""
+        SELECT id FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND is_protected = 1
+        ORDER BY mtime DESC, id DESC
+    """)
+    suspend fun favoriteTimelineIds(): List<Long>
+
     @Query("""
         SELECT * FROM images
         WHERE status = 'active' AND source_type <> 'chatthumb'

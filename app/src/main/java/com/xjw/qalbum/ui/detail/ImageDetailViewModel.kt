@@ -16,8 +16,8 @@ import kotlinx.coroutines.launch
 /**
  * 图片详情页 ViewModel
  *
- * 加载当前图片 + OCR 文本；
- * 提供"收藏 / 取消收藏 / 导出到相册 / 删除"几个动作。
+ * 时间线左右滑动只持有**id 列表**（轻量），当前图的完整实体按 index 用 [ImageRepository.getById]
+ * 按需加载 —— 避免一次性 SELECT * 全表装载导致详情页卡死数分钟。
  */
 class ImageDetailViewModel(
     private val imageRepository: ImageRepository,
@@ -35,42 +35,49 @@ class ImageDetailViewModel(
     fun load(imageId: Long, favoritesOnly: Boolean = false) {
         this.favoritesOnly = favoritesOnly
         viewModelScope.launch {
-            val timeline = if (favoritesOnly) {
-                imageRepository.favoriteTimelineSnapshot()
+            val ids = if (favoritesOnly) {
+                imageRepository.favoriteTimelineIds()
             } else {
-                imageRepository.timelineSnapshot()
+                imageRepository.timelineIds()
             }
-            val initialIndex = timeline.indexOfFirst { it.id == imageId }
+            val initialIndex = ids.indexOf(imageId)
             if (initialIndex < 0) {
                 _state.value = ImageDetailState.NotFound
                 return@launch
             }
-            loadAtIndex(timeline, initialIndex)
+            val image = imageRepository.getById(imageId)
+            if (image == null) {
+                _state.value = ImageDetailState.NotFound
+                return@launch
+            }
+            val ocr = imageRepository.getOcr(imageId)
+            _state.value = ImageDetailState.Ready(
+                ids = ids,
+                currentIndex = initialIndex,
+                current = image,
+                ocr = ocr,
+            )
         }
     }
 
     fun selectIndex(index: Int) {
         val ready = _state.value as? ImageDetailState.Ready ?: return
-        if (index == ready.currentIndex || index !in ready.timeline.indices) return
+        if (index == ready.currentIndex || index !in ready.ids.indices) return
         viewModelScope.launch {
-            loadAtIndex(ready.timeline, index)
+            val id = ready.ids[index]
+            val image = imageRepository.getById(id) ?: return@launch
+            val ocr = imageRepository.getOcr(id)
+            // 以最新 state 为基准（挂起期间可能已被其他翻页更新）
+            val latest = _state.value as? ImageDetailState.Ready ?: return@launch
+            _state.value = latest.copy(currentIndex = index, current = image, ocr = ocr)
         }
     }
 
-    private suspend fun loadAtIndex(timeline: List<ImageEntity>, index: Int) {
-        val timelineImage = timeline[index]
-        val image = imageRepository.getById(timelineImage.id) ?: timelineImage
-        val ocr = imageRepository.getOcr(image.id)
-        _state.value = ImageDetailState.Ready(
-            image = image,
-            timeline = timeline,
-            currentIndex = index,
-            ocr = ocr,
-        )
-    }
+    /** 供 HorizontalPager 每页按 id 异步加载图片实体（path/mime 等） */
+    suspend fun entityFor(id: Long): ImageEntity? = imageRepository.getById(id)
 
     fun toggleFavorite() {
-        val image = (_state.value as? ImageDetailState.Ready)?.image ?: return
+        val image = (_state.value as? ImageDetailState.Ready)?.current ?: return
         viewModelScope.launch {
             val next = !image.isFavorite
             imageRepository.setFavorite(image.id, next)
@@ -80,7 +87,7 @@ class ImageDetailViewModel(
     }
 
     fun exportToGallery() {
-        val image = (_state.value as? ImageDetailState.Ready)?.image ?: return
+        val image = (_state.value as? ImageDetailState.Ready)?.current ?: return
         viewModelScope.launch {
             val ok = imageFileManager.exportToGallery(image.id)
             _toast.value = if (ok) "已导出到系统相册（Pictures/QAlbum）" else "导出失败"
@@ -88,7 +95,7 @@ class ImageDetailViewModel(
     }
 
     fun prepareOpenExternal(onReady: (ExternalOpenTarget?) -> Unit) {
-        val image = (_state.value as? ImageDetailState.Ready)?.image ?: return
+        val image = (_state.value as? ImageDetailState.Ready)?.current ?: return
         viewModelScope.launch {
             val target = imageFileManager.prepareExternalView(image.id)
             if (target == null) {
@@ -101,7 +108,7 @@ class ImageDetailViewModel(
     }
 
     fun moveCurrentToTrash(onDone: (Boolean) -> Unit = {}) {
-        val image = (_state.value as? ImageDetailState.Ready)?.image ?: return
+        val image = (_state.value as? ImageDetailState.Ready)?.current ?: return
         viewModelScope.launch {
             val ok = quarantineManager.quarantine(image.id, "用户手动删除")
             _toast.value = if (ok) "已移到回收站" else "移动到回收站失败"
@@ -110,7 +117,7 @@ class ImageDetailViewModel(
     }
 
     fun deleteCurrentPermanently(onDone: (Boolean) -> Unit = {}) {
-        val image = (_state.value as? ImageDetailState.Ready)?.image ?: return
+        val image = (_state.value as? ImageDetailState.Ready)?.current ?: return
         viewModelScope.launch {
             val ok = quarantineManager.deletePermanently(image.id)
             _toast.value = if (ok) "已永久删除" else "永久删除失败"
@@ -127,9 +134,9 @@ sealed class ImageDetailState {
     data object Loading : ImageDetailState()
     data object NotFound : ImageDetailState()
     data class Ready(
-        val image: ImageEntity,
-        val timeline: List<ImageEntity>,
+        val ids: List<Long>,
         val currentIndex: Int,
+        val current: ImageEntity,
         val ocr: OcrTextEntity? = null,
     ) : ImageDetailState()
 }
