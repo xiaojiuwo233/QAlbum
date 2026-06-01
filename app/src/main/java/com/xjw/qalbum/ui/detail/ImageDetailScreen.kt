@@ -143,8 +143,8 @@ fun ImageDetailScreen(
                         }
                     }
                 },
-                onMoveToTrash = { viewModel.moveCurrentToTrash { ok -> if (ok) onBack() } },
-                onDeletePermanently = { viewModel.deleteCurrentPermanently { ok -> if (ok) onBack() } },
+                onMoveToTrash = { viewModel.moveCurrentToTrash(onExhausted = onBack) },
+                onDeletePermanently = { viewModel.deleteCurrentPermanently(onExhausted = onBack) },
             )
         }
     }
@@ -476,7 +476,7 @@ private fun TopChrome(
                 color = Color.White,
             )
             Text(
-                "${index + 1} / $total",
+                "${index + 1}/$total   ${sourceLabel(image.sourceType)}   ${formatSizeCompact(image.size)}",
                 style = MaterialTheme.typography.bodySmall,
                 color = Color.White.copy(alpha = 0.72f),
             )
@@ -747,4 +747,22 @@ private fun formatBytes(bytes: Long): String {
     val exp = (Math.log10(bytes.toDouble()) / Math.log10(1024.0)).toInt().coerceAtMost(units.size - 1)
     val value = bytes.toDouble() / Math.pow(1024.0, exp.toDouble())
     return String.format("%.2f %s", value, units[exp])
+}
+
+/** 来源目录映射成短标签：chatimg→img、chatraw→raw、chatthumb→thumb */
+private fun sourceLabel(sourceType: String): String = when (sourceType) {
+    "chatimg" -> "img"
+    "chatraw" -> "raw"
+    "chatthumb" -> "thumb"
+    else -> sourceType.ifBlank { "其他" }
+}
+
+/** 顶部信息条用的紧凑大小：512 B / 12.3 KB / 1.7 MB */
+private fun formatSizeCompact(bytes: Long): String {
+    if (bytes <= 0) return "0 B"
+    val units = arrayOf("B", "KB", "MB", "GB", "TB")
+    val exp = (Math.log10(bytes.toDouble()) / Math.log10(1024.0)).toInt().coerceAtMost(units.size - 1)
+    if (exp == 0) return "$bytes B"
+    val value = bytes.toDouble() / Math.pow(1024.0, exp.toDouble())
+    return String.format("%.1f %s", value, units[exp])
 }

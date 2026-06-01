@@ -107,22 +107,61 @@ class ImageDetailViewModel(
         }
     }
 
-    fun moveCurrentToTrash(onDone: (Boolean) -> Unit = {}) {
-        val image = (_state.value as? ImageDetailState.Ready)?.current ?: return
+    fun moveCurrentToTrash(onExhausted: () -> Unit = {}) {
+        val ready = _state.value as? ImageDetailState.Ready ?: return
+        val image = ready.current
         viewModelScope.launch {
             val ok = quarantineManager.quarantine(image.id, "用户手动删除")
-            _toast.value = if (ok) "已移到回收站" else "移动到回收站失败"
-            onDone(ok)
+            if (ok) {
+                _toast.value = "已移到回收站"
+                advanceAfterRemoval(ready, image.id, onExhausted)
+            } else {
+                _toast.value = "移动到回收站失败"
+            }
         }
     }
 
-    fun deleteCurrentPermanently(onDone: (Boolean) -> Unit = {}) {
-        val image = (_state.value as? ImageDetailState.Ready)?.current ?: return
+    fun deleteCurrentPermanently(onExhausted: () -> Unit = {}) {
+        val ready = _state.value as? ImageDetailState.Ready ?: return
+        val image = ready.current
         viewModelScope.launch {
             val ok = quarantineManager.deletePermanently(image.id)
-            _toast.value = if (ok) "已永久删除" else "永久删除失败"
-            onDone(ok)
+            if (ok) {
+                _toast.value = "已永久删除"
+                advanceAfterRemoval(ready, image.id, onExhausted)
+            } else {
+                _toast.value = "永久删除失败"
+            }
         }
+    }
+
+    /**
+     * 删除 / 移入回收站成功后：把当前图从时间线移除，跳到**上一张**
+     * （删的是首张则停在新的首张）。若已无图可显示，回调 [onExhausted]（由 UI 返回图库）。
+     */
+    private suspend fun advanceAfterRemoval(
+        ready: ImageDetailState.Ready,
+        removedId: Long,
+        onExhausted: () -> Unit,
+    ) {
+        val newIds = ready.ids.filterNot { it == removedId }
+        if (newIds.isEmpty()) {
+            onExhausted()
+            return
+        }
+        val newIndex = (ready.currentIndex - 1).coerceIn(0, newIds.size - 1)
+        val image = imageRepository.getById(newIds[newIndex])
+        if (image == null) {
+            onExhausted()
+            return
+        }
+        val ocr = imageRepository.getOcr(image.id)
+        _state.value = ImageDetailState.Ready(
+            ids = newIds,
+            currentIndex = newIndex,
+            current = image,
+            ocr = ocr,
+        )
     }
 
     fun consumeToast() {
