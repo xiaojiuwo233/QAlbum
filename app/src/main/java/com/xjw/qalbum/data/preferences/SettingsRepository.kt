@@ -89,6 +89,22 @@ class SettingsRepository(private val context: Context) {
         ds.edit { it[Keys.QUARANTINE_DAYS] = days }
     }
 
+    // ---- 分析（hash/质量/OCR/AI/向量）每次处理上限 + 排序方向 ----
+
+    /** 每次分析最多处理多少张「未完成」图片（各逐图阶段共用此上限） */
+    val analysisLimit: Flow<Int> = ds.data.map { it[Keys.ANALYSIS_LIMIT] ?: DEFAULT_ANALYSIS_LIMIT }
+
+    suspend fun setAnalysisLimit(limit: Int) {
+        ds.edit { it[Keys.ANALYSIS_LIMIT] = limit.coerceIn(MIN_ANALYSIS_LIMIT, MAX_ANALYSIS_LIMIT) }
+    }
+
+    /** 分析顺序：true=从早到晚（mtime 升序），false=从晚到早（降序） */
+    val analysisOldestFirst: Flow<Boolean> = ds.data.map { it[Keys.ANALYSIS_OLDEST_FIRST] ?: true }
+
+    suspend fun setAnalysisOldestFirst(oldestFirst: Boolean) {
+        ds.edit { it[Keys.ANALYSIS_OLDEST_FIRST] = oldestFirst }
+    }
+
     // ---- 清理规则配置 ----
 
     /** 每类清理维度的开关 + 门限；缺省或解析失败回退到 [CleanupConfig.DEFAULT]（平衡档） */
@@ -113,6 +129,10 @@ class SettingsRepository(private val context: Context) {
     companion object {
         const val DEFAULT_CHATPIC_PATH =
             "/storage/emulated/0/Android/data/com.tencent.mobileqq/Tencent/MobileQQ/chatpic"
+
+        const val DEFAULT_ANALYSIS_LIMIT = 500
+        const val MIN_ANALYSIS_LIMIT = 50
+        const val MAX_ANALYSIS_LIMIT = 20_000
     }
 
     private object Keys {
@@ -126,6 +146,8 @@ class SettingsRepository(private val context: Context) {
         val AI_EMBEDDING_MODEL = stringPreferencesKey("ai_embedding_model")
 
         val QUARANTINE_DAYS = intPreferencesKey("quarantine_days")
+        val ANALYSIS_LIMIT = intPreferencesKey("analysis_limit")
+        val ANALYSIS_OLDEST_FIRST = booleanPreferencesKey("analysis_oldest_first")
 
         val CLEANUP_CONFIG = stringPreferencesKey("cleanup_config")
 

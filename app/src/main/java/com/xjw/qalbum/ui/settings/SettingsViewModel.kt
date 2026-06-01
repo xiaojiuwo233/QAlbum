@@ -3,6 +3,9 @@ package com.xjw.qalbum.ui.settings
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.xjw.qalbum.access.AccessManager
+import com.xjw.qalbum.data.db.dao.EmbeddingDao
+import com.xjw.qalbum.data.db.dao.ImageDao
+import com.xjw.qalbum.data.db.dao.OcrDao
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.domain.model.AccessMode
 import com.xjw.qalbum.domain.model.CleanupConfig
@@ -28,6 +31,9 @@ class SettingsViewModel(
     private val settings: SettingsRepository,
     private val accessManager: AccessManager,
     private val scanController: ScanController,
+    private val imageDao: ImageDao,
+    private val ocrDao: OcrDao,
+    private val embeddingDao: EmbeddingDao,
 ) : ViewModel() {
 
     val uiState: StateFlow<SettingsUiState> = combine(
@@ -140,6 +146,40 @@ class SettingsViewModel(
     fun setTinyFileMaxBytes(bytes: Long) = updateCleanupConfig { it.copy(tinyFileMaxBytes = bytes) }
     fun setBlankEnabled(enabled: Boolean) = updateCleanupConfig { it.copy(blankEnabled = enabled) }
     fun setCorruptEnabled(enabled: Boolean) = updateCleanupConfig { it.copy(corruptEnabled = enabled) }
+
+    // ---- 分析上限 / 排序 / 重置 ----
+
+    val analysisLimit: StateFlow<Int> = settings.analysisLimit
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsRepository.DEFAULT_ANALYSIS_LIMIT)
+
+    val analysisOldestFirst: StateFlow<Boolean> = settings.analysisOldestFirst
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
+
+    fun setAnalysisLimit(limit: Int) {
+        viewModelScope.launch { settings.setAnalysisLimit(limit) }
+    }
+
+    fun setAnalysisOldestFirst(oldestFirst: Boolean) {
+        viewModelScope.launch { settings.setAnalysisOldestFirst(oldestFirst) }
+    }
+
+    /** 仅重置本地分析（hash/质量/重复/评分），重新分析时只重跑这些免费的本地阶段 */
+    fun resetLocalAnalysis(onDone: () -> Unit = {}) {
+        viewModelScope.launch {
+            imageDao.resetLocalAnalysis()
+            onDone()
+        }
+    }
+
+    /** 重置全部分析标记（含 OCR/AI/向量），并清空 OCR 文本与向量数据 */
+    fun resetAllAnalysis(onDone: () -> Unit = {}) {
+        viewModelScope.launch {
+            imageDao.resetAllAnalysis()
+            ocrDao.clearAllOcr()
+            embeddingDao.deleteAll()
+            onDone()
+        }
+    }
 }
 
 data class SettingsUiState(

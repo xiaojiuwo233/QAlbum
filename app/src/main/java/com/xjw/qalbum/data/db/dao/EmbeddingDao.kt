@@ -24,6 +24,9 @@ interface EmbeddingDao {
     @Query("DELETE FROM image_embeddings WHERE image_id = :imageId")
     suspend fun deleteByImageId(imageId: Long)
 
+    @Query("DELETE FROM image_embeddings")
+    suspend fun deleteAll()
+
     @Query("SELECT COUNT(*) FROM image_embeddings")
     suspend fun count(): Int
 }

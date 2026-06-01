@@ -151,6 +151,29 @@ interface ImageDao {
     """)
     suspend fun markThumbnailsAsTrash()
 
+    /** 仅重置本地分析（hash/质量/重复/评分）标记与结果；OCR/AI/向量 不动 */
+    @Query("""
+        UPDATE images SET
+            hash_done = 0, xxhash = NULL, phash = NULL,
+            blur_score = NULL, width = 0, height = 0, is_blank = 0, is_corrupt = 0,
+            duplicate_group_id = NULL, is_duplicate_best = 0,
+            delete_score = 0, info_score = 0
+        WHERE source_type <> 'chatthumb' AND status NOT IN ('deleted', 'quarantined')
+    """)
+    suspend fun resetLocalAnalysis()
+
+    /** 重置全部分析标记（含 OCR/AI/向量）；调用方需同时清空 ocr_text / ocr_fts / image_embeddings 表 */
+    @Query("""
+        UPDATE images SET
+            hash_done = 0, xxhash = NULL, phash = NULL,
+            blur_score = NULL, width = 0, height = 0, is_blank = 0, is_corrupt = 0,
+            duplicate_group_id = NULL, is_duplicate_best = 0,
+            delete_score = 0, info_score = 0,
+            ocr_done = 0, ai_done = 0, embedding_done = 0
+        WHERE source_type <> 'chatthumb' AND status NOT IN ('deleted', 'quarantined')
+    """)
+    suspend fun resetAllAnalysis()
+
     @Query("""
         SELECT COUNT(*) AS count, IFNULL(SUM(size), 0) AS bytes
         FROM images
@@ -305,10 +328,10 @@ interface ImageDao {
     @Query("""
         SELECT * FROM images
         WHERE status = 'active' AND source_type <> 'chatthumb' AND hash_done = 0
-        ORDER BY mtime DESC
+        ORDER BY (CASE WHEN :oldestFirst THEN mtime ELSE -mtime END) ASC
         LIMIT :limit
     """)
-    suspend fun pendingHash(limit: Int = 200): List<ImageEntity>
+    suspend fun pendingHash(limit: Int, oldestFirst: Boolean): List<ImageEntity>
 
     /** 待 hash（即待「hash+质量」合并分析）的总数，用于进度条总量 */
     @Query("""
@@ -462,10 +485,30 @@ interface ImageDao {
         WHERE status = 'active' AND source_type <> 'chatthumb' AND ocr_done = 0
           AND is_corrupt = 0
           AND width >= 64 AND height >= 64
-        ORDER BY mtime DESC
+        ORDER BY (CASE WHEN :oldestFirst THEN mtime ELSE -mtime END) ASC
         LIMIT :limit
     """)
-    suspend fun pendingOcr(limit: Int = 50): List<ImageEntity>
+    suspend fun pendingOcr(limit: Int, oldestFirst: Boolean): List<ImageEntity>
+
+    /** 待 AI 打标签：已 hash、未 ai_done、未损坏的主图，按排序取前 limit 张 */
+    @Query("""
+        SELECT * FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb'
+          AND hash_done = 1 AND ai_done = 0 AND is_corrupt = 0
+        ORDER BY (CASE WHEN :oldestFirst THEN mtime ELSE -mtime END) ASC
+        LIMIT :limit
+    """)
+    suspend fun pendingAiTag(limit: Int, oldestFirst: Boolean): List<ImageEntity>
+
+    /** 待生成向量：已 hash、未 embedding_done、未损坏的主图，按排序取前 limit 张 */
+    @Query("""
+        SELECT * FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb'
+          AND hash_done = 1 AND embedding_done = 0 AND is_corrupt = 0
+        ORDER BY (CASE WHEN :oldestFirst THEN mtime ELSE -mtime END) ASC
+        LIMIT :limit
+    """)
+    suspend fun pendingEmbedding(limit: Int, oldestFirst: Boolean): List<ImageEntity>
 
     @Query("UPDATE images SET ocr_done = 1 WHERE id = :id")
     suspend fun markOcrDone(id: Long)

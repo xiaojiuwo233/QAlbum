@@ -2,11 +2,13 @@ package com.xjw.qalbum.ui.settings
 
 import android.content.Intent
 import android.net.Uri
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -18,12 +20,17 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
+import androidx.compose.material.icons.outlined.Analytics
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.CleaningServices
 import androidx.compose.material.icons.outlined.Info
-import androidx.compose.material.icons.outlined.PrivacyTip
+import androidx.compose.material.icons.outlined.Palette
+import androidx.compose.material.icons.outlined.RestartAlt
 import androidx.compose.material.icons.outlined.Security
 import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material.icons.outlined.Visibility
@@ -58,12 +65,14 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.xjw.qalbum.BuildConfig
 import com.xjw.qalbum.R
+import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.domain.model.AccessMode
 import com.xjw.qalbum.domain.model.CleanupConfig
 import com.xjw.qalbum.domain.model.CleanupPreset
@@ -71,25 +80,37 @@ import com.xjw.qalbum.service.ai.AiPrivacyGuard
 import org.koin.androidx.compose.koinViewModel
 
 /**
- * 设置页 —— Phase 0 已实现：
- * 1. 显示当前 Shizuku/Root 状态，引导用户授权
- * 2. 切换访问模式（Shizuku ↔ Root）
- * 3. 配置 chatpic 扫描路径
- * 4. 切换 Material You 动态取色
- * 5. 应用版本信息
- *
- * AI 相关设置（endpoint / apiKey / model）会在 Phase 4 接入。
+ * 设置类别：每个类别一个独立子页面。设置首页只列出这些入口。
  */
+enum class SettingsCategory(
+    val route: String,
+    val title: String,
+    val subtitle: String,
+    val icon: ImageVector,
+) {
+    ACCESS("settings_access", "权限与访问", "Shizuku / Root 授权与切换", Icons.Outlined.Security),
+    SCAN("settings_scan", "扫描", "chatpic 路径与扫描触发", Icons.Outlined.Storage),
+    ANALYSIS("settings_analysis", "分析", "每次上限、顺序与重置标记", Icons.Outlined.Analytics),
+    CLEANUP("settings_cleanup", "清理规则", "各维度开关与门限", Icons.Outlined.CleaningServices),
+    AI("settings_ai", "AI 配置", "Endpoint / Key / 模型", Icons.Outlined.AutoAwesome),
+    PERSONALIZATION("settings_personalization", "个性化", "Material You 动态取色", Icons.Outlined.Palette),
+    ABOUT("settings_about", "关于", "版本信息", Icons.Outlined.Info),
+    ;
+
+    companion object {
+        fun fromRoute(route: String?): SettingsCategory? = entries.firstOrNull { it.route == route }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────
+// 设置首页：二级入口列表
+// ──────────────────────────────────────────────────────────────────
+
 @Composable
 fun SettingsScreen(
     contentPadding: PaddingValues,
-    viewModel: SettingsViewModel = koinViewModel(),
+    onOpenCategory: (SettingsCategory) -> Unit = {},
 ) {
-    val state by viewModel.uiState.collectAsState()
-    val accessStatus by viewModel.accessStatus.collectAsState()
-    val shizukuStatus by rememberShizukuStatus()
-    val context = LocalContext.current
-
     Scaffold(
         topBar = {
             CenterAlignedTopAppBar(
@@ -108,159 +129,391 @@ fun SettingsScreen(
                 .padding(top = topBarPadding.calculateTopPadding())
                 .padding(contentPadding)
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+                .padding(16.dp),
         ) {
-            Spacer(Modifier.height(8.dp))
-
-            // 1. 权限与访问
-            SectionCard(
-                icon = Icons.Outlined.Security,
-                title = stringResource(R.string.settings_section_access),
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
             ) {
-                AccessModeRow(
-                    current = state.accessMode,
-                    onSelect = viewModel::setAccessMode,
-                )
-                HorizontalDivider(Modifier.padding(vertical = 8.dp))
-                ShizukuStatusRow(
-                    status = shizukuStatus,
-                    onRequest = {
-                        requestShizukuPermission()
-                        viewModel.checkAccess()
-                    },
-                    onInstall = {
-                        val intent = Intent(Intent.ACTION_VIEW).apply {
-                            data = Uri.parse("https://shizuku.rikka.app/")
-                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                Column {
+                    SettingsCategory.entries.forEachIndexed { index, category ->
+                        SettingsEntryRow(category = category, onClick = { onOpenCategory(category) })
+                        if (index < SettingsCategory.entries.lastIndex) {
+                            HorizontalDivider(
+                                modifier = Modifier.padding(start = 64.dp),
+                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                            )
                         }
-                        runCatching { context.startActivity(intent) }
-                    },
-                )
-
-                Spacer(Modifier.height(8.dp))
-                Button(
-                    onClick = { viewModel.checkAccess() },
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(stringResource(R.string.settings_test_access))
-                }
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    text = when (accessStatus) {
-                        AccessStatus.Ready -> "✔ ${stringResource(R.string.access_mode_ready)}"
-                        AccessStatus.NotReady -> "✘ ${stringResource(R.string.access_mode_not_ready)}"
-                        AccessStatus.Unknown -> "尚未测试"
-                    },
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = when (accessStatus) {
-                        AccessStatus.Ready -> MaterialTheme.colorScheme.primary
-                        AccessStatus.NotReady -> MaterialTheme.colorScheme.error
-                        else -> MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                )
-            }
-
-            // 2. 扫描路径
-            SectionCard(
-                icon = Icons.Outlined.Storage,
-                title = stringResource(R.string.settings_section_paths),
-            ) {
-                var pathInput by remember(state.chatpicPath) { mutableStateOf(state.chatpicPath) }
-                OutlinedTextField(
-                    value = pathInput,
-                    onValueChange = { pathInput = it },
-                    label = { Text(stringResource(R.string.settings_chatpic_path)) },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    supportingText = {
-                        Text(
-                            "TIM / 国际版 QQ 路径不同，请按需修改。",
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    },
-                )
-                Spacer(Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = {
-                        pathInput = com.xjw.qalbum.data.preferences.SettingsRepository.DEFAULT_CHATPIC_PATH
-                    }) {
-                        Text("恢复默认")
-                    }
-                    Button(onClick = { viewModel.setChatpicPath(pathInput.trim()) }) {
-                        Text("保存")
-                    }
-                }
-                Spacer(Modifier.height(8.dp))
-                val running by viewModel.scanRunning.collectAsState()
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (running) {
-                        OutlinedButton(onClick = viewModel::cancelScan) { Text("取消扫描") }
-                    } else {
-                        OutlinedButton(onClick = viewModel::startIncrementalScan) { Text("增量扫描") }
-                        Button(onClick = viewModel::startFullScan) { Text("全量扫描") }
                     }
                 }
             }
-
-            // 3. 个性化
-            SectionCard(
-                icon = Icons.Outlined.PrivacyTip,
-                title = "个性化",
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Material You 动态取色", style = MaterialTheme.typography.titleSmall)
-                        Text(
-                            "Android 12+ 跟随系统壁纸取色",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    Switch(
-                        checked = state.dynamicColorEnabled,
-                        onCheckedChange = viewModel::setDynamicColor,
-                    )
-                }
-            }
-
-            // 4. 清理规则
-            SectionCard(
-                icon = Icons.Outlined.CleaningServices,
-                title = "清理规则",
-            ) {
-                CleanupRulesSection(viewModel = viewModel)
-            }
-
-            // 5. AI 配置
-            SectionCard(
-                icon = Icons.Outlined.AutoAwesome,
-                title = stringResource(R.string.settings_section_ai),
-            ) {
-                AiSection(state = state, viewModel = viewModel)
-            }
-
-            // 5. 关于
-            SectionCard(
-                icon = Icons.Outlined.Info,
-                title = stringResource(R.string.settings_section_about),
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("QAlbum", style = MaterialTheme.typography.titleSmall)
-                        Text(
-                            "${stringResource(R.string.settings_version)} ${BuildConfig.VERSION_NAME} (build ${BuildConfig.VERSION_CODE})",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            }
-
             Spacer(Modifier.height(16.dp))
         }
     }
 }
+
+@Composable
+private fun SettingsEntryRow(category: SettingsCategory, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(36.dp)
+                .background(color = MaterialTheme.colorScheme.primaryContainer, shape = CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = category.icon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+            )
+        }
+        Spacer(Modifier.size(16.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(category.title, style = MaterialTheme.typography.titleMedium)
+            Text(
+                category.subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Icon(
+            Icons.AutoMirrored.Outlined.KeyboardArrowRight,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────
+// 子页面通用脚手架：返回标题栏 + 可滚动内容
+// ──────────────────────────────────────────────────────────────────
+
+@Composable
+private fun SettingsDetailScaffold(
+    title: String,
+    onBack: () -> Unit,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Scaffold(
+        topBar = {
+            CenterAlignedTopAppBar(
+                title = { Text(title, style = MaterialTheme.typography.titleLarge) },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                ),
+            )
+        },
+    ) { topBarPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(top = topBarPadding.calculateTopPadding())
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+            content = content,
+        )
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────
+// 各类别子页面
+// ──────────────────────────────────────────────────────────────────
+
+@Composable
+fun AccessSettingsScreen(
+    onBack: () -> Unit,
+    viewModel: SettingsViewModel = koinViewModel(),
+) {
+    val state by viewModel.uiState.collectAsState()
+    val accessStatus by viewModel.accessStatus.collectAsState()
+    val shizukuStatus by rememberShizukuStatus()
+    val context = LocalContext.current
+
+    SettingsDetailScaffold(title = SettingsCategory.ACCESS.title, onBack = onBack) {
+        SectionCard(icon = Icons.Outlined.Security, title = stringResource(R.string.settings_section_access)) {
+            AccessModeRow(current = state.accessMode, onSelect = viewModel::setAccessMode)
+            HorizontalDivider(Modifier.padding(vertical = 8.dp))
+            ShizukuStatusRow(
+                status = shizukuStatus,
+                onRequest = {
+                    requestShizukuPermission()
+                    viewModel.checkAccess()
+                },
+                onInstall = {
+                    val intent = Intent(Intent.ACTION_VIEW).apply {
+                        data = Uri.parse("https://shizuku.rikka.app/")
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    runCatching { context.startActivity(intent) }
+                },
+            )
+            Spacer(Modifier.height(8.dp))
+            Button(onClick = { viewModel.checkAccess() }, modifier = Modifier.fillMaxWidth()) {
+                Text(stringResource(R.string.settings_test_access))
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = when (accessStatus) {
+                    AccessStatus.Ready -> "✔ ${stringResource(R.string.access_mode_ready)}"
+                    AccessStatus.NotReady -> "✘ ${stringResource(R.string.access_mode_not_ready)}"
+                    AccessStatus.Unknown -> "尚未测试"
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = when (accessStatus) {
+                    AccessStatus.Ready -> MaterialTheme.colorScheme.primary
+                    AccessStatus.NotReady -> MaterialTheme.colorScheme.error
+                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                },
+            )
+        }
+    }
+}
+
+@Composable
+fun ScanSettingsScreen(
+    onBack: () -> Unit,
+    viewModel: SettingsViewModel = koinViewModel(),
+) {
+    val state by viewModel.uiState.collectAsState()
+    val running by viewModel.scanRunning.collectAsState()
+
+    SettingsDetailScaffold(title = SettingsCategory.SCAN.title, onBack = onBack) {
+        SectionCard(icon = Icons.Outlined.Storage, title = stringResource(R.string.settings_section_paths)) {
+            var pathInput by remember(state.chatpicPath) { mutableStateOf(state.chatpicPath) }
+            OutlinedTextField(
+                value = pathInput,
+                onValueChange = { pathInput = it },
+                label = { Text(stringResource(R.string.settings_chatpic_path)) },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                supportingText = {
+                    Text("TIM / 国际版 QQ 路径不同，请按需修改。", style = MaterialTheme.typography.bodySmall)
+                },
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = { pathInput = SettingsRepository.DEFAULT_CHATPIC_PATH }) {
+                    Text("恢复默认")
+                }
+                Button(onClick = { viewModel.setChatpicPath(pathInput.trim()) }) { Text("保存") }
+            }
+            Spacer(Modifier.height(12.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (running) {
+                    OutlinedButton(onClick = viewModel::cancelScan) { Text("取消扫描") }
+                } else {
+                    OutlinedButton(onClick = viewModel::startIncrementalScan) { Text("增量扫描") }
+                    Button(onClick = viewModel::startFullScan) { Text("全量扫描") }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun AnalysisSettingsScreen(
+    onBack: () -> Unit,
+    viewModel: SettingsViewModel = koinViewModel(),
+) {
+    val limit by viewModel.analysisLimit.collectAsState()
+    val oldestFirst by viewModel.analysisOldestFirst.collectAsState()
+    val context = LocalContext.current
+    var limitText by remember(limit) { mutableStateOf(limit.toString()) }
+    var showResetDialog by remember { mutableStateOf(false) }
+
+    SettingsDetailScaffold(title = SettingsCategory.ANALYSIS.title, onBack = onBack) {
+        SectionCard(icon = Icons.Outlined.Analytics, title = "每次分析上限") {
+            Text(
+                "每次「开始分析」最多处理多少张未分析的图片。Hash/质量、OCR、AI 标签、向量等逐图阶段都遵守此上限，处理完即停，下次再继续。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(12.dp))
+            OutlinedTextField(
+                value = limitText,
+                onValueChange = { input -> limitText = input.filter { it.isDigit() }.take(6) },
+                label = { Text("上限（${SettingsRepository.MIN_ANALYSIS_LIMIT}–${SettingsRepository.MAX_ANALYSIS_LIMIT}）") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = {
+                    limitText = SettingsRepository.DEFAULT_ANALYSIS_LIMIT.toString()
+                    viewModel.setAnalysisLimit(SettingsRepository.DEFAULT_ANALYSIS_LIMIT)
+                }) { Text("默认 500") }
+                Button(onClick = {
+                    val value = limitText.toIntOrNull()
+                    if (value != null) {
+                        viewModel.setAnalysisLimit(value)
+                        Toast.makeText(context, "已保存上限", Toast.LENGTH_SHORT).show()
+                    }
+                }) { Text("保存") }
+            }
+        }
+
+        SectionCard(icon = Icons.Outlined.Analytics, title = "分析顺序") {
+            Text(
+                "决定优先分析哪一批图片。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(
+                    selected = oldestFirst,
+                    onClick = { viewModel.setAnalysisOldestFirst(true) },
+                    label = { Text("从早到晚") },
+                )
+                FilterChip(
+                    selected = !oldestFirst,
+                    onClick = { viewModel.setAnalysisOldestFirst(false) },
+                    label = { Text("从晚到早") },
+                )
+            }
+        }
+
+        SectionCard(icon = Icons.Outlined.RestartAlt, title = "重置分析") {
+            Text(
+                "清除完成标记后，下次分析会重新处理对应图片。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(onClick = { showResetDialog = true }) { Text("重置完成标记…") }
+        }
+    }
+
+    if (showResetDialog) {
+        ResetAnalysisDialog(
+            onDismiss = { showResetDialog = false },
+            onLocalOnly = {
+                showResetDialog = false
+                viewModel.resetLocalAnalysis {
+                    Toast.makeText(context, "已重置本地分析标记", Toast.LENGTH_SHORT).show()
+                }
+            },
+            onAll = {
+                showResetDialog = false
+                viewModel.resetAllAnalysis {
+                    Toast.makeText(context, "已重置全部分析标记", Toast.LENGTH_SHORT).show()
+                }
+            },
+        )
+    }
+}
+
+@Composable
+private fun ResetAnalysisDialog(
+    onDismiss: () -> Unit,
+    onLocalOnly: () -> Unit,
+    onAll: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("重置分析完成标记") },
+        text = {
+            Text(
+                "选择重置范围：\n\n· 仅本地分析：重跑 Hash / 质量 / 重复 / 评分（免费、本地）。\n· 全部：连 OCR / AI 标签 / 向量 一起清空重跑，其中 AI 与向量会重新调用接口、可能产生费用。",
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onLocalOnly) { Text("仅本地分析") }
+        },
+        dismissButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                TextButton(onClick = onDismiss) { Text("取消") }
+                TextButton(onClick = onAll) { Text("全部") }
+            }
+        },
+    )
+}
+
+@Composable
+fun CleanupSettingsScreen(
+    onBack: () -> Unit,
+    viewModel: SettingsViewModel = koinViewModel(),
+) {
+    SettingsDetailScaffold(title = SettingsCategory.CLEANUP.title, onBack = onBack) {
+        SectionCard(icon = Icons.Outlined.CleaningServices, title = "清理规则") {
+            CleanupRulesSection(viewModel = viewModel)
+        }
+    }
+}
+
+@Composable
+fun AiSettingsScreen(
+    onBack: () -> Unit,
+    viewModel: SettingsViewModel = koinViewModel(),
+) {
+    val state by viewModel.uiState.collectAsState()
+    SettingsDetailScaffold(title = SettingsCategory.AI.title, onBack = onBack) {
+        SectionCard(icon = Icons.Outlined.AutoAwesome, title = stringResource(R.string.settings_section_ai)) {
+            AiSection(state = state, viewModel = viewModel)
+        }
+    }
+}
+
+@Composable
+fun PersonalizationSettingsScreen(
+    onBack: () -> Unit,
+    viewModel: SettingsViewModel = koinViewModel(),
+) {
+    val state by viewModel.uiState.collectAsState()
+    SettingsDetailScaffold(title = SettingsCategory.PERSONALIZATION.title, onBack = onBack) {
+        SectionCard(icon = Icons.Outlined.Palette, title = "个性化") {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Material You 动态取色", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        "Android 12+ 跟随系统壁纸取色",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(checked = state.dynamicColorEnabled, onCheckedChange = viewModel::setDynamicColor)
+            }
+        }
+    }
+}
+
+@Composable
+fun AboutSettingsScreen(
+    onBack: () -> Unit,
+) {
+    SettingsDetailScaffold(title = SettingsCategory.ABOUT.title, onBack = onBack) {
+        SectionCard(icon = Icons.Outlined.Info, title = stringResource(R.string.settings_section_about)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("QAlbum", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        "${stringResource(R.string.settings_version)} ${BuildConfig.VERSION_NAME} (build ${BuildConfig.VERSION_CODE})",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────
+// 复用组件（分组卡片 / 各类别内容片段）
+// ──────────────────────────────────────────────────────────────────
 
 /** 统一的"分组卡片"，避免每个 Section 重复堆样式 */
 @Composable
@@ -271,9 +524,7 @@ private fun SectionCard(
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface,
-        ),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
     ) {
         Column(modifier = Modifier.padding(20.dp)) {
@@ -281,17 +532,10 @@ private fun SectionCard(
                 Box(
                     modifier = Modifier
                         .size(36.dp)
-                        .background(
-                            color = MaterialTheme.colorScheme.primaryContainer,
-                            shape = CircleShape,
-                        ),
+                        .background(color = MaterialTheme.colorScheme.primaryContainer, shape = CircleShape),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Icon(
-                        imageVector = icon,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                    )
+                    Icon(imageVector = icon, contentDescription = null, tint = MaterialTheme.colorScheme.onPrimaryContainer)
                 }
                 Spacer(Modifier.size(12.dp))
                 Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
@@ -398,7 +642,6 @@ private fun AiSection(
         )
     }
 
-    // 启用开关
     Row(verticalAlignment = Alignment.CenterVertically) {
         Column(modifier = Modifier.weight(1f)) {
             Text("启用 AI 分析", style = MaterialTheme.typography.titleSmall)
@@ -475,7 +718,6 @@ private fun AiSection(
     Spacer(Modifier.height(12.dp))
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedButton(onClick = {
-            // 重置回默认（OpenAI 主流配置）
             endpointInput = ""
             keyInput = ""
             modelInput = "gpt-4o-mini"
@@ -487,19 +729,6 @@ private fun AiSection(
             viewModel.setAiModel(modelInput)
             viewModel.setAiEmbeddingModel(embModelInput)
         }) { Text("保存") }
-    }
-}
-
-@Composable
-@Suppress("UnusedPrivateMember")
-private fun ClickableRow(label: String, onClick: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(vertical = 8.dp),
-    ) {
-        Text(label, style = MaterialTheme.typography.bodyLarge)
     }
 }
 

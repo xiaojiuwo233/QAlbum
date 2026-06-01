@@ -45,6 +45,19 @@ interface OcrDao {
         deleteFtsByImageId(imageId)
     }
 
+    @Query("DELETE FROM ocr_text")
+    suspend fun deleteAllText()
+
+    @Query("DELETE FROM ocr_fts")
+    suspend fun deleteAllFts()
+
+    /** 重置全部分析时清空 OCR 文本与 FTS 索引 */
+    @Transaction
+    suspend fun clearAllOcr() {
+        deleteAllText()
+        deleteAllFts()
+    }
+
     // ---- FTS5 / FTS4 搜索 ----
 
     /**

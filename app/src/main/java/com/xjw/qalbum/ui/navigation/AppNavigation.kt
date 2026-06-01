@@ -28,6 +28,14 @@ import com.xjw.qalbum.ui.detail.ImageDetailScreen
 import com.xjw.qalbum.ui.gallery.FavoriteGalleryScreen
 import com.xjw.qalbum.ui.gallery.GalleryScreen
 import com.xjw.qalbum.ui.search.SearchScreen
+import com.xjw.qalbum.ui.settings.AboutSettingsScreen
+import com.xjw.qalbum.ui.settings.AccessSettingsScreen
+import com.xjw.qalbum.ui.settings.AiSettingsScreen
+import com.xjw.qalbum.ui.settings.AnalysisSettingsScreen
+import com.xjw.qalbum.ui.settings.CleanupSettingsScreen
+import com.xjw.qalbum.ui.settings.PersonalizationSettingsScreen
+import com.xjw.qalbum.ui.settings.ScanSettingsScreen
+import com.xjw.qalbum.ui.settings.SettingsCategory
 import com.xjw.qalbum.ui.settings.SettingsScreen
 
 /**
@@ -117,7 +125,31 @@ fun AppNavigation() {
                 CleanupScreen(contentPadding = innerPadding.bottomOnly())
             }
             composable(NavDestination.Settings.route) {
-                SettingsScreen(contentPadding = innerPadding.bottomOnly())
+                SettingsScreen(
+                    contentPadding = innerPadding.bottomOnly(),
+                    onOpenCategory = { category -> navController.navigate(category.route) },
+                )
+            }
+            composable(SettingsCategory.ACCESS.route) {
+                AccessSettingsScreen(onBack = { navController.popBackStack() })
+            }
+            composable(SettingsCategory.SCAN.route) {
+                ScanSettingsScreen(onBack = { navController.popBackStack() })
+            }
+            composable(SettingsCategory.ANALYSIS.route) {
+                AnalysisSettingsScreen(onBack = { navController.popBackStack() })
+            }
+            composable(SettingsCategory.CLEANUP.route) {
+                CleanupSettingsScreen(onBack = { navController.popBackStack() })
+            }
+            composable(SettingsCategory.AI.route) {
+                AiSettingsScreen(onBack = { navController.popBackStack() })
+            }
+            composable(SettingsCategory.PERSONALIZATION.route) {
+                PersonalizationSettingsScreen(onBack = { navController.popBackStack() })
+            }
+            composable(SettingsCategory.ABOUT.route) {
+                AboutSettingsScreen(onBack = { navController.popBackStack() })
             }
             composable(
                 route = "image/{imageId}",

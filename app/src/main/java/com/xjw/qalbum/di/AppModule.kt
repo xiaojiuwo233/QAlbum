@@ -129,7 +129,16 @@ val appModule = module {
 
     // ---- ViewModel ----
 
-    viewModel { SettingsViewModel(settings = get(), accessManager = get(), scanController = get()) }
+    viewModel {
+        SettingsViewModel(
+            settings = get(),
+            accessManager = get(),
+            scanController = get(),
+            imageDao = get(),
+            ocrDao = get(),
+            embeddingDao = get(),
+        )
+    }
     viewModel { DashboardViewModel(imageRepository = get(), scanController = get(), cleanupDao = get()) }
     viewModel {
         GalleryViewModel(

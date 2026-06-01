@@ -69,13 +69,16 @@ class AnalysisPipeline(
         job = scope.launch {
             _state.value = AnalysisState.Running
             try {
-                runHashAndQuality()
+                // 本次分析的上限与排序（各逐图阶段共用）：每阶段只取「未完成」的前 limit 张
+                val limit = settings.analysisLimit.first()
+                val oldestFirst = settings.analysisOldestFirst.first()
+                runHashAndQuality(limit, oldestFirst)
                 runDuplicate()
-                runOcr()
+                runOcr(limit, oldestFirst)
                 // AI 阶段仅在用户启用并填好 endpoint 时执行；网络阶段失败不影响整体
                 if (isAiReady()) {
-                    runAiTag()
-                    runEmbedding()
+                    runAiTag(limit, oldestFirst)
+                    runEmbedding(limit, oldestFirst)
                 }
                 runScore()
                 _state.value = AnalysisState.Done
@@ -99,42 +102,40 @@ class AnalysisPipeline(
      * xxHash / pHash / 宽高 / 模糊度 / 纯色 / 损坏（原实现是每图 3 次独立读取）。
      * 批内并发处理（[CONCURRENCY]），让跨进程 IO 与解码 / DCT 的 CPU 开销相互重叠。
      */
-    private suspend fun runHashAndQuality() {
+    private suspend fun runHashAndQuality(limit: Int, oldestFirst: Boolean) {
         val provider = accessManager.current()
         if (!provider.isAvailable()) {
             Timber.w("Hash/Quality phase skipped: access provider not ready")
             return
         }
 
-        val total = imageDao.countPendingHash()
-        if (total == 0) {
+        // 一次只取「未完成、按所选排序」的前 limit 张，处理完即止（下次分析再取下一批）
+        val batch = imageDao.pendingHash(limit, oldestFirst)
+        if (batch.isEmpty()) {
             _progress.value = AnalysisProgress(AnalysisPhase.HASH, 0, 0, msg = "完成")
             return
         }
+        val total = batch.size
         val processed = AtomicInteger(0)
-        while (true) {
-            val batch = imageDao.pendingHash(HASH_BATCH)
-            if (batch.isEmpty()) break
-            coroutineScope {
-                val semaphore = Semaphore(CONCURRENCY)
-                batch.map { img ->
-                    async(Dispatchers.IO) {
-                        semaphore.withPermit {
-                            val r = analyzeOne(provider, img.path)
-                            imageDao.saveHash(img.id, r.xxhash, r.phash)
-                            imageDao.saveQuality(img.id, r.width, r.height, r.blur, r.blank, r.corrupt)
-                            val done = processed.incrementAndGet()
-                            if (done % PROGRESS_STEP == 0 || done == total) {
-                                // StateFlow.value 写入线程安全，可在子协程直接更新
-                                _progress.value = AnalysisProgress(AnalysisPhase.HASH, done, total)
-                            }
+        coroutineScope {
+            val semaphore = Semaphore(CONCURRENCY)
+            batch.map { img ->
+                async(Dispatchers.IO) {
+                    semaphore.withPermit {
+                        val r = analyzeOne(provider, img.path)
+                        imageDao.saveHash(img.id, r.xxhash, r.phash)
+                        imageDao.saveQuality(img.id, r.width, r.height, r.blur, r.blank, r.corrupt)
+                        val done = processed.incrementAndGet()
+                        if (done % PROGRESS_STEP == 0 || done == total) {
+                            // StateFlow.value 写入线程安全，可在子协程直接更新
+                            _progress.value = AnalysisProgress(AnalysisPhase.HASH, done, total)
                         }
                     }
-                }.awaitAll()
-            }
+                }
+            }.awaitAll()
         }
         _progress.value = AnalysisProgress(AnalysisPhase.HASH, total, total, msg = "完成")
-        Timber.i("AnalysisPipeline.runHashAndQuality: analyzed ${processed.get()} images")
+        Timber.i("AnalysisPipeline.runHashAndQuality: analyzed $total images (limit=$limit)")
     }
 
     /** 一次读取字节 → xxHash + pHash + 质量，避免对同一文件重复跨进程读取。 */
@@ -171,14 +172,18 @@ class AnalysisPipeline(
         _progress.value = AnalysisProgress(AnalysisPhase.DUPLICATE, 1, 1, msg = "完成")
     }
 
-    private suspend fun runOcr() {
+    private suspend fun runOcr(limit: Int, oldestFirst: Boolean) {
         val provider = accessManager.current()
         if (!provider.isAvailable()) return
 
+        val batch = imageDao.pendingOcr(limit, oldestFirst)
+        if (batch.isEmpty()) {
+            _progress.value = AnalysisProgress(AnalysisPhase.OCR, 0, 0, msg = "完成")
+            return
+        }
+        val total = batch.size
         var processed = 0
-        while (true) {
-            val batch = imageDao.pendingOcr(OCR_BATCH)
-            if (batch.isEmpty()) break
+        run {
             for (img in batch) {
                 val result = ocrEngine.recognize(provider, img.path)
                 val now = System.currentTimeMillis()
@@ -215,13 +220,13 @@ class AnalysisPipeline(
                 }
                 imageDao.markOcrDone(img.id)
                 processed++
-                if (processed % 5 == 0) {
-                    _progress.value = AnalysisProgress(AnalysisPhase.OCR, processed, processed)
+                if (processed % 5 == 0 || processed == total) {
+                    _progress.value = AnalysisProgress(AnalysisPhase.OCR, processed, total)
                 }
             }
         }
-        _progress.value = AnalysisProgress(AnalysisPhase.OCR, processed, processed, msg = "完成")
-        Timber.i("AnalysisPipeline.runOcr: OCR-ed $processed images")
+        _progress.value = AnalysisProgress(AnalysisPhase.OCR, total, total, msg = "完成")
+        Timber.i("AnalysisPipeline.runOcr: OCR-ed $total images (limit=$limit)")
     }
 
     private suspend fun isAiReady(): Boolean {
@@ -231,73 +236,66 @@ class AnalysisPipeline(
         return enabled && endpoint.isNotBlank() && key.isNotBlank()
     }
 
-    private suspend fun runAiTag() {
+    private suspend fun runAiTag(limit: Int, oldestFirst: Boolean) {
         val provider = accessManager.current()
         if (!provider.isAvailable()) return
 
-        // 需要 AI 打标签的主图：ai_done = 0
-        var processed = 0
-        val dailyLimit = 50  // 防止首次启用就把日额度跑爆，单次最多打 50 张
-        // 简化：拉取主图中 ai_done=0 的（通过现有 pagePrimaryHashed 过滤），数量上限 dailyLimit
-        var afterId = 0L
-        while (processed < dailyLimit) {
-            val page = imageDao.pagePrimaryHashed(afterId, 50)
-            if (page.isEmpty()) break
-            for (img in page) {
-                if (img.aiDone) {
-                    afterId = img.id
-                    continue
-                }
-                val result = aiTagging.tagImage(provider, img.id)
-                if (result is AiTaggingService.Result.Success) {
-                    // 标记 ai_done
-                    imageDao.update(img.copy(aiDone = true))
-                    processed++
-                }
-                afterId = img.id
-                if (processed >= dailyLimit) break
-                _progress.value = AnalysisProgress(AnalysisPhase.AI_TAG, processed, dailyLimit)
-            }
+        val batch = imageDao.pendingAiTag(limit, oldestFirst)
+        if (batch.isEmpty()) {
+            _progress.value = AnalysisProgress(AnalysisPhase.AI_TAG, 0, 0, msg = "完成")
+            return
         }
-        _progress.value = AnalysisProgress(AnalysisPhase.AI_TAG, processed, dailyLimit, msg = "完成")
-        Timber.i("AnalysisPipeline.runAiTag: tagged $processed images")
+        val total = batch.size
+        var processed = 0
+        for (img in batch) {
+            val result = aiTagging.tagImage(provider, img.id)
+            if (result is AiTaggingService.Result.Success) {
+                imageDao.update(img.copy(aiDone = true))
+            }
+            processed++
+            _progress.value = AnalysisProgress(AnalysisPhase.AI_TAG, processed, total)
+        }
+        _progress.value = AnalysisProgress(AnalysisPhase.AI_TAG, total, total, msg = "完成")
+        Timber.i("AnalysisPipeline.runAiTag: tagged $processed/$total images (limit=$limit)")
     }
 
-    private suspend fun runEmbedding() {
+    private suspend fun runEmbedding(limit: Int, oldestFirst: Boolean) {
         val provider = accessManager.current()
         if (!provider.isAvailable()) return
 
-        var processed = 0
-        val dailyLimit = 100
-        var afterId = 0L
-        while (processed < dailyLimit) {
-            val page = imageDao.pagePrimaryHashed(afterId, 50)
-            if (page.isEmpty()) break
-            for (img in page) {
-                if (img.embeddingDone || semanticIndex.hasEmbedding(img.id)) {
-                    afterId = img.id
-                    continue
-                }
-                // 用 OCR 文本 + AI 描述作为 embedding 输入（避免直接用图像 embedding，兼容更多模型）
-                val ocr = ocrDao.getByImageId(img.id)
-                val textForEmbedding = buildEmbeddingText(img, ocr)
-                if (textForEmbedding.isBlank()) {
-                    afterId = img.id
-                    continue
-                }
-                val vec = aiClient.embedding(textForEmbedding)
-                if (vec != null) {
-                    semanticIndex.upsert(img.id, settings.aiEmbeddingModel.first(), vec)
-                    imageDao.update(img.copy(embeddingDone = true))
-                    processed++
-                }
-                afterId = img.id
-                if (processed >= dailyLimit) break
-                _progress.value = AnalysisProgress(AnalysisPhase.EMBEDDING, processed, dailyLimit)
-            }
+        val batch = imageDao.pendingEmbedding(limit, oldestFirst)
+        if (batch.isEmpty()) {
+            _progress.value = AnalysisProgress(AnalysisPhase.EMBEDDING, 0, 0, msg = "完成")
+            return
         }
-        _progress.value = AnalysisProgress(AnalysisPhase.EMBEDDING, processed, dailyLimit, msg = "完成")
-        Timber.i("AnalysisPipeline.runEmbedding: embedded $processed images")
+        val total = batch.size
+        var processed = 0
+        val embModel = settings.aiEmbeddingModel.first()
+        for (img in batch) {
+            if (semanticIndex.hasEmbedding(img.id)) {
+                imageDao.update(img.copy(embeddingDone = true))
+                processed++
+                continue
+            }
+            // 用 OCR 文本 + 文件名等作为 embedding 输入（兼容更多模型）
+            val ocr = ocrDao.getByImageId(img.id)
+            val textForEmbedding = buildEmbeddingText(img, ocr)
+            if (textForEmbedding.isBlank()) {
+                // 无可嵌入文本：标记完成，避免反复占用名额
+                imageDao.update(img.copy(embeddingDone = true))
+                processed++
+                continue
+            }
+            val vec = aiClient.embedding(textForEmbedding)
+            if (vec != null) {
+                semanticIndex.upsert(img.id, embModel, vec)
+                imageDao.update(img.copy(embeddingDone = true))
+            }
+            processed++
+            _progress.value = AnalysisProgress(AnalysisPhase.EMBEDDING, processed, total)
+        }
+        _progress.value = AnalysisProgress(AnalysisPhase.EMBEDDING, total, total, msg = "完成")
+        Timber.i("AnalysisPipeline.runEmbedding: embedded $processed/$total images (limit=$limit)")
     }
 
     private fun buildEmbeddingText(
@@ -340,8 +338,6 @@ class AnalysisPipeline(
     }
 
     companion object {
-        private const val HASH_BATCH = 64
-        private const val OCR_BATCH = 20
         private const val SCORE_BATCH = 500
 
         /** hash+质量 合并阶段的并发度（IO 等待 + 解码/DCT CPU 混合，取中等并发避免过度争抢） */
