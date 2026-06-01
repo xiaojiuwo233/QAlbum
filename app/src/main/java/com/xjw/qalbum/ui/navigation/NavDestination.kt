@@ -39,6 +39,7 @@ enum class NavDestination(
         labelRes = R.string.nav_search,
         outlinedIcon = Icons.Outlined.Search,
         filledIcon = Icons.Rounded.Search,
+        showInBottomBar = false,
     ),
     Cleanup(
         route = "cleanup",
@@ -51,7 +52,6 @@ enum class NavDestination(
         labelRes = R.string.nav_settings,
         outlinedIcon = Icons.Outlined.Settings,
         filledIcon = Icons.Rounded.Settings,
-        showInBottomBar = false,
     );
 
     companion object {

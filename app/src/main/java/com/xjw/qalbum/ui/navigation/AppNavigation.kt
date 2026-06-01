@@ -44,7 +44,7 @@ fun AppNavigation() {
     val currentDestination = NavDestination.fromRoute(currentRoute)
 
     // 详情页路由不在底部导航中，进入详情时隐藏底部栏
-    val showBottomBar = currentRoute in NavDestination.entries.map { it.route }
+    val showBottomBar = currentRoute in NavDestination.bottomBarEntries.map { it.route }
 
     Scaffold(
         bottomBar = {
@@ -89,19 +89,13 @@ fun AppNavigation() {
             },
         ) {
             composable(NavDestination.Dashboard.route) {
-                DashboardScreen(
-                    contentPadding = innerPadding.bottomOnly(),
-                    onNavigateToSettings = {
-                        navController.navigate(NavDestination.Settings.route) {
-                            launchSingleTop = true
-                        }
-                    },
-                )
+                DashboardScreen(contentPadding = innerPadding.bottomOnly())
             }
             composable(NavDestination.Gallery.route) {
                 GalleryScreen(
                     contentPadding = innerPadding.bottomOnly(),
                     onImageClick = { id -> navController.navigate("image/$id") },
+                    onOpenSearch = { navController.navigate(NavDestination.Search.route) },
                     onOpenFavorites = { navController.navigate("favorites") },
                 )
             }
@@ -116,6 +110,7 @@ fun AppNavigation() {
                 SearchScreen(
                     contentPadding = innerPadding.bottomOnly(),
                     onResultClick = { id -> navController.navigate("image/$id") },
+                    onBack = { navController.popBackStack() },
                 )
             }
             composable(NavDestination.Cleanup.route) {

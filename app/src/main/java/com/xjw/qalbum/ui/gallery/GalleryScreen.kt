@@ -41,6 +41,7 @@ import androidx.compose.material.icons.outlined.IosShare
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.RadioButtonUnchecked
 import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -92,11 +93,11 @@ import java.util.Locale
 fun GalleryScreen(
     contentPadding: PaddingValues,
     onImageClick: (Long) -> Unit = {},
+    onOpenSearch: () -> Unit = {},
     onOpenFavorites: () -> Unit = {},
     viewModel: GalleryViewModel = koinViewModel(),
 ) {
     val items = viewModel.timeline.collectAsLazyPagingItems()
-    val favoriteCount by viewModel.favoriteCount.collectAsState(initial = 0)
     val gridState = rememberLazyGridState()
     val context = LocalContext.current
     var columns by rememberSaveable { mutableIntStateOf(4) }
@@ -119,7 +120,7 @@ fun GalleryScreen(
             if (selectedIds.isEmpty()) {
                 TimelineTopBar(
                     columns = columns,
-                    favoriteCount = favoriteCount,
+                    onOpenSearch = onOpenSearch,
                     onOpenFavorites = onOpenFavorites,
                     onRefresh = { items.refresh() },
                 )
@@ -311,7 +312,7 @@ fun FavoriteGalleryScreen(
 @Composable
 private fun TimelineTopBar(
     columns: Int,
-    favoriteCount: Int,
+    onOpenSearch: () -> Unit,
     onOpenFavorites: () -> Unit,
     onRefresh: () -> Unit,
 ) {
@@ -335,19 +336,11 @@ private fun TimelineTopBar(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+        IconButton(onClick = onOpenSearch) {
+            Icon(Icons.Outlined.Search, contentDescription = "搜索")
+        }
         IconButton(onClick = onOpenFavorites) {
-            Box(contentAlignment = Alignment.Center) {
-                Icon(Icons.Outlined.FavoriteBorder, contentDescription = "收藏图库")
-                if (favoriteCount > 0) {
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .size(8.dp)
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.primary),
-                    )
-                }
-            }
+            Icon(Icons.Outlined.FavoriteBorder, contentDescription = "收藏图库")
         }
         IconButton(onClick = onRefresh) {
             Icon(Icons.Outlined.Refresh, contentDescription = "刷新")

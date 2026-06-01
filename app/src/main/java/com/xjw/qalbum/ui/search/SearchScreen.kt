@@ -14,9 +14,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Search
@@ -71,6 +73,7 @@ import java.util.Locale
 fun SearchScreen(
     contentPadding: PaddingValues,
     onResultClick: (Long) -> Unit = {},
+    onBack: (() -> Unit)? = null,
     viewModel: SearchViewModel = koinViewModel(),
 ) {
     val query by viewModel.query.collectAsState()
@@ -83,34 +86,42 @@ fun SearchScreen(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .statusBarsPadding()
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(horizontal = 16.dp, vertical = 12.dp),
             ) {
-                OutlinedTextField(
-                    value = query,
-                    onValueChange = viewModel::onQueryChange,
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    placeholder = {
-                        Text(
-                            if (mode == SearchMode.OCR) "搜索 OCR 文本…"
-                            else "用自然语言搜索（如：发票截图）…"
-                        )
-                    },
-                    leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
-                    trailingIcon = {
-                        if (query.isNotEmpty()) {
-                            IconButton(onClick = { viewModel.onQueryChange("") }) {
-                                Icon(Icons.Outlined.Close, contentDescription = "清空")
-                            }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    onBack?.let {
+                        IconButton(onClick = it) {
+                            Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
                         }
-                    },
-                    shape = RoundedCornerShape(20.dp),
-                    colors = TextFieldDefaults.colors(
-                        focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainer,
-                    ),
-                )
+                    }
+                    OutlinedTextField(
+                        value = query,
+                        onValueChange = viewModel::onQueryChange,
+                        modifier = Modifier.weight(1f),
+                        singleLine = true,
+                        placeholder = {
+                            Text(
+                                if (mode == SearchMode.OCR) "搜索 OCR 文本…"
+                                else "用自然语言搜索（如：发票截图）…"
+                            )
+                        },
+                        leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
+                        trailingIcon = {
+                            if (query.isNotEmpty()) {
+                                IconButton(onClick = { viewModel.onQueryChange("") }) {
+                                    Icon(Icons.Outlined.Close, contentDescription = "清空")
+                                }
+                            }
+                        },
+                        shape = RoundedCornerShape(20.dp),
+                        colors = TextFieldDefaults.colors(
+                            focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                            unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainer,
+                        ),
+                    )
+                }
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilterChip(
