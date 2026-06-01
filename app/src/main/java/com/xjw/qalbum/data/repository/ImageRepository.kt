@@ -7,6 +7,7 @@ import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.db.dao.OcrDao
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.db.entity.OcrTextEntity
+import com.xjw.qalbum.domain.model.GallerySort
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -22,8 +23,13 @@ class ImageRepository(
 
     // ---- 时间线 ----
 
-    /** 时间线 Paging 流：默认每页 50 条，预加载 4 页 */
-    fun timelinePager(): Flow<PagingData<ImageEntity>> {
+    /** 时间线 Paging 流：默认每页 50 条，预加载 4 页；按 [sort] 选择对应排序的 PagingSource */
+    fun timelinePager(sort: GallerySort): Flow<PagingData<ImageEntity>> {
+        val factory = when (sort) {
+            GallerySort.DATE_DESC -> imageDao::pagingActiveTimeline
+            GallerySort.DATE_ASC -> imageDao::pagingActiveTimelineByDateAsc
+            GallerySort.SIZE_DESC -> imageDao::pagingActiveTimelineBySize
+        }
         return Pager(
             config = PagingConfig(
                 pageSize = 50,
@@ -31,7 +37,7 @@ class ImageRepository(
                 initialLoadSize = 50,
                 enablePlaceholders = false,
             ),
-            pagingSourceFactory = { imageDao.pagingActiveTimeline() },
+            pagingSourceFactory = factory,
         ).flow
     }
 
@@ -50,8 +56,12 @@ class ImageRepository(
     suspend fun timelineSnapshot(): List<ImageEntity> = imageDao.listActiveTimeline()
     suspend fun favoriteTimelineSnapshot(): List<ImageEntity> = imageDao.listFavoriteTimeline()
 
-    /** 详情页时间线 id 列表（轻量，支撑左右滑动按需加载） */
-    suspend fun timelineIds(): List<Long> = imageDao.timelineIds()
+    /** 详情页时间线 id 列表（轻量，支撑左右滑动按需加载）；与图库网格使用同一 [sort] */
+    suspend fun timelineIds(sort: GallerySort): List<Long> = when (sort) {
+        GallerySort.DATE_DESC -> imageDao.timelineIds()
+        GallerySort.DATE_ASC -> imageDao.timelineIdsByDateAsc()
+        GallerySort.SIZE_DESC -> imageDao.timelineIdsBySize()
+    }
     suspend fun favoriteTimelineIds(): List<Long> = imageDao.favoriteTimelineIds()
 
     // ---- 详情 ----

@@ -26,6 +26,8 @@ import androidx.room.PrimaryKey
         Index("variant_group"),
         Index("status"),
         Index("mtime"),
+        // size 是「大到小」排序与 cleanup 聚合的高频排序列；25w 图无索引会退化成全表 filesort。
+        Index("size"),
         Index("delete_score"),
         Index("info_score"),
         Index("duplicate_group_id"),

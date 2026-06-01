@@ -145,6 +145,7 @@ val appModule = module {
             imageRepository = get(),
             imageFileManager = get(),
             quarantineManager = get(),
+            settings = get(),
         )
     }
     viewModel {
@@ -152,6 +153,7 @@ val appModule = module {
             imageRepository = get(),
             imageFileManager = get(),
             quarantineManager = get(),
+            settings = get(),
         )
     }
     viewModel {

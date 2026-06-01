@@ -4,6 +4,8 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import com.xjw.qalbum.data.db.dao.CleanupDao
 import com.xjw.qalbum.data.db.dao.EmbeddingDao
 import com.xjw.qalbum.data.db.dao.ImageDao
@@ -44,7 +46,7 @@ import com.xjw.qalbum.data.db.entity.UserActionEntity
         UserActionEntity::class,
         ImageEmbeddingEntity::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -60,13 +62,25 @@ abstract class AppDatabase : RoomDatabase() {
     companion object {
         const val DB_NAME = "qalbum.db"
 
+        /**
+         * v4 → v5：为 images.size 建索引，支撑图库「大到小」排序避免 25w 图全表 filesort。
+         * 必须用显式 Migration（而非 destructive 回退），否则会清库导致已扫描数据全部丢失、需重扫数小时。
+         * 索引名沿用 Room 约定 `index_<table>_<col>`，与实体生成的 schema 完全一致。
+         */
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_images_size` ON `images` (`size`)")
+            }
+        }
+
         fun build(context: Context): AppDatabase {
             return Room.databaseBuilder(
                 context.applicationContext,
                 AppDatabase::class.java,
                 DB_NAME,
             )
-                // Phase 0 还没有正式数据，重建即可；后续 Phase 会用 Migration 替代
+                .addMigrations(MIGRATION_4_5)
+                // 已注册的版本走 Migration 保数据；只有遇到未覆盖的版本跳变才回退重建兜底
                 .fallbackToDestructiveMigration()
                 .build()
         }

@@ -6,10 +6,12 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.xjw.qalbum.domain.model.AccessMode
 import com.xjw.qalbum.domain.model.CleanupConfig
+import com.xjw.qalbum.domain.model.GallerySort
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.decodeFromString
@@ -105,6 +107,34 @@ class SettingsRepository(private val context: Context) {
         ds.edit { it[Keys.ANALYSIS_OLDEST_FIRST] = oldestFirst }
     }
 
+    // ---- 图库页偏好（列数 / 排序 / 大图标记阈值） ----
+
+    /** 图库每行图片数；与捏合缩放共用，范围 [MIN_GALLERY_COLUMNS, MAX_GALLERY_COLUMNS] */
+    val galleryColumns: Flow<Int> = ds.data.map {
+        (it[Keys.GALLERY_COLUMNS] ?: DEFAULT_GALLERY_COLUMNS)
+            .coerceIn(MIN_GALLERY_COLUMNS, MAX_GALLERY_COLUMNS)
+    }
+
+    suspend fun setGalleryColumns(columns: Int) {
+        ds.edit { it[Keys.GALLERY_COLUMNS] = columns.coerceIn(MIN_GALLERY_COLUMNS, MAX_GALLERY_COLUMNS) }
+    }
+
+    /** 图库排列顺序（详情页左右滑动共用此排序） */
+    val gallerySort: Flow<GallerySort> = ds.data.map { GallerySort.fromName(it[Keys.GALLERY_SORT]) }
+
+    suspend fun setGallerySort(sort: GallerySort) {
+        ds.edit { it[Keys.GALLERY_SORT] = sort.name }
+    }
+
+    /** 超过该字节数的图片，在缩略图右上角显示「MB+」大图标记 */
+    val galleryLargeThresholdBytes: Flow<Long> = ds.data.map {
+        it[Keys.GALLERY_LARGE_BYTES] ?: DEFAULT_LARGE_THRESHOLD_BYTES
+    }
+
+    suspend fun setGalleryLargeThresholdBytes(bytes: Long) {
+        ds.edit { it[Keys.GALLERY_LARGE_BYTES] = bytes.coerceAtLeast(MIN_LARGE_THRESHOLD_BYTES) }
+    }
+
     // ---- 清理规则配置 ----
 
     /** 每类清理维度的开关 + 门限；缺省或解析失败回退到 [CleanupConfig.DEFAULT]（平衡档） */
@@ -133,6 +163,13 @@ class SettingsRepository(private val context: Context) {
         const val DEFAULT_ANALYSIS_LIMIT = 500
         const val MIN_ANALYSIS_LIMIT = 50
         const val MAX_ANALYSIS_LIMIT = 20_000
+
+        const val DEFAULT_GALLERY_COLUMNS = 4
+        const val MIN_GALLERY_COLUMNS = 2
+        const val MAX_GALLERY_COLUMNS = 6
+
+        const val DEFAULT_LARGE_THRESHOLD_BYTES = 1L * 1024 * 1024
+        const val MIN_LARGE_THRESHOLD_BYTES = 100L * 1024
     }
 
     private object Keys {
@@ -148,6 +185,10 @@ class SettingsRepository(private val context: Context) {
         val QUARANTINE_DAYS = intPreferencesKey("quarantine_days")
         val ANALYSIS_LIMIT = intPreferencesKey("analysis_limit")
         val ANALYSIS_OLDEST_FIRST = booleanPreferencesKey("analysis_oldest_first")
+
+        val GALLERY_COLUMNS = intPreferencesKey("gallery_columns")
+        val GALLERY_SORT = stringPreferencesKey("gallery_sort")
+        val GALLERY_LARGE_BYTES = longPreferencesKey("gallery_large_bytes")
 
         val CLEANUP_CONFIG = stringPreferencesKey("cleanup_config")
 

@@ -210,6 +210,22 @@ interface ImageDao {
     """)
     fun pagingActiveTimeline(): PagingSource<Int, ImageEntity>
 
+    /** 时间线视图（旧到新）：mtime 升序。 */
+    @Query("""
+        SELECT * FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb'
+        ORDER BY mtime ASC, id ASC
+    """)
+    fun pagingActiveTimelineByDateAsc(): PagingSource<Int, ImageEntity>
+
+    /** 时间线视图（大到小）：size 降序，走 index_images_size 避免 25w 图 filesort。 */
+    @Query("""
+        SELECT * FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb'
+        ORDER BY size DESC, id DESC
+    """)
+    fun pagingActiveTimelineBySize(): PagingSource<Int, ImageEntity>
+
     /** 详情页左右滑动使用同一套时间线排序。 */
     @Query("""
         SELECT * FROM images
@@ -236,6 +252,22 @@ interface ImageDao {
         ORDER BY mtime DESC, id DESC
     """)
     suspend fun timelineIds(): List<Long>
+
+    /** 详情页时间线 id（旧到新），与 [pagingActiveTimelineByDateAsc] 排序一致。 */
+    @Query("""
+        SELECT id FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb'
+        ORDER BY mtime ASC, id ASC
+    """)
+    suspend fun timelineIdsByDateAsc(): List<Long>
+
+    /** 详情页时间线 id（大到小），与 [pagingActiveTimelineBySize] 排序一致。 */
+    @Query("""
+        SELECT id FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb'
+        ORDER BY size DESC, id DESC
+    """)
+    suspend fun timelineIdsBySize(): List<Long>
 
     /** 收藏详情页时间线：只取 id。 */
     @Query("""

@@ -9,6 +9,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,8 +29,10 @@ import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.CheckCircle
@@ -42,14 +45,22 @@ import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.RadioButtonUnchecked
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -82,12 +93,10 @@ import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import coil3.request.crossfade
 import com.xjw.qalbum.data.db.entity.ImageEntity
+import com.xjw.qalbum.data.preferences.SettingsRepository
+import com.xjw.qalbum.domain.model.GallerySort
 import com.xjw.qalbum.ui.imageloading.ImageEntityModel
 import org.koin.androidx.compose.koinViewModel
-import java.text.SimpleDateFormat
-import java.util.Calendar
-import java.util.Date
-import java.util.Locale
 
 @Composable
 fun GalleryScreen(
@@ -100,9 +109,12 @@ fun GalleryScreen(
     val items = viewModel.timeline.collectAsLazyPagingItems()
     val gridState = rememberLazyGridState()
     val context = LocalContext.current
-    var columns by rememberSaveable { mutableIntStateOf(4) }
+    val columns by viewModel.galleryColumns.collectAsState()
+    val sort by viewModel.gallerySort.collectAsState()
+    val largeThreshold by viewModel.largeThresholdBytes.collectAsState()
     var selectedIds by remember { mutableStateOf(setOf<Long>()) }
     var showDeleteConfirm by rememberSaveable { mutableStateOf(false) }
+    var showPrefsSheet by rememberSaveable { mutableStateOf(false) }
 
     val clearSelection = { selectedIds = emptySet() }
     val toggleSelection: (Long) -> Unit = { id ->
@@ -120,9 +132,10 @@ fun GalleryScreen(
             if (selectedIds.isEmpty()) {
                 TimelineTopBar(
                     columns = columns,
+                    sortLabel = sort.label,
                     onOpenSearch = onOpenSearch,
                     onOpenFavorites = onOpenFavorites,
-                    onRefresh = { items.refresh() },
+                    onOpenSettings = { showPrefsSheet = true },
                 )
             } else {
                 SelectionTopBar(
@@ -157,19 +170,26 @@ fun GalleryScreen(
             when {
                 items.loadState.refresh is LoadState.Loading && items.itemCount == 0 -> CenteredLoading()
                 items.itemCount == 0 -> EmptyState()
-                else -> TimelineGrid(
-                    items = items,
-                    gridState = gridState,
-                    columns = columns,
-                    selectedIds = selectedIds,
-                    contentPadding = contentPadding,
-                    selectionMode = selectedIds.isNotEmpty(),
-                    onZoomColumns = { columns = it.coerceIn(2, 6) },
-                    onImageClick = onImageClick,
-                    onToggleSelection = toggleSelection,
-                    onSelect = selectOne,
-                    onApplySelection = applySelection,
-                )
+                else -> PullToRefreshBox(
+                    isRefreshing = items.loadState.refresh is LoadState.Loading,
+                    onRefresh = { items.refresh() },
+                    modifier = Modifier.fillMaxSize(),
+                ) {
+                    TimelineGrid(
+                        items = items,
+                        gridState = gridState,
+                        columns = columns,
+                        selectedIds = selectedIds,
+                        contentPadding = contentPadding,
+                        selectionMode = selectedIds.isNotEmpty(),
+                        largeThresholdBytes = largeThreshold,
+                        onZoomColumns = { viewModel.setColumns(it) },
+                        onImageClick = onImageClick,
+                        onToggleSelection = toggleSelection,
+                        onSelect = selectOne,
+                        onApplySelection = applySelection,
+                    )
+                }
             }
 
             if (showDeleteConfirm) {
@@ -198,6 +218,18 @@ fun GalleryScreen(
             }
         }
     }
+
+    if (showPrefsSheet) {
+        GalleryPreferenceSheet(
+            columns = columns,
+            sort = sort,
+            thresholdBytes = largeThreshold,
+            onColumns = viewModel::setColumns,
+            onSort = viewModel::setSort,
+            onThreshold = viewModel::setLargeThreshold,
+            onDismiss = { showPrefsSheet = false },
+        )
+    }
 }
 
 @Composable
@@ -209,6 +241,7 @@ fun FavoriteGalleryScreen(
 ) {
     val items = viewModel.favoriteTimeline.collectAsLazyPagingItems()
     val favoriteCount by viewModel.favoriteCount.collectAsState(initial = 0)
+    val largeThreshold by viewModel.largeThresholdBytes.collectAsState()
     val gridState = rememberLazyGridState()
     val context = LocalContext.current
     var columns by rememberSaveable { mutableIntStateOf(4) }
@@ -273,6 +306,7 @@ fun FavoriteGalleryScreen(
                     selectedIds = selectedIds,
                     contentPadding = contentPadding,
                     selectionMode = selectedIds.isNotEmpty(),
+                    largeThresholdBytes = largeThreshold,
                     onZoomColumns = { columns = it.coerceIn(2, 6) },
                     onImageClick = onImageClick,
                     onToggleSelection = toggleSelection,
@@ -312,9 +346,10 @@ fun FavoriteGalleryScreen(
 @Composable
 private fun TimelineTopBar(
     columns: Int,
+    sortLabel: String,
     onOpenSearch: () -> Unit,
     onOpenFavorites: () -> Unit,
-    onRefresh: () -> Unit,
+    onOpenSettings: () -> Unit,
 ) {
     Row(
         modifier = Modifier
@@ -331,7 +366,7 @@ private fun TimelineTopBar(
                 color = MaterialTheme.colorScheme.onBackground,
             )
             Text(
-                "时间线 · ${columns}列",
+                "$sortLabel · ${columns}列",
                 style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -342,8 +377,8 @@ private fun TimelineTopBar(
         IconButton(onClick = onOpenFavorites) {
             Icon(Icons.Outlined.FavoriteBorder, contentDescription = "收藏图库")
         }
-        IconButton(onClick = onRefresh) {
-            Icon(Icons.Outlined.Refresh, contentDescription = "刷新")
+        IconButton(onClick = onOpenSettings) {
+            Icon(Icons.Outlined.Tune, contentDescription = "图库偏好")
         }
     }
 }
@@ -465,6 +500,7 @@ private fun TimelineGrid(
     selectedIds: Set<Long>,
     contentPadding: PaddingValues,
     selectionMode: Boolean,
+    largeThresholdBytes: Long,
     onZoomColumns: (Int) -> Unit,
     onImageClick: (Long) -> Unit,
     onToggleSelection: (Long) -> Unit,
@@ -558,7 +594,7 @@ private fun TimelineGrid(
             count = items.itemCount,
             key = { index ->
                 when (val item = items.peek(index)) {
-                    is GalleryTimelineItem.Header -> "header-${item.timestampMs}"
+                    is GalleryTimelineItem.Header -> item.key
                     is GalleryTimelineItem.Photo -> item.image.id
                     null -> "loading-$index"
                 }
@@ -572,11 +608,12 @@ private fun TimelineGrid(
             },
         ) { index ->
             when (val item = items[index]) {
-                is GalleryTimelineItem.Header -> DateHeader(item.timestampMs)
+                is GalleryTimelineItem.Header -> SectionHeader(item.label)
                 is GalleryTimelineItem.Photo -> TimelinePhoto(
                     image = item.image,
                     selected = item.image.id in selectedIds,
                     selectionMode = selectionMode,
+                    largeThresholdBytes = largeThresholdBytes,
                     onBounds = { photoBounds[item.image.id] = it },
                     onClick = {
                         if (selectionMode) onToggleSelection(item.image.id) else onImageClick(item.image.id)
@@ -598,9 +635,9 @@ private fun TimelineGrid(
 }
 
 @Composable
-private fun DateHeader(timestampMs: Long) {
+private fun SectionHeader(label: String) {
     Text(
-        text = dayLabel(timestampMs),
+        text = label,
         modifier = Modifier
             .fillMaxWidth()
             .background(MaterialTheme.colorScheme.background)
@@ -617,6 +654,7 @@ private fun TimelinePhoto(
     image: ImageEntity,
     selected: Boolean,
     selectionMode: Boolean,
+    largeThresholdBytes: Long,
     onBounds: (Rect) -> Unit,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
@@ -666,6 +704,21 @@ private fun TimelinePhoto(
                 tint = Color.White,
             )
         }
+        // 大图标记：超过阈值则在右上角显示 MB+，与收藏 ♥ 并列存在
+        if (image.size > largeThresholdBytes && !selectionMode && !selected) {
+            Text(
+                text = "MB+",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = Color.White,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(5.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Color.Black.copy(alpha = 0.45f))
+                    .padding(horizontal = 5.dp, vertical = 1.dp),
+            )
+        }
         if (selectionMode || selected) {
             Icon(
                 if (selected) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
@@ -681,6 +734,102 @@ private fun TimelinePhoto(
         }
     }
 }
+
+@Composable
+private fun GalleryPreferenceSheet(
+    columns: Int,
+    sort: GallerySort,
+    thresholdBytes: Long,
+    onColumns: (Int) -> Unit,
+    onSort: (GallerySort) -> Unit,
+    onThreshold: (Long) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(start = 24.dp, end = 24.dp, bottom = 32.dp),
+        ) {
+            Text(
+                "图库偏好",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+
+            Spacer(Modifier.height(20.dp))
+            SheetSectionLabel("每行图片数")
+            Spacer(Modifier.height(8.dp))
+            val columnOptions = remember {
+                (SettingsRepository.MIN_GALLERY_COLUMNS..SettingsRepository.MAX_GALLERY_COLUMNS).toList()
+            }
+            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                columnOptions.forEachIndexed { index, value ->
+                    SegmentedButton(
+                        selected = value == columns,
+                        onClick = { onColumns(value) },
+                        shape = SegmentedButtonDefaults.itemShape(index, columnOptions.size),
+                    ) { Text("$value") }
+                }
+            }
+
+            Spacer(Modifier.height(20.dp))
+            SheetSectionLabel("排列顺序")
+            Spacer(Modifier.height(8.dp))
+            val sortOptions = GallerySort.entries
+            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                sortOptions.forEachIndexed { index, value ->
+                    SegmentedButton(
+                        selected = value == sort,
+                        onClick = { onSort(value) },
+                        shape = SegmentedButtonDefaults.itemShape(index, sortOptions.size),
+                    ) { Text(value.label) }
+                }
+            }
+
+            Spacer(Modifier.height(20.dp))
+            SheetSectionLabel("大图标记阈值（超过显示 MB+）")
+            Spacer(Modifier.height(8.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                THRESHOLD_PRESETS.forEach { bytes ->
+                    FilterChip(
+                        selected = bytes == thresholdBytes,
+                        onClick = { onThreshold(bytes) },
+                        label = { Text(thresholdLabel(bytes)) },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SheetSectionLabel(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelLarge,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+private val THRESHOLD_PRESETS = listOf(
+    512L * 1024,
+    1L * 1024 * 1024,
+    2L * 1024 * 1024,
+    5L * 1024 * 1024,
+    10L * 1024 * 1024,
+)
+
+private fun thresholdLabel(bytes: Long): String =
+    if (bytes >= 1024 * 1024) "${bytes / (1024 * 1024)}MB" else "${bytes / 1024}KB"
 
 @Composable
 private fun DeleteSelectionDialog(
@@ -767,20 +916,3 @@ private fun FavoritesEmptyState() {
         }
     }
 }
-
-private val dateFormatter = SimpleDateFormat("yyyy年M月d日", Locale.CHINA)
-
-private fun dayLabel(timestampMs: Long): String {
-    val target = Calendar.getInstance().apply { timeInMillis = timestampMs }
-    val today = Calendar.getInstance()
-    val yesterday = (today.clone() as Calendar).apply { add(Calendar.DAY_OF_YEAR, -1) }
-    return when {
-        sameDay(target, today) -> "今天"
-        sameDay(target, yesterday) -> "昨天"
-        else -> dateFormatter.format(Date(timestampMs))
-    }
-}
-
-private fun sameDay(a: Calendar, b: Calendar): Boolean =
-    a.get(Calendar.YEAR) == b.get(Calendar.YEAR) &&
-        a.get(Calendar.DAY_OF_YEAR) == b.get(Calendar.DAY_OF_YEAR)

@@ -5,12 +5,14 @@ import androidx.lifecycle.viewModelScope
 import android.net.Uri
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.db.entity.OcrTextEntity
+import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.data.repository.ImageRepository
 import com.xjw.qalbum.service.cleanup.ImageFileManager
 import com.xjw.qalbum.service.cleanup.QuarantineManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 /**
@@ -23,6 +25,7 @@ class ImageDetailViewModel(
     private val imageRepository: ImageRepository,
     private val imageFileManager: ImageFileManager,
     private val quarantineManager: QuarantineManager,
+    private val settings: SettingsRepository,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow<ImageDetailState>(ImageDetailState.Loading)
@@ -38,7 +41,8 @@ class ImageDetailViewModel(
             val ids = if (favoritesOnly) {
                 imageRepository.favoriteTimelineIds()
             } else {
-                imageRepository.timelineIds()
+                // 与图库网格使用同一排序，左右滑动顺序才能跟随用户选择的排列方式
+                imageRepository.timelineIds(settings.gallerySort.first())
             }
             val initialIndex = ids.indexOf(imageId)
             if (initialIndex < 0) {
