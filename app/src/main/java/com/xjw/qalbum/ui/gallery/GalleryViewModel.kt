@@ -194,20 +194,26 @@ private fun sameDay(a: Calendar, b: Calendar): Boolean =
     a.get(Calendar.YEAR) == b.get(Calendar.YEAR) &&
         a.get(Calendar.DAY_OF_YEAR) == b.get(Calendar.DAY_OF_YEAR)
 
-// ---- 大小分桶（大到小排序时使用）：≥10MB 合并，1~9MB 每 1MB 一桶，<1MB 每 100KB 一桶 ----
+// ---- 大小分桶（大到小排序时使用）----
+// ≥10MB 合并为一桶；1~9MB 每 1MB；100KB~1MB 每 100KB；10KB~100KB 每 10KB；<10KB 合并为一桶。
+// id 用互不重叠的数值区间，保证相邻桶判定唯一。
 
 private const val BYTES_MB = 1024L * 1024L
 private const val BYTES_100KB = 100L * 1024L
+private const val BYTES_10KB = 10L * 1024L
 
 private fun sizeBucketId(size: Long): Long = when {
-    size >= 10 * BYTES_MB -> 1000L                 // 10MB 以上合并为一桶
-    size >= BYTES_MB -> 100L + (size / BYTES_MB)   // 1~9MB → 101..109
-    else -> size / BYTES_100KB                      // <1MB → 0..10（每 100KB）
+    size >= 10 * BYTES_MB -> 100000L                       // 10MB 以上
+    size >= BYTES_MB -> 10000L + (size / BYTES_MB)         // 1~9MB → 10001..10009
+    size >= BYTES_100KB -> 1000L + (size / BYTES_100KB)    // 100KB~1MB → 1001..1010
+    size >= BYTES_10KB -> 100L + (size / BYTES_10KB)       // 10KB~100KB → 101..109
+    else -> 0L                                             // <10KB
 }
 
 private fun sizeBucketLabel(size: Long): String = when {
     size >= 10 * BYTES_MB -> "10 MB 以上"
     size >= BYTES_MB -> "${size / BYTES_MB} MB"
-    size < BYTES_100KB -> "100 KB 以下"
-    else -> "${(size / BYTES_100KB) * 100} KB"
+    size >= BYTES_100KB -> "${(size / BYTES_100KB) * 100} KB"   // 100 KB ~ 1000 KB
+    size >= BYTES_10KB -> "${(size / BYTES_10KB) * 10} KB"      // 10 KB ~ 90 KB
+    else -> "10 KB 以下"
 }
