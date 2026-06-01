@@ -17,6 +17,9 @@ import androidx.room.PrimaryKey
 @Entity(
     tableName = "images",
     indices = [
+        // path 是扫描入库 diff（getByPath / updateFromScanByPath / touchLastSeenByPaths）的高频查询列，
+        // 不加索引会退化成全表扫描，3w+ 图入库时形成 O(n²)。
+        Index("path"),
         Index("xxhash"),
         Index("phash"),
         Index("cache_key"),

@@ -36,6 +36,13 @@ interface ImageDao {
     @Query("UPDATE images SET last_seen = :ts WHERE id = :id")
     suspend fun touchLastSeen(id: Long, ts: Long)
 
+    /**
+     * 按 path 批量刷新 last_seen（增量扫描里"仍存在且未变化"的文件）。
+     * 调用方需按 SQLite 变量上限（999）分批；替代原先每文件一次独立 UPDATE。
+     */
+    @Query("UPDATE images SET last_seen = :ts WHERE path IN (:paths)")
+    suspend fun touchLastSeenByPaths(paths: List<String>, ts: Long)
+
     @Query("""
         UPDATE images
         SET filename = :filename,
@@ -80,33 +87,32 @@ interface ImageDao {
         isAnimated: Boolean,
     )
 
+    /**
+     * 批量插入新增记录（调用方已通过内存 path 快照确保这些 path 不在库中，故不会重复）。
+     * 用 IGNORE 兜底极端并发下的冲突。chatthumb 的 status 由调用方在构造 entity 时设好。
+     */
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertAll(images: List<ImageEntity>)
+
+    /**
+     * 批量更新已存在记录的扫描字段（size/mtime 变化时由 [updateFromScanByPath] 自动重置分析状态）。
+     * 整批包在一个事务里，避免逐条 update 各自 fsync。
+     */
     @Transaction
-    suspend fun insertBatch(images: List<ImageEntity>) {
-        if (images.isEmpty()) return
+    suspend fun updateBatchFromScan(images: List<ImageEntity>) {
         images.forEach { image ->
-            val existing = getByPath(image.path)
-            if (existing == null) {
-                insert(
-                    if (image.sourceType == "chatthumb") {
-                        image.copy(status = "thumbnail_trash")
-                    } else {
-                        image
-                    }
-                )
-            } else {
-                updateFromScanByPath(
-                    path = image.path,
-                    filename = image.filename,
-                    parentDir = image.parentDir,
-                    sourceType = image.sourceType,
-                    cacheKey = image.cacheKey,
-                    size = image.size,
-                    mtime = image.mtime,
-                    lastSeen = image.lastSeen,
-                    mime = image.mime,
-                    isAnimated = image.isAnimated,
-                )
-            }
+            updateFromScanByPath(
+                path = image.path,
+                filename = image.filename,
+                parentDir = image.parentDir,
+                sourceType = image.sourceType,
+                cacheKey = image.cacheKey,
+                size = image.size,
+                mtime = image.mtime,
+                lastSeen = image.lastSeen,
+                mime = image.mime,
+                isAnimated = image.isAnimated,
+            )
         }
     }
 
@@ -284,6 +290,13 @@ interface ImageDao {
         LIMIT :limit
     """)
     suspend fun pendingHash(limit: Int = 200): List<ImageEntity>
+
+    /** 待 hash（即待「hash+质量」合并分析）的总数，用于进度条总量 */
+    @Query("""
+        SELECT COUNT(*) FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND hash_done = 0
+    """)
+    suspend fun countPendingHash(): Int
 
     /** 待做质量分析的图片 */
     @Query("""

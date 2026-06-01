@@ -10,15 +10,18 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
 import rikka.shizuku.Shizuku
 import timber.log.Timber
-import java.io.ByteArrayInputStream
 import java.io.InputStream
 
 /**
- * Shizuku 模式文件访问实现（Phase 0 骨架版）
+ * Shizuku 模式文件访问实现
  *
- * 真正的命令执行通过 Shizuku.newProcess(...) 派发到 shell 用户（UID 2000）。
- * Phase 1 会接入完整的 `find` / `cat` / `mv` / `rm` 实现；
- * 当前版本仅实现 [isAvailable] 和基础探测，使授权流程可以跑通。
+ * 命令执行通过 Shizuku.newProcess(...) 派发到 shell 用户（UID 2000）。
+ * 文件读取通过 `cat` / `head -c` 的进程 stdout 管道完成；枚举通过 [ShellEnumerator]
+ * 的「find + stat」一次性完成。
+ *
+ * 说明：[Shizuku.newProcess] 在 13.x 之后是 hidden API（@RestrictTo），
+ * 这里用反射临时调用。长期更优解是自定义 AIDL UserService + ParcelFileDescriptor
+ * （零拷贝读文件），可作为后续演进方向。
  */
 class ShizukuFileAccess : FileAccessProvider {
 
@@ -43,30 +46,52 @@ class ShizukuFileAccess : FileAccessProvider {
 
     override fun listFiles(dir: String): Flow<FileInfo> = flow {
         if (!isAvailable()) return@flow
-        // 用 find + stat-like 格式输出，便于一行解析
-        // Phase 1 中会替换为更可靠的 AIDL 服务，避免 shell 解析的边界问题
+        // 单目录列举：用 stat 一次性拿元信息（不依赖 GNU 的 find -printf）
         val out = runShell(
-            "find '${dir.escape()}' -mindepth 1 -maxdepth 1 -printf '%p\\t%s\\t%T@\\t%y\\n' 2>/dev/null"
+            "find '${dir.escape()}' -mindepth 1 -maxdepth 1 -exec stat -c '%s|%Y|%n' {} + 2>/dev/null"
         )
         out.lineSequence().forEach { line ->
-            val info = parseFindLine(line) ?: return@forEach
-            emit(info)
+            parseStatLine(line)?.let { emit(it) }
         }
     }.flowOn(Dispatchers.IO)
 
-    override suspend fun readFile(path: String): InputStream {
-        // 占位：Phase 1 中通过 Shizuku 提供的 ParcelFileDescriptor 流式读取
+    override fun enumerateFiles(roots: List<String>, minDepth: Int, maxDepth: Int): Flow<FileInfo> =
+        ShellEnumerator.enumerate(
+            roots = roots,
+            minDepth = minDepth,
+            maxDepth = maxDepth,
+            escape = { it.escape() },
+            exec = { cmd -> runShell(cmd) },
+        ).flowOn(Dispatchers.IO)
+
+    override suspend fun readFile(path: String): InputStream = withContext(Dispatchers.IO) {
         if (!isAvailable()) throw AccessException("Shizuku 不可用")
-        Timber.w("ShizukuFileAccess.readFile 尚未实现，path=$path")
-        return ByteArrayInputStream(ByteArray(0))
+        val process = invokeNewProcess(arrayOf("sh", "-c", "cat '${path.escape()}' 2>/dev/null"))
+            ?: throw AccessException("Shizuku newProcess 失败: $path")
+        ProcessInputStream(process)
+    }
+
+    override suspend fun readHeader(path: String, n: Int): ByteArray? = withContext(Dispatchers.IO) {
+        if (!isAvailable()) return@withContext null
+        try {
+            val process = invokeNewProcess(
+                arrayOf("sh", "-c", "head -c $n '${path.escape()}' 2>/dev/null"),
+            ) ?: return@withContext null
+            val bytes = process.inputStream.use { it.readBytes() }
+            process.waitFor()
+            bytes.takeIf { it.isNotEmpty() }
+        } catch (t: Throwable) {
+            Timber.w(t, "Shizuku readHeader failed: $path")
+            null
+        }
     }
 
     override suspend fun getFileInfo(path: String): FileInfo? {
         if (!isAvailable()) return null
         val out = runShell(
-            "find '${path.escape()}' -maxdepth 0 -printf '%p\\t%s\\t%T@\\t%y\\n' 2>/dev/null"
+            "stat -c '%s|%Y|%n' '${path.escape()}' 2>/dev/null"
         ).lineSequence().firstOrNull() ?: return null
-        return parseFindLine(out)
+        return parseStatLine(out)
     }
 
     override suspend fun deleteFile(path: String): Boolean {
@@ -83,10 +108,6 @@ class ShizukuFileAccess : FileAccessProvider {
 
     /**
      * 在 Shizuku 派发的 shell 进程中执行命令，返回 stdout 字符串
-     *
-     * 注意：[Shizuku.newProcess] 在 13.x 之后被标记为 hidden API（@RestrictTo），
-     * 长期来看应该改用自定义 AIDL UserService（[Shizuku.bindUserService]）。
-     * Phase 1 会切换到 UserService；当前先用反射临时调用，保证 Phase 0 可跑通。
      */
     private suspend fun runShell(cmd: String): String = withContext(Dispatchers.IO) {
         try {
@@ -124,24 +145,44 @@ class ShizukuFileAccess : FileAccessProvider {
         null
     }
 
-    private fun parseFindLine(line: String): FileInfo? {
+    /** 解析 `size|mtimeSec|/full/path` 一行（stat -c '%s|%Y|%n' 的输出） */
+    private fun parseStatLine(line: String): FileInfo? {
         if (line.isBlank()) return null
-        val parts = line.split('\t')
-        if (parts.size < 4) return null
-        val path = parts[0]
-        val size = parts[1].toLongOrNull() ?: 0L
-        // %T@ 是带小数的秒数时间戳
-        val mtime = (parts[2].toDoubleOrNull() ?: 0.0).times(1000).toLong()
-        val type = parts[3]
+        val parts = line.split('|', limit = 3)
+        if (parts.size < 3) return null
+        val size = parts[0].trim().toLongOrNull() ?: 0L
+        val mtimeSec = parts[1].trim().toLongOrNull() ?: 0L
+        val path = parts[2]
+        if (path.isEmpty()) return null
         return FileInfo(
             path = path,
             name = path.substringAfterLast('/'),
             size = size,
-            lastModified = mtime,
-            isDirectory = type == "d",
+            lastModified = mtimeSec * 1000L,
+            isDirectory = false,
         )
     }
 
-    /** 对 shell 字符串中的特殊字符做简单转义。后续会切换到 ParcelFileDescriptor API */
+    /** 对 shell 字符串中的单引号做转义 */
     private fun String.escape(): String = replace("'", "'\\''")
+
+    /**
+     * 包装 Shizuku 子进程的 stdout 流：close 时一并回收子进程，避免进程泄漏。
+     */
+    private class ProcessInputStream(private val process: Process) : InputStream() {
+        private val delegate = process.inputStream
+        override fun read(): Int = delegate.read()
+        override fun read(b: ByteArray, off: Int, len: Int): Int = delegate.read(b, off, len)
+        override fun available(): Int = delegate.available()
+        override fun close() {
+            try {
+                delegate.close()
+            } finally {
+                try {
+                    process.destroy()
+                } catch (_: Throwable) {
+                }
+            }
+        }
+    }
 }

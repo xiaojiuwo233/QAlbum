@@ -722,13 +722,13 @@ private fun formatCount(n: Int): String = when {
     else -> n.toString()
 }
 
-private fun statusText(running: Boolean, progress: ScanProgress?): String = when {
-    progress is ScanProgress.Failed -> "失败：${progress.reason}"
-    progress is ScanProgress.Done -> "完成 ${progress.total} 张"
-    progress is ScanProgress.Indexing -> "索引 ${progress.processed}/${progress.total}"
-    progress is ScanProgress.Enumerating -> "枚举中… ${progress.total} 个候选"
-    running -> "启动中…"
-    else -> ""
+private fun statusText(running: Boolean, progress: ScanProgress?): String = when (progress) {
+    is ScanProgress.Failed -> "失败：${progress.reason}"
+    is ScanProgress.Done -> "完成，新增/更新 ${progress.total} 张"
+    is ScanProgress.Indexing -> "正在识别 ${progress.processed}/${progress.total}"
+    is ScanProgress.Enumerating ->
+        if (progress.total > 0) "正在查找图片… 已发现 ${progress.total}" else "正在查找图片…"
+    null -> if (running) "启动中…" else ""
 }
 
 private fun ScanProgress?.toProgressFraction(): Float? = when (this) {

@@ -65,7 +65,7 @@ val appModule = module {
     // ---- 索引服务 ----
 
     single { ImageIndexer(accessManager = get(), imageDao = get()) }
-    single { IncrementalScanner(accessManager = get(), imageDao = get()) }
+    single { IncrementalScanner(imageIndexer = get()) }
     single { ScanController(settings = get(), indexer = get(), incrementalScanner = get()) }
 
     // ---- 分析 / 清理 / OCR / AI 服务 ----

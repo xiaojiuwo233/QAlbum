@@ -15,88 +15,122 @@ import kotlin.math.sqrt
 /**
  * 哈希引擎：xxHash（精确去重） + pHash（视觉相似检测）
  *
- * xxHash 使用 [LongHashFunction.xx3]，~5 GB/s 吞吐量；
- * pHash 自实现 DCT-based 算法：
- *   1. 解码到 32×32 灰度
- *   2. 二维 DCT-II
- *   3. 取左上 8×8 低频块
- *   4. 大于均值置 1，否则置 0 → 64-bit hash
+ * - xxHash 使用 [LongHashFunction.xx3]，~5 GB/s 吞吐量。
+ * - pHash 自实现 DCT-based 算法：缩放到 32×32 灰度 → 二维 DCT → 取左上 8×8 低频块 →
+ *   大于均值置 1 → 64-bit hash。
  *
- * 设计选择：xxHash 流式实现 zero-allocation-hashing 库不支持，
- * 这里一次性读到 byte[]。QQ chatpic 单图普遍 < 5MB，可接受。
+ * 性能优化：
+ * - DCT 改为**可分离的两次 1D 变换**（O(N⁴) → O(N³)），且只计算最终需要的左上 8×8，
+ *   配合**预计算的 cos 查找表**消除内层 `cos()` 调用。与原始 2D DCT 数学等价
+ *   （省略的只是对「是否大于均值」无影响的公共正比例因子）。
+ * - 暴露 [xxHashOf] / [decodeScaledBytes] / [computePHashFromBitmap]，使分析阶段
+ *   能「一次读取字节 → 同时算 xxHash + pHash + 质量」，把每图 3 次文件读取降到 1 次。
  */
 object HashEngine {
 
     private val xxh3 = LongHashFunction.xx3()
 
-    // ---- xxHash ----
-
-    /** 对文件内容计算 xxh3 64-bit，返回 16 进制字符串（小写） */
-    suspend fun computeXxHash(provider: FileAccessProvider, path: String): String? {
-        return withContext(Dispatchers.IO) {
-            try {
-                provider.readFile(path).use { stream ->
-                    val bytes = stream.readBytesCapped(MAX_HASH_BYTES)
-                    if (bytes.isEmpty()) return@use null
-                    val h = xxh3.hashBytes(bytes)
-                    h.toULong().toString(16).padStart(16, '0')
-                }
-            } catch (t: Throwable) {
-                Timber.w(t, "xxHash failed for $path")
-                null
-            }
+    /** 预计算 cosTable[u][i] = cos((2i+1)·u·π / 2N)，N = [PHASH_SCALE] */
+    private val cosTable: Array<DoubleArray> = Array(PHASH_SCALE) { u ->
+        DoubleArray(PHASH_SCALE) { i ->
+            cos((2.0 * i + 1.0) * u * PI / (2.0 * PHASH_SCALE))
         }
     }
 
+    // ---- xxHash ----
+
+    /** 对字节内容计算 xxh3 64-bit，返回 16 进制字符串（小写，定长 16） */
+    fun xxHashOf(bytes: ByteArray): String? {
+        if (bytes.isEmpty()) return null
+        val h = xxh3.hashBytes(bytes)
+        return h.toULong().toString(16).padStart(16, '0')
+    }
+
+    /** 对文件内容计算 xxHash（便捷方法；分析阶段更推荐用 [readImageBytes] + [xxHashOf] 复用字节） */
+    suspend fun computeXxHash(provider: FileAccessProvider, path: String): String? =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                provider.readFile(path).use { it.readBytesCapped(MAX_HASH_BYTES) }
+            }.getOrNull()?.let { xxHashOf(it) }
+        }
+
     // ---- pHash ----
 
-    /** 通过 FileAccessProvider 读流并计算 pHash，失败返回 null */
-    suspend fun computePHash(provider: FileAccessProvider, path: String): Long? {
-        return withContext(Dispatchers.IO) {
+    /** 便捷方法：读流 + 解码 + 计算 pHash，失败返回 null */
+    suspend fun computePHash(provider: FileAccessProvider, path: String): Long? =
+        withContext(Dispatchers.IO) {
             try {
-                val bitmap = provider.readFile(path).use { decodeScaled(it, MAX_PHASH_SIDE) }
-                bitmap?.let { computePHashFromBitmap(it) }
+                val bytes = provider.readFile(path).use { it.readBytesCapped(MAX_DECODE_BYTES) }
+                decodeScaledBytes(bytes, MAX_PHASH_SIDE)?.let { bmp ->
+                    val h = computePHashFromBitmap(bmp)
+                    bmp.recycle()
+                    h
+                }
             } catch (t: Throwable) {
                 Timber.w(t, "pHash failed for $path")
                 null
             }
         }
-    }
 
-    /** 从 Bitmap 计算 pHash（用于已经在内存里的 Bitmap） */
+    /**
+     * 从 Bitmap 计算 pHash。
+     * 用可分离 1D DCT 只算左上 8×8 低频块，配合 [cosTable] 查表，避免 O(N⁴) 与重复 cos 计算。
+     */
     fun computePHashFromBitmap(bitmap: Bitmap): Long {
-        // Step 1: 缩放到 32×32 灰度
-        val scaled = Bitmap.createScaledBitmap(bitmap, PHASH_SCALE, PHASH_SCALE, true)
-        val gray = Array(PHASH_SCALE) { y ->
-            DoubleArray(PHASH_SCALE) { x ->
-                val pixel = scaled.getPixel(x, y)
-                // luminance: 0.299R + 0.587G + 0.114B
-                val r = (pixel shr 16) and 0xFF
-                val g = (pixel shr 8) and 0xFF
-                val b = pixel and 0xFF
+        val n = PHASH_SCALE
+        val low = PHASH_LOW
+
+        // Step 1: 缩放到 32×32 并取灰度
+        val scaled = Bitmap.createScaledBitmap(bitmap, n, n, true)
+        val pixels = IntArray(n * n)
+        scaled.getPixels(pixels, 0, n, 0, 0, n, n)
+        if (scaled !== bitmap) scaled.recycle()
+
+        val gray = Array(n) { y ->
+            DoubleArray(n) { x ->
+                val p = pixels[y * n + x]
+                val r = (p shr 16) and 0xFF
+                val g = (p shr 8) and 0xFF
+                val b = p and 0xFF
                 0.299 * r + 0.587 * g + 0.114 * b
             }
         }
-        if (scaled !== bitmap) scaled.recycle()
 
-        // Step 2: 二维 DCT-II
-        val dct = dct2D(gray)
+        // Step 2: 行方向 1D DCT，只保留前 low 个频率 → rowT[i][v]
+        val rowT = Array(n) { DoubleArray(low) }
+        for (i in 0 until n) {
+            val row = gray[i]
+            for (v in 0 until low) {
+                val cosV = cosTable[v]
+                var s = 0.0
+                for (x in 0 until n) s += row[x] * cosV[x]
+                rowT[i][v] = s
+            }
+        }
 
-        // Step 3: 取左上 8×8 低频块（跳过 [0][0] DC 分量后的 8×8 中的均值）
-        val block = Array(PHASH_LOW) { y -> DoubleArray(PHASH_LOW) { x -> dct[y][x] } }
+        // Step 3: 列方向 1D DCT，得到左上 8×8 块（含 DCT-II 的 c(u)·c(v) 因子，省略对比较无影响的公共系数）
+        val block = Array(low) { DoubleArray(low) }
+        for (u in 0 until low) {
+            val cosU = cosTable[u]
+            val cu = if (u == 0) INV_SQRT2 else 1.0
+            for (v in 0 until low) {
+                val cv = if (v == 0) INV_SQRT2 else 1.0
+                var s = 0.0
+                for (y in 0 until n) s += cosU[y] * rowT[y][v]
+                block[u][v] = cu * cv * s
+            }
+        }
 
         // Step 4: 阈值化（用除 DC 分量外的均值）
         var sum = 0.0
-        var count = 0
-        for (y in 0 until PHASH_LOW) for (x in 0 until PHASH_LOW) {
+        for (y in 0 until low) for (x in 0 until low) {
             if (x == 0 && y == 0) continue
             sum += block[y][x]
-            count++
         }
-        val mean = sum / count
+        val mean = sum / (low * low - 1)
         var hash = 0L
         var bit = 0
-        for (y in 0 until PHASH_LOW) for (x in 0 until PHASH_LOW) {
+        for (y in 0 until low) for (x in 0 until low) {
             if (block[y][x] > mean) hash = hash or (1L shl bit)
             bit++
         }
@@ -110,42 +144,23 @@ object HashEngine {
     fun isVisuallySimilar(a: Long, b: Long, threshold: Int = 10): Boolean =
         hammingDistance(a, b) < threshold
 
-    // ---- 内部工具 ----
+    // ---- 共享 IO / 解码 ----
 
-    /**
-     * 二维 DCT-II（Type-II Discrete Cosine Transform）
-     * 复杂度 O(N^4)，N=32 时计算约 10ms，可接受。
-     */
-    private fun dct2D(input: Array<DoubleArray>): Array<DoubleArray> {
-        val n = input.size
-        val out = Array(n) { DoubleArray(n) }
-        val factor = PI / (2.0 * n)
-
-        for (u in 0 until n) for (v in 0 until n) {
-            var sum = 0.0
-            for (i in 0 until n) for (j in 0 until n) {
-                sum += input[i][j] *
-                    cos((2.0 * i + 1) * u * factor) *
-                    cos((2.0 * j + 1) * v * factor)
-            }
-            val cu = if (u == 0) 1.0 / sqrt(2.0) else 1.0
-            val cv = if (v == 0) 1.0 / sqrt(2.0) else 1.0
-            out[u][v] = 0.25 * cu * cv * sum
+    /** 读取图片字节（带上限），供「一次读取多结果」复用。失败或空返回 null。 */
+    suspend fun readImageBytes(provider: FileAccessProvider, path: String): ByteArray? =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                provider.readFile(path).use { it.readBytesCapped(MAX_DECODE_BYTES) }
+            }.getOrNull()?.takeIf { it.isNotEmpty() }
         }
-        return out
-    }
 
-    /** 解码图片到不超过 maxSide 的尺寸（节省内存） */
-    private fun decodeScaled(stream: InputStream, maxSide: Int): Bitmap? {
-        val bytes = stream.readBytesCapped(MAX_DECODE_BYTES)
+    /** 解码字节到不超过 maxSide 的尺寸（节省内存）。损坏 / 非图片返回 null。 */
+    fun decodeScaledBytes(bytes: ByteArray, maxSide: Int): Bitmap? {
         if (bytes.isEmpty()) return null
-
-        // 第一次解码：只读 header 得到原始尺寸
         val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
         if (opts.outWidth <= 0 || opts.outHeight <= 0) return null
 
-        // 计算 inSampleSize
         var sample = 1
         var w = opts.outWidth
         var h = opts.outHeight
@@ -163,7 +178,7 @@ object HashEngine {
 
     /**
      * 读取流到 byte 数组，最多读 maxBytes 字节。
-     * QQ chatpic 单图普遍 < 5MB，10MB 上限做最后兜底。
+     * QQ chatpic 单图普遍 < 5MB，上限做最后兜底。
      */
     private fun InputStream.readBytesCapped(maxBytes: Int): ByteArray {
         val buffer = ByteArray(8192)
@@ -184,6 +199,7 @@ object HashEngine {
     private const val PHASH_SCALE = 32   // 缩放尺寸
     private const val PHASH_LOW = 8      // 低频块尺寸
     private const val MAX_PHASH_SIDE = 256
+    private val INV_SQRT2 = 1.0 / sqrt(2.0)
     private const val MAX_HASH_BYTES = 32 * 1024 * 1024   // xxHash 最多 32MB（限制罕见的超大图）
     private const val MAX_DECODE_BYTES = 32 * 1024 * 1024
 }

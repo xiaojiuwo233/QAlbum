@@ -32,20 +32,34 @@ object QualityAnalyzer {
         return withContext(Dispatchers.IO) {
             try {
                 val bitmap = provider.readFile(path).use { decode(it) }
-                if (bitmap == null || bitmap.width <= 0 || bitmap.height <= 0) {
-                    return@withContext QualityResult(0, 0, isCorrupt = true, isBlank = false, blurScore = null)
-                }
-                val blank = isBlank(bitmap)
-                val blur = if (!blank) computeBlur(bitmap) else 0f
-                val w = bitmap.width
-                val h = bitmap.height
+                    ?: return@withContext QualityResult(0, 0, isCorrupt = true, isBlank = false, blurScore = null)
+                val result = analyzeBitmap(bitmap)
                 bitmap.recycle()
-                QualityResult(width = w, height = h, isCorrupt = false, isBlank = blank, blurScore = blur)
+                result
             } catch (t: Throwable) {
                 Timber.w(t, "QualityAnalyzer failed for $path")
                 QualityResult(0, 0, isCorrupt = true, isBlank = false, blurScore = null)
             }
         }
+    }
+
+    /**
+     * 从已解码的 Bitmap 计算质量指标（调用方负责 Bitmap 的解码与回收）。
+     * 供分析阶段「一次解码 → 同时算 pHash + 质量」复用，避免重复读取文件。
+     */
+    fun analyzeBitmap(bitmap: Bitmap): QualityResult {
+        if (bitmap.width <= 0 || bitmap.height <= 0) {
+            return QualityResult(0, 0, isCorrupt = true, isBlank = false, blurScore = null)
+        }
+        val blank = isBlank(bitmap)
+        val blur = if (!blank) computeBlur(bitmap) else 0f
+        return QualityResult(
+            width = bitmap.width,
+            height = bitmap.height,
+            isCorrupt = false,
+            isBlank = blank,
+            blurScore = blur,
+        )
     }
 
     /** Laplacian 方差，越低越模糊 */

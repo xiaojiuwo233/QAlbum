@@ -47,7 +47,7 @@ class ScanController(
             _running.value = true
             try {
                 val root = settings.chatpicPath.first()
-                indexer.fullScan(root).collect { _progress.value = it }
+                indexer.fullScan(root, force = true).collect { _progress.value = it }
             } catch (t: Throwable) {
                 Timber.e(t, "Full scan failed")
                 _progress.value = ScanProgress.Failed(t.message ?: "未知错误")
