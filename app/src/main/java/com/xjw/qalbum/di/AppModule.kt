@@ -151,6 +151,7 @@ val appModule = module {
             analysisPipeline = get(),
             thumbnailTrashManager = get(),
             imageRepository = get(),
+            settings = get(),
         )
     }
     viewModel {

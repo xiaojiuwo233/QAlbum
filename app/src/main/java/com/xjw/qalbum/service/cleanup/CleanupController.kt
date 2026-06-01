@@ -4,6 +4,7 @@ import com.xjw.qalbum.data.db.dao.CleanupDao
 import com.xjw.qalbum.data.db.entity.CleanupBatchEntity
 import com.xjw.qalbum.data.db.entity.CleanupCandidateEntity
 import com.xjw.qalbum.data.db.entity.QuarantineEntity
+import com.xjw.qalbum.domain.model.CleanupConfig
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -19,8 +20,8 @@ class CleanupController(
     private val cleanupDao: CleanupDao,
 ) {
 
-    suspend fun generateBatch(strategy: CleanupStrategy): CleanupBatch =
-        recommender.generateBatch(strategy)
+    suspend fun generateBatch(config: CleanupConfig, label: String): CleanupBatch =
+        recommender.generateBatch(config, label)
 
     suspend fun applyBatch(batchId: Long): Int {
         val candidates = cleanupDao.getCandidates(batchId)

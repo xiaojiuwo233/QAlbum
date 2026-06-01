@@ -73,8 +73,9 @@ import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.db.entity.QuarantineEntity
 import com.xjw.qalbum.service.analysis.AnalysisState
+import com.xjw.qalbum.domain.model.CleanupConfig
+import com.xjw.qalbum.domain.model.CleanupPreset
 import com.xjw.qalbum.service.cleanup.CleanupBatch
-import com.xjw.qalbum.service.cleanup.CleanupStrategy
 import com.xjw.qalbum.ui.imageloading.ImageEntityModel
 import org.koin.androidx.compose.koinViewModel
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -108,7 +109,7 @@ fun CleanupScreen(
 ) {
     val analysisState by viewModel.analysisState.collectAsState()
     val analysisProgress by viewModel.analysisProgress.collectAsState()
-    val strategy by viewModel.strategy.collectAsState()
+    val cleanupConfig by viewModel.cleanupConfig.collectAsState()
     val busy by viewModel.busy.collectAsState()
     val lastBatch by viewModel.lastBatch.collectAsState()
     val reviewBatch by viewModel.reviewBatch.collectAsState()
@@ -195,9 +196,9 @@ fun CleanupScreen(
                 )
 
                 StrategyCard(
-                    current = strategy,
+                    config = cleanupConfig,
                     busy = busy,
-                    onSelect = viewModel::setStrategy,
+                    onSelectPreset = viewModel::applyPreset,
                     onGenerate = viewModel::generateBatch,
                 )
 
@@ -296,11 +297,12 @@ private fun AnalysisCard(
 
 @Composable
 private fun StrategyCard(
-    current: CleanupStrategy,
+    config: CleanupConfig,
     busy: Boolean,
-    onSelect: (CleanupStrategy) -> Unit,
+    onSelectPreset: (CleanupPreset) -> Unit,
     onGenerate: () -> Unit,
 ) {
+    val activePreset = CleanupPreset.match(config)
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(20.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -314,17 +316,17 @@ private fun StrategyCard(
             }
             Spacer(Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                strategies.forEach { s ->
+                CleanupPreset.entries.forEach { preset ->
                     FilterChip(
-                        selected = current.name == s.name,
-                        onClick = { onSelect(s) },
-                        label = { Text(s.displayName) },
+                        selected = activePreset == preset,
+                        onClick = { onSelectPreset(preset) },
+                        label = { Text(preset.displayName) },
                     )
                 }
             }
             Spacer(Modifier.height(12.dp))
             Text(
-                text = strategyHint(current),
+                text = presetHint(activePreset),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -1190,17 +1192,11 @@ private fun sourceTypeLabel(sourceType: String): String = when (sourceType) {
     else -> sourceType.ifBlank { "其他" }
 }
 
-private val strategies = listOf(
-    CleanupStrategy.Conservative,
-    CleanupStrategy.Balanced,
-    CleanupStrategy.Aggressive,
-)
-
-private fun strategyHint(s: CleanupStrategy): String = when (s) {
-    CleanupStrategy.Conservative -> "仅推荐高置信度删除（删除分 ≥ 0.7）。最安全。"
-    CleanupStrategy.Balanced -> "中等置信度（≥ 0.5）。覆盖大多数明显多余的文件。"
-    CleanupStrategy.Aggressive -> "激进（≥ 0.3）。可能包含一些有价值的图片，请仔细审核。"
-    is CleanupStrategy.Custom -> "自定义阈值 ${s.threshold}"
+private fun presetHint(preset: CleanupPreset?): String = when (preset) {
+    CleanupPreset.CONSERVATIVE -> "保守：只清理重复 / 损坏 / 空白，最安全。"
+    CleanupPreset.BALANCED -> "平衡：在保守基础上加入低分辨率 / 模糊，覆盖大多数明显多余的图。"
+    CleanupPreset.AGGRESSIVE -> "激进：全部维度开启且门限放宽，可能含有价值的图，请仔细审核。"
+    null -> "自定义规则：可在「设置 → 清理规则」里逐项调整开关与门限。"
 }
 
 private fun analysisStatusText(

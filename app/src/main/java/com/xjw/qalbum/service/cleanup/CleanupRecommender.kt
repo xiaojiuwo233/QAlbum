@@ -4,31 +4,8 @@ import com.xjw.qalbum.data.db.dao.CleanupDao
 import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.db.entity.CleanupBatchEntity
 import com.xjw.qalbum.data.db.entity.CleanupCandidateEntity
-import com.xjw.qalbum.data.db.entity.ImageEntity
-import com.xjw.qalbum.service.analysis.CleanupSignals
+import com.xjw.qalbum.domain.model.CleanupConfig
 import timber.log.Timber
-
-/**
- * 清理策略
- *
- * - CONSERVATIVE：仅删除高置信度候选（delete_score ≥ 0.7）
- * - BALANCED：中等置信度（≥ 0.5）
- * - AGGRESSIVE：激进（≥ 0.3）
- * - Custom：用户自定义阈值
- */
-sealed class CleanupStrategy(val displayName: String, val threshold: Float) {
-    data object Conservative : CleanupStrategy("保守", 0.7f)
-    data object Balanced : CleanupStrategy("平衡", 0.5f)
-    data object Aggressive : CleanupStrategy("激进", 0.3f)
-    data class Custom(val custom: Float) : CleanupStrategy("自定义", custom)
-
-    val name: String get() = when (this) {
-        Conservative -> "conservative"
-        Balanced -> "balanced"
-        Aggressive -> "aggressive"
-        is Custom -> "custom"
-    }
-}
 
 /** 风险报告：本批次按原因分类的概览 */
 data class RiskReport(
@@ -49,12 +26,15 @@ data class CleanupBatch(
 )
 
 /**
- * 清理推荐器
+ * 清理推荐器（方案 A）
  *
- * 输入：当前数据库中的图片 + 用户选择的策略
- * 输出：[CleanupBatch]，包含建议删除的候选 + 分类风险报告
+ * 输入：当前数据库中的图片 + 用户的 [CleanupConfig]
+ * 输出：[CleanupBatch]，包含命中启用维度的候选 + 分类风险报告
  *
- * 注意：本类不实际删除文件，只生成候选，
+ * 准入完全由 [CleanupRules] 按配置判定（命中任一启用维度即入候选），
+ * delete_score 仅用于候选排序。收藏 / 用户保留的图已在 DAO 查询层排除。
+ *
+ * 本类不实际删除文件，只生成候选，
  * 真正的删除由用户在 UI 审核后通过 [QuarantineManager] 执行。
  */
 class CleanupRecommender(
@@ -62,61 +42,56 @@ class CleanupRecommender(
     private val cleanupDao: CleanupDao,
 ) {
 
-    suspend fun generateBatch(strategy: CleanupStrategy, maxCount: Int = 500): CleanupBatch {
-        val threshold = strategy.threshold
-        val candidates = imageDao.getByDeleteScoreAbove(threshold, maxCount)
+    suspend fun generateBatch(
+        config: CleanupConfig,
+        label: String,
+        maxCount: Int = 500,
+    ): CleanupBatch {
+        // 候选池已按 delete_score DESC 排序；命中启用维度的取前 maxCount 个
+        val pool = imageDao.cleanupCandidatePool()
+        val hits = pool
+            .mapNotNull { row -> CleanupRules.classify(row, config)?.let { reason -> row to reason } }
+            .take(maxCount)
 
-        val byReason = candidates.groupBy { classifyReason(it) }
+        val byReason = hits.groupBy { it.second }
         val report = RiskReport(
-            totalCount = candidates.size,
-            totalSize = candidates.sumOf { it.size },
-            riskyCount = candidates.count { isRisky(it) },
-            safeCount = candidates.count { !isRisky(it) },
+            totalCount = hits.size,
+            totalSize = hits.sumOf { it.first.size },
+            riskyCount = hits.count { isRisky(it.second) },
+            safeCount = hits.count { !isRisky(it.second) },
             byReason = byReason.mapValues { (_, list) ->
-                ReasonGroup(list.size, list.sumOf { it.size })
+                ReasonGroup(list.size, list.sumOf { it.first.size })
             },
         )
 
         val batchId = cleanupDao.createBatch(
             CleanupBatchEntity(
-                strategy = strategy.name,
-                totalCount = candidates.size,
+                strategy = label,
+                totalCount = hits.size,
                 totalSize = report.totalSize,
                 status = "pending",
                 createdAt = System.currentTimeMillis(),
             )
         )
 
-        val entities = candidates.map { img ->
+        val entities = hits.map { (row, reason) ->
             CleanupCandidateEntity(
                 batchId = batchId,
-                imageId = img.id,
-                reason = classifyReason(img),
-                riskLevel = if (isRisky(img)) "high" else "safe",
-                score = img.deleteScore,
+                imageId = row.id,
+                reason = reason,
+                riskLevel = if (isRisky(reason)) "high" else "safe",
+                score = row.deleteScore,
             )
         }
         cleanupDao.insertCandidates(entities)
-        Timber.i("CleanupRecommender: batch $batchId with ${candidates.size} candidates (${strategy.displayName})")
+        Timber.i("CleanupRecommender: batch $batchId with ${hits.size} candidates ($label)")
 
         return CleanupBatch(batchId, report, entities)
     }
 
-    private fun classifyReason(img: ImageEntity): String = when {
-        img.isCorrupt -> "损坏"
-        img.isBlank -> "空白/纯色"
-        img.duplicateGroupId != null && !img.isDuplicateBest -> "重复"
-        CleanupSignals.isVeryLowResolution(img) -> "极低分辨率"
-        CleanupSignals.isLowResolution(img) -> "低分辨率"
-        (img.blurScore ?: 1000f) < 100f -> "模糊"
-        img.size <= 4096 -> "极小文件"
-        else -> "其他"
-    }
-
-    private fun isRisky(img: ImageEntity): Boolean {
-        // OCR / AI 标签接入后会扩展该判定。Phase 2 简化：把"重复非最优"视为低风险，其它都视作中高风险
-        return !(img.duplicateGroupId != null && !img.isDuplicateBest ||
-            img.isBlank ||
-            img.isCorrupt)
+    /** 重复 / 空白 / 损坏视为低风险（safe），其余视为中高风险 */
+    private fun isRisky(reason: String): Boolean = when (reason) {
+        CleanupRules.REASON_DUPLICATE, CleanupRules.REASON_BLANK, CleanupRules.REASON_CORRUPT -> false
+        else -> true
     }
 }

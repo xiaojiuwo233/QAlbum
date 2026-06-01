@@ -21,6 +21,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AutoAwesome
+import androidx.compose.material.icons.outlined.CleaningServices
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.PrivacyTip
 import androidx.compose.material.icons.outlined.Security
@@ -40,6 +41,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -63,6 +65,8 @@ import androidx.compose.ui.unit.dp
 import com.xjw.qalbum.BuildConfig
 import com.xjw.qalbum.R
 import com.xjw.qalbum.domain.model.AccessMode
+import com.xjw.qalbum.domain.model.CleanupConfig
+import com.xjw.qalbum.domain.model.CleanupPreset
 import com.xjw.qalbum.service.ai.AiPrivacyGuard
 import org.koin.androidx.compose.koinViewModel
 
@@ -220,7 +224,15 @@ fun SettingsScreen(
                 }
             }
 
-            // 4. AI 配置
+            // 4. 清理规则
+            SectionCard(
+                icon = Icons.Outlined.CleaningServices,
+                title = "清理规则",
+            ) {
+                CleanupRulesSection(viewModel = viewModel)
+            }
+
+            // 5. AI 配置
             SectionCard(
                 icon = Icons.Outlined.AutoAwesome,
                 title = stringResource(R.string.settings_section_ai),
@@ -488,5 +500,142 @@ private fun ClickableRow(label: String, onClick: () -> Unit) {
             .padding(vertical = 8.dp),
     ) {
         Text(label, style = MaterialTheme.typography.bodyLarge)
+    }
+}
+
+@Composable
+private fun CleanupRulesSection(viewModel: SettingsViewModel) {
+    val config by viewModel.cleanupConfig.collectAsState()
+    val activePreset = CleanupPreset.match(config)
+
+    Text("快捷预设", style = MaterialTheme.typography.titleSmall)
+    Spacer(Modifier.height(8.dp))
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        CleanupPreset.entries.forEach { preset ->
+            FilterChip(
+                selected = activePreset == preset,
+                onClick = { viewModel.applyCleanupPreset(preset) },
+                label = { Text(preset.displayName) },
+            )
+        }
+    }
+    Spacer(Modifier.height(4.dp))
+    Text(
+        if (activePreset == null) "已自定义" else "点预设套用一组开关与门限，可在下方逐项微调",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    HorizontalDivider(Modifier.padding(vertical = 12.dp))
+
+    CleanupDimensionRow(
+        title = "重复图片",
+        subtitle = "同组保留最优一张，其余建议清理",
+        enabled = config.duplicateEnabled,
+        onEnabledChange = viewModel::setDuplicateEnabled,
+    )
+    Spacer(Modifier.height(8.dp))
+    CleanupDimensionRow(
+        title = "低分辨率",
+        subtitle = "总像素低于门限的图",
+        enabled = config.lowResolutionEnabled,
+        onEnabledChange = viewModel::setLowResolutionEnabled,
+    ) {
+        ThresholdSlider(
+            value = config.lowResolutionMaxPixels.toFloat(),
+            valueRange = CleanupConfig.MIN_LOW_RES_MAX_PIXELS.toFloat()..CleanupConfig.MAX_LOW_RES_MAX_PIXELS.toFloat(),
+            onChange = { viewModel.setLowResolutionMaxPixels(it.toLong()) },
+            format = { "${String.format("%.1f", it / 1_000_000f)} MP 以下" },
+        )
+    }
+    Spacer(Modifier.height(8.dp))
+    CleanupDimensionRow(
+        title = "模糊",
+        subtitle = "清晰度低于门限的图",
+        enabled = config.blurEnabled,
+        onEnabledChange = viewModel::setBlurEnabled,
+    ) {
+        ThresholdSlider(
+            value = config.blurMaxScore,
+            valueRange = CleanupConfig.MIN_BLUR_MAX_SCORE..CleanupConfig.MAX_BLUR_MAX_SCORE,
+            onChange = { viewModel.setBlurMaxScore(it) },
+            format = { "清晰度 ${it.toInt()} 以下" },
+        )
+    }
+    Spacer(Modifier.height(8.dp))
+    CleanupDimensionRow(
+        title = "极小文件",
+        subtitle = "文件大小低于门限的图",
+        enabled = config.tinyFileEnabled,
+        onEnabledChange = viewModel::setTinyFileEnabled,
+    ) {
+        ThresholdSlider(
+            value = config.tinyFileMaxBytes.toFloat(),
+            valueRange = CleanupConfig.MIN_TINY_FILE_MAX_BYTES.toFloat()..CleanupConfig.MAX_TINY_FILE_MAX_BYTES.toFloat(),
+            onChange = { viewModel.setTinyFileMaxBytes(it.toLong()) },
+            format = { "${(it / 1024).toInt()} KB 以下" },
+        )
+    }
+    Spacer(Modifier.height(8.dp))
+    CleanupDimensionRow(
+        title = "空白 / 纯色",
+        subtitle = "几乎纯色、无内容的图",
+        enabled = config.blankEnabled,
+        onEnabledChange = viewModel::setBlankEnabled,
+    )
+    Spacer(Modifier.height(8.dp))
+    CleanupDimensionRow(
+        title = "损坏",
+        subtitle = "无法解码的图",
+        enabled = config.corruptEnabled,
+        onEnabledChange = viewModel::setCorruptEnabled,
+    )
+}
+
+@Composable
+private fun CleanupDimensionRow(
+    title: String,
+    subtitle: String,
+    enabled: Boolean,
+    onEnabledChange: (Boolean) -> Unit,
+    thresholdContent: (@Composable () -> Unit)? = null,
+) {
+    Column {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleSmall)
+                Text(
+                    subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(checked = enabled, onCheckedChange = onEnabledChange)
+        }
+        if (enabled && thresholdContent != null) {
+            thresholdContent()
+        }
+    }
+}
+
+@Composable
+private fun ThresholdSlider(
+    value: Float,
+    valueRange: ClosedFloatingPointRange<Float>,
+    onChange: (Float) -> Unit,
+    format: (Float) -> String,
+) {
+    var sliderValue by remember(value) { mutableStateOf(value) }
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            format(sliderValue),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        Slider(
+            value = sliderValue,
+            onValueChange = { sliderValue = it },
+            valueRange = valueRange,
+            onValueChangeFinished = { onChange(sliderValue) },
+        )
     }
 }

@@ -9,8 +9,12 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.xjw.qalbum.domain.model.AccessMode
+import com.xjw.qalbum.domain.model.CleanupConfig
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 
 // 顶层扩展：每个 Context 共享同一个 DataStore 实例
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "qalbum_settings")
@@ -23,6 +27,8 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(na
 class SettingsRepository(private val context: Context) {
 
     private val ds = context.dataStore
+
+    private val cleanupJson = Json { ignoreUnknownKeys = true }
 
     // ---- 权限模式 ----
 
@@ -83,6 +89,19 @@ class SettingsRepository(private val context: Context) {
         ds.edit { it[Keys.QUARANTINE_DAYS] = days }
     }
 
+    // ---- 清理规则配置 ----
+
+    /** 每类清理维度的开关 + 门限；缺省或解析失败回退到 [CleanupConfig.DEFAULT]（平衡档） */
+    val cleanupConfig: Flow<CleanupConfig> = ds.data.map { prefs ->
+        prefs[Keys.CLEANUP_CONFIG]?.let { raw ->
+            runCatching { cleanupJson.decodeFromString<CleanupConfig>(raw) }.getOrNull()
+        } ?: CleanupConfig.DEFAULT
+    }
+
+    suspend fun setCleanupConfig(config: CleanupConfig) {
+        ds.edit { it[Keys.CLEANUP_CONFIG] = cleanupJson.encodeToString(config) }
+    }
+
     // ---- 主题动态取色 ----
 
     val dynamicColorEnabled: Flow<Boolean> = ds.data.map { it[Keys.DYNAMIC_COLOR] ?: true }
@@ -107,6 +126,8 @@ class SettingsRepository(private val context: Context) {
         val AI_EMBEDDING_MODEL = stringPreferencesKey("ai_embedding_model")
 
         val QUARANTINE_DAYS = intPreferencesKey("quarantine_days")
+
+        val CLEANUP_CONFIG = stringPreferencesKey("cleanup_config")
 
         val DYNAMIC_COLOR = booleanPreferencesKey("dynamic_color")
     }

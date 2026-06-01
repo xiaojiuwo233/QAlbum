@@ -7,13 +7,15 @@ import com.xjw.qalbum.data.db.entity.CleanupBatchEntity
 import com.xjw.qalbum.data.db.entity.CleanupCandidateEntity
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.db.entity.QuarantineEntity
+import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.data.repository.ImageRepository
+import com.xjw.qalbum.domain.model.CleanupConfig
+import com.xjw.qalbum.domain.model.CleanupPreset
 import com.xjw.qalbum.service.analysis.AnalysisPipeline
 import com.xjw.qalbum.service.analysis.AnalysisProgress
 import com.xjw.qalbum.service.analysis.AnalysisState
 import com.xjw.qalbum.service.cleanup.CleanupBatch
 import com.xjw.qalbum.service.cleanup.CleanupController
-import com.xjw.qalbum.service.cleanup.CleanupStrategy
 import com.xjw.qalbum.service.cleanup.ThumbnailTrashManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -27,6 +29,7 @@ class CleanupViewModel(
     private val analysisPipeline: AnalysisPipeline,
     private val thumbnailTrashManager: ThumbnailTrashManager,
     private val imageRepository: ImageRepository,
+    private val settings: SettingsRepository,
 ) : ViewModel() {
 
     val analysisState: StateFlow<AnalysisState> = analysisPipeline.state
@@ -61,11 +64,13 @@ class CleanupViewModel(
     private val _busy = MutableStateFlow(false)
     val busy: StateFlow<Boolean> = _busy.asStateFlow()
 
-    private val _strategy = MutableStateFlow<CleanupStrategy>(CleanupStrategy.Balanced)
-    val strategy: StateFlow<CleanupStrategy> = _strategy.asStateFlow()
+    /** 当前清理配置（每类开关 + 门限），由设置页或三档预设写入 */
+    val cleanupConfig: StateFlow<CleanupConfig> = settings.cleanupConfig
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CleanupConfig.DEFAULT)
 
-    fun setStrategy(s: CleanupStrategy) {
-        _strategy.value = s
+    /** 点击三档预设：把对应配置写入设置（用户之后可在设置页逐项微调） */
+    fun applyPreset(preset: CleanupPreset) {
+        viewModelScope.launch { settings.setCleanupConfig(preset.config) }
     }
 
     fun startAnalysis() = analysisPipeline.start()
@@ -75,7 +80,9 @@ class CleanupViewModel(
         viewModelScope.launch {
             _busy.value = true
             try {
-                val batch = cleanupController.generateBatch(_strategy.value)
+                val config = cleanupConfig.value
+                val label = CleanupPreset.match(config)?.displayName ?: "自定义"
+                val batch = cleanupController.generateBatch(config, label)
                 _lastBatch.value = batch
                 loadReviewBatch(batch)
             } finally {

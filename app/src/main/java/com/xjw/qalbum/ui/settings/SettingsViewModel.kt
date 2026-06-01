@@ -5,6 +5,8 @@ import androidx.lifecycle.viewModelScope
 import com.xjw.qalbum.access.AccessManager
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.domain.model.AccessMode
+import com.xjw.qalbum.domain.model.CleanupConfig
+import com.xjw.qalbum.domain.model.CleanupPreset
 import com.xjw.qalbum.domain.model.ScanProgress
 import com.xjw.qalbum.service.indexer.ScanController
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -12,6 +14,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -114,6 +117,29 @@ class SettingsViewModel(
     fun setAiEmbeddingModel(model: String) {
         viewModelScope.launch { settings.setAiEmbeddingModel(model.trim()) }
     }
+
+    // ---- 清理规则配置 ----
+
+    val cleanupConfig: StateFlow<CleanupConfig> = settings.cleanupConfig
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CleanupConfig.DEFAULT)
+
+    private fun updateCleanupConfig(transform: (CleanupConfig) -> CleanupConfig) {
+        viewModelScope.launch {
+            settings.setCleanupConfig(transform(settings.cleanupConfig.first()))
+        }
+    }
+
+    fun applyCleanupPreset(preset: CleanupPreset) = updateCleanupConfig { preset.config }
+
+    fun setDuplicateEnabled(enabled: Boolean) = updateCleanupConfig { it.copy(duplicateEnabled = enabled) }
+    fun setLowResolutionEnabled(enabled: Boolean) = updateCleanupConfig { it.copy(lowResolutionEnabled = enabled) }
+    fun setLowResolutionMaxPixels(pixels: Long) = updateCleanupConfig { it.copy(lowResolutionMaxPixels = pixels) }
+    fun setBlurEnabled(enabled: Boolean) = updateCleanupConfig { it.copy(blurEnabled = enabled) }
+    fun setBlurMaxScore(score: Float) = updateCleanupConfig { it.copy(blurMaxScore = score) }
+    fun setTinyFileEnabled(enabled: Boolean) = updateCleanupConfig { it.copy(tinyFileEnabled = enabled) }
+    fun setTinyFileMaxBytes(bytes: Long) = updateCleanupConfig { it.copy(tinyFileMaxBytes = bytes) }
+    fun setBlankEnabled(enabled: Boolean) = updateCleanupConfig { it.copy(blankEnabled = enabled) }
+    fun setCorruptEnabled(enabled: Boolean) = updateCleanupConfig { it.copy(corruptEnabled = enabled) }
 }
 
 data class SettingsUiState(

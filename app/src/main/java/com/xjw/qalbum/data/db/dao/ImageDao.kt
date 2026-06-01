@@ -443,4 +443,43 @@ interface ImageDao {
         WHERE status = 'active' AND source_type <> 'chatthumb' AND id IN (:ids)
     """)
     suspend fun getByIds(ids: List<Long>): List<ImageEntity>
+
+    // ---- 清理候选池（方案 A：按维度规则筛选）----
+
+    /**
+     * 清理候选池：已排除收藏 / 用户保留的图，只取规则判定所需的最小字段，
+     * 避免把整行装载进内存。具体命中哪个维度由
+     * [com.xjw.qalbum.service.cleanup.CleanupRules] 在内存判定。
+     */
+    @Query("""
+        SELECT id,
+               width,
+               height,
+               blur_score AS blurScore,
+               size,
+               is_blank AS isBlank,
+               is_corrupt AS isCorrupt,
+               duplicate_group_id AS duplicateGroupId,
+               is_duplicate_best AS isDuplicateBest,
+               delete_score AS deleteScore
+        FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb'
+          AND is_protected = 0 AND (user_keep IS NULL OR user_keep = 0)
+        ORDER BY delete_score DESC
+    """)
+    suspend fun cleanupCandidatePool(): List<CleanupSignalRow>
 }
+
+/** 清理判定所需的最小图片信号投影（由 [ImageDao.cleanupCandidatePool] 用列别名填充） */
+data class CleanupSignalRow(
+    val id: Long,
+    val width: Int,
+    val height: Int,
+    val blurScore: Float?,
+    val size: Long,
+    val isBlank: Boolean,
+    val isCorrupt: Boolean,
+    val duplicateGroupId: Long?,
+    val isDuplicateBest: Boolean,
+    val deleteScore: Float,
+)
