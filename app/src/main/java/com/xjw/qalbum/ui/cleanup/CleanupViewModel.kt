@@ -35,6 +35,15 @@ class CleanupViewModel(
     val analysisState: StateFlow<AnalysisState> = analysisPipeline.state
     val analysisProgress: StateFlow<AnalysisProgress?> = analysisPipeline.progress
 
+    /** 全局分析完成度（DB 聚合）：驱动「已分析 X/Y」总进度条与按钮三态 */
+    val analysisOverview: StateFlow<ImageDao.AnalysisProgressRow> =
+        imageRepository.observeAnalysisProgress()
+            .stateIn(
+                viewModelScope,
+                SharingStarted.WhileSubscribed(5_000),
+                ImageDao.AnalysisProgressRow(0, 0, 0, 0, 0, 0),
+            )
+
     val recentBatches: StateFlow<List<CleanupBatchEntity>> = cleanupController.observeRecentBatches()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 

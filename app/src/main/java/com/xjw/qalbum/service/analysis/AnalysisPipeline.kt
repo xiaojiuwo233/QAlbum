@@ -352,7 +352,15 @@ class AnalysisPipeline(
 }
 
 enum class AnalysisState { Idle, Running, Done, Failed }
-enum class AnalysisPhase { HASH, QUALITY, DUPLICATE, OCR, AI_TAG, EMBEDDING, SCORE }
+enum class AnalysisPhase(val displayName: String) {
+    HASH("哈希/质量"),
+    QUALITY("质量"),
+    DUPLICATE("查重"),
+    OCR("文字识别"),
+    AI_TAG("AI 标签"),
+    EMBEDDING("向量"),
+    SCORE("评分"),
+}
 
 data class AnalysisProgress(
     val phase: AnalysisPhase,

@@ -139,7 +139,14 @@ val appModule = module {
             embeddingDao = get(),
         )
     }
-    viewModel { DashboardViewModel(imageRepository = get(), scanController = get(), cleanupDao = get()) }
+    viewModel {
+        DashboardViewModel(
+            imageRepository = get(),
+            scanController = get(),
+            cleanupDao = get(),
+            analysisPipeline = get(),
+        )
+    }
     viewModel {
         GalleryViewModel(
             imageRepository = get(),

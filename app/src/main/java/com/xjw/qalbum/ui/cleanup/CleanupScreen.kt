@@ -109,6 +109,7 @@ fun CleanupScreen(
 ) {
     val analysisState by viewModel.analysisState.collectAsState()
     val analysisProgress by viewModel.analysisProgress.collectAsState()
+    val analysisOverview by viewModel.analysisOverview.collectAsState()
     val cleanupConfig by viewModel.cleanupConfig.collectAsState()
     val busy by viewModel.busy.collectAsState()
     val lastBatch by viewModel.lastBatch.collectAsState()
@@ -191,6 +192,7 @@ fun CleanupScreen(
                 AnalysisCard(
                     state = analysisState,
                     progress = analysisProgress,
+                    overview = analysisOverview,
                     onStart = viewModel::startAnalysis,
                     onCancel = viewModel::cancelAnalysis,
                 )
@@ -252,13 +254,42 @@ private fun ThumbnailEntryCard(
     }
 }
 
+/** 分析卡片主按钮的语义状态（抽出便于单测） */
+internal enum class AnalysisAction { START, CONTINUE, ALL_DONE, CANCEL, NO_IMAGES }
+
+/** 已完成「基础分析」(哈希/质量 + OCR) 的图片数 = 总数 − 待基础分析数 */
+internal fun analyzedCount(overview: ImageDao.AnalysisProgressRow): Int =
+    (overview.totalImages - overview.pendingBase).coerceAtLeast(0)
+
+/**
+ * 主按钮三态判定：
+ * 运行中→取消；无图→禁用；基础全完成→已全部分析；分析过→继续；否则→开始。
+ * 「是否分析过」以 hashDone>0 判断（hash 是所有图的必经第一阶段）。
+ */
+internal fun analysisAction(
+    state: AnalysisState,
+    overview: ImageDao.AnalysisProgressRow,
+): AnalysisAction = when {
+    state == AnalysisState.Running -> AnalysisAction.CANCEL
+    overview.totalImages == 0 -> AnalysisAction.NO_IMAGES
+    overview.pendingBase == 0 -> AnalysisAction.ALL_DONE
+    overview.hashDone > 0 -> AnalysisAction.CONTINUE
+    else -> AnalysisAction.START
+}
+
 @Composable
 private fun AnalysisCard(
     state: AnalysisState,
     progress: com.xjw.qalbum.service.analysis.AnalysisProgress?,
+    overview: ImageDao.AnalysisProgressRow,
     onStart: () -> Unit,
     onCancel: () -> Unit,
 ) {
+    val total = overview.totalImages
+    val analyzed = analyzedCount(overview)
+    val fraction = if (total > 0) analyzed.toFloat() / total else 0f
+    val action = analysisAction(state, overview)
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
@@ -271,25 +302,110 @@ private fun AnalysisCard(
                     tint = MaterialTheme.colorScheme.primary,
                 )
                 Spacer(Modifier.size(12.dp))
-                Text("分析图片", style = MaterialTheme.typography.titleMedium)
-            }
-            Spacer(Modifier.height(8.dp))
-            Text(
-                text = analysisStatusText(state, progress),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            if (state == AnalysisState.Running) {
-                Spacer(Modifier.height(8.dp))
-                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-            }
-            Spacer(Modifier.height(12.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (state == AnalysisState.Running) {
-                    OutlinedButton(onClick = onCancel) { Text("取消") }
-                } else {
-                    Button(onClick = onStart) { Text("开始分析") }
+                Text(
+                    "分析图片",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.weight(1f),
+                )
+                when (action) {
+                    AnalysisAction.CANCEL ->
+                        OutlinedButton(onClick = onCancel) { Text("取消") }
+                    AnalysisAction.ALL_DONE ->
+                        Button(onClick = {}, enabled = false) { Text("已全部分析") }
+                    AnalysisAction.NO_IMAGES ->
+                        Button(onClick = {}, enabled = false) { Text("开始分析") }
+                    AnalysisAction.CONTINUE ->
+                        Button(onClick = onStart) { Text("继续分析") }
+                    AnalysisAction.START ->
+                        Button(onClick = onStart) { Text("开始分析") }
                 }
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            // 总进度（常驻）：让用户随时看到「已分析多少、还剩多少」
+            if (total > 0) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text(
+                        "已分析 ${formatCount(analyzed)} / ${formatCount(total)} 张",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Text(
+                        "${(fraction * 100).toInt()}%",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(Modifier.height(6.dp))
+                LinearProgressIndicator(
+                    progress = { fraction.coerceIn(0f, 1f) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(MaterialTheme.shapes.extraSmall),
+                )
+            } else {
+                Text(
+                    "扫描图片后即可开始分析",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            // 运行态：当前阶段 + 本批进度（实时，来自内存 StateFlow）
+            if (state == AnalysisState.Running) {
+                Spacer(Modifier.height(12.dp))
+                val phaseLabel = progress?.phase?.displayName ?: "准备中"
+                val detail = when {
+                    progress == null -> "准备中…"
+                    progress.total > 0 -> "正在$phaseLabel · ${progress.processed}/${progress.total}"
+                    else -> "正在$phaseLabel…${progress.msg?.let { " $it" } ?: ""}"
+                }
+                Text(
+                    detail,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(6.dp))
+                val batchFraction = progress
+                    ?.takeIf { it.total > 0 }
+                    ?.let { it.processed.toFloat() / it.total }
+                if (batchFraction != null) {
+                    LinearProgressIndicator(
+                        progress = { batchFraction.coerceIn(0f, 1f) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(MaterialTheme.shapes.extraSmall),
+                    )
+                } else {
+                    LinearProgressIndicator(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(MaterialTheme.shapes.extraSmall),
+                    )
+                }
+            }
+
+            // 失败态
+            if (state == AnalysisState.Failed) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "上次分析失败：${progress?.msg ?: "未知错误"}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+
+            // 全部完成引导（重置入口仍在设置页，这里只做文字引导）
+            if (action == AnalysisAction.ALL_DONE) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "基础分析已全部完成。如需重跑，可到 设置 → 分析 → 重置完成标记。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }
@@ -1199,16 +1315,8 @@ private fun presetHint(preset: CleanupPreset?): String = when (preset) {
     null -> "自定义规则：可在「设置 → 清理规则」里逐项调整开关与门限。"
 }
 
-private fun analysisStatusText(
-    state: AnalysisState,
-    progress: com.xjw.qalbum.service.analysis.AnalysisProgress?,
-): String = when (state) {
-    AnalysisState.Idle -> "尚未运行分析。点击「开始分析」会逐步计算 hash、模糊度、重复组等。"
-    AnalysisState.Running -> progress?.let { "${it.phase} · ${it.processed}/${it.total} ${it.msg ?: ""}" }
-        ?: "运行中…"
-    AnalysisState.Done -> "上次分析已完成"
-    AnalysisState.Failed -> "上次分析失败：${progress?.msg ?: "未知"}"
-}
+private fun formatCount(n: Int): String =
+    if (n >= 10_000) "%.1f万".format(n / 10_000f) else n.toString()
 
 private fun formatBytes(bytes: Long): String {
     if (bytes <= 0) return "0 B"

@@ -66,6 +66,8 @@ import androidx.compose.ui.unit.dp
 import com.xjw.qalbum.R
 import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.domain.model.ScanProgress
+import com.xjw.qalbum.service.analysis.AnalysisProgress
+import com.xjw.qalbum.service.analysis.AnalysisState
 import org.koin.androidx.compose.koinViewModel
 
 @Composable
@@ -76,6 +78,8 @@ fun DashboardScreen(
     val state by viewModel.uiState.collectAsState()
     val running by viewModel.scanRunning.collectAsState()
     val progress by viewModel.scanProgress.collectAsState()
+    val analysisState by viewModel.analysisState.collectAsState()
+    val analysisRunning by viewModel.analysisRunningProgress.collectAsState()
 
     Scaffold(
         topBar = {
@@ -107,7 +111,11 @@ fun DashboardScreen(
                 onFull = viewModel::startFullScan,
                 onCancel = viewModel::cancelScan,
             )
-            AnalysisPipelineCard(state.analysisProgress)
+            AnalysisPipelineCard(
+                progress = state.analysisProgress,
+                analysisState = analysisState,
+                running = analysisRunning,
+            )
             ImageHealthCard(state)
         }
     }
@@ -376,7 +384,11 @@ private fun LegendItem(
 // ── Analysis Pipeline Rings ─────────────────────────────────────────
 
 @Composable
-private fun AnalysisPipelineCard(progress: ImageDao.AnalysisProgressRow) {
+private fun AnalysisPipelineCard(
+    progress: ImageDao.AnalysisProgressRow,
+    analysisState: AnalysisState,
+    running: AnalysisProgress?,
+) {
     val totalImages = progress.totalImages.coerceAtLeast(1)
 
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -386,6 +398,41 @@ private fun AnalysisPipelineCard(progress: ImageDao.AnalysisProgressRow) {
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
             )
+
+            // 分析运行时：实时显示当前阶段与本批进度（与清理页共享同一 pipeline 单例）
+            if (analysisState == AnalysisState.Running) {
+                Spacer(Modifier.height(12.dp))
+                val phaseLabel = running?.phase?.displayName ?: "准备中"
+                val detail = when {
+                    running == null -> "准备中…"
+                    running.total > 0 -> "正在$phaseLabel · ${running.processed}/${running.total}"
+                    else -> "正在$phaseLabel…${running.msg?.let { " $it" } ?: ""}"
+                }
+                Text(
+                    detail,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Spacer(Modifier.height(6.dp))
+                val batchFraction = running
+                    ?.takeIf { it.total > 0 }
+                    ?.let { it.processed.toFloat() / it.total }
+                if (batchFraction != null) {
+                    LinearProgressIndicator(
+                        progress = { batchFraction.coerceIn(0f, 1f) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(MaterialTheme.shapes.extraSmall),
+                    )
+                } else {
+                    LinearProgressIndicator(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(MaterialTheme.shapes.extraSmall),
+                    )
+                }
+            }
+
             Spacer(Modifier.height(16.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),

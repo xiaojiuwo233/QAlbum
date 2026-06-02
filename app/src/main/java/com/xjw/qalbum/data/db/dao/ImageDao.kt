@@ -314,18 +314,27 @@ interface ImageDao {
             IFNULL(SUM(CASE WHEN hash_done = 1 THEN 1 ELSE 0 END), 0) AS hashDone,
             IFNULL(SUM(CASE WHEN ocr_done = 1 THEN 1 ELSE 0 END), 0) AS ocrDone,
             IFNULL(SUM(CASE WHEN ai_done = 1 THEN 1 ELSE 0 END), 0) AS aiDone,
-            IFNULL(SUM(CASE WHEN embedding_done = 1 THEN 1 ELSE 0 END), 0) AS embeddingDone
+            IFNULL(SUM(CASE WHEN embedding_done = 1 THEN 1 ELSE 0 END), 0) AS embeddingDone,
+            IFNULL(SUM(CASE WHEN hash_done = 0
+                            OR (ocr_done = 0 AND is_corrupt = 0 AND width >= 64 AND height >= 64)
+                       THEN 1 ELSE 0 END), 0) AS pendingBase
         FROM images
         WHERE status = 'active' AND source_type <> 'chatthumb'
     """)
     fun observeAnalysisProgress(): Flow<AnalysisProgressRow>
 
+    /**
+     * 分析完成度聚合。[pendingBase] = 仍需做「基础分析」(哈希/质量 或 OCR)的图片数：
+     * 与 [pendingHash] / [pendingOcr] 的筛选条件保持一致（OCR 排除损坏图与过小图）。
+     * 「已分析」= totalImages - pendingBase，用于总进度条与按钮三态。
+     */
     data class AnalysisProgressRow(
         val totalImages: Int,
         val hashDone: Int,
         val ocrDone: Int,
         val aiDone: Int,
         val embeddingDone: Int,
+        val pendingBase: Int,
     )
 
     @Query("""
