@@ -354,6 +354,7 @@ private fun TimelineTopBar(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .statusBarsPadding()
             .background(MaterialTheme.colorScheme.background)
             .padding(start = 16.dp, top = 10.dp, end = 8.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -430,6 +431,7 @@ private fun SelectionTopBar(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .statusBarsPadding()
             .background(MaterialTheme.colorScheme.background)
             .padding(start = 4.dp, top = 8.dp, end = 6.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
