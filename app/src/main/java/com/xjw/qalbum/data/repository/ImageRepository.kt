@@ -9,6 +9,7 @@ import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.db.entity.OcrTextEntity
 import com.xjw.qalbum.domain.model.GallerySort
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
 
 /**
  * 图片仓库
@@ -56,6 +57,15 @@ class ImageRepository(
     suspend fun timelineSnapshot(): List<ImageEntity> = imageDao.listActiveTimeline()
     suspend fun favoriteTimelineSnapshot(): List<ImageEntity> = imageDao.listFavoriteTimeline()
 
+    fun observeTimelineDateBucketCounts(): Flow<Map<Long, Int>> =
+        imageDao.observeTimelineDateBucketCounts().map { rows -> rows.toBucketCountMap() }
+
+    fun observeTimelineSizeBucketCounts(): Flow<Map<Long, Int>> =
+        imageDao.observeTimelineSizeBucketCounts().map { rows -> rows.toBucketCountMap() }
+
+    fun observeFavoriteDateBucketCounts(): Flow<Map<Long, Int>> =
+        imageDao.observeFavoriteDateBucketCounts().map { rows -> rows.toBucketCountMap() }
+
     /** 详情页时间线 id 列表（轻量，支撑左右滑动按需加载）；与图库网格使用同一 [sort] */
     suspend fun timelineIds(sort: GallerySort): List<Long> = when (sort) {
         GallerySort.DATE_DESC -> imageDao.timelineIds()
@@ -99,3 +109,6 @@ class ImageRepository(
     fun observeThumbnailTrashSummary(): Flow<ImageDao.ThumbnailTrashSummary> =
         imageDao.observeThumbnailTrashSummary()
 }
+
+private fun List<ImageDao.BucketCountRow>.toBucketCountMap(): Map<Long, Int> =
+    associate { row -> row.bucketKey to row.count }

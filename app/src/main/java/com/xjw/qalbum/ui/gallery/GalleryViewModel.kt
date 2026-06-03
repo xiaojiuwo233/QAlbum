@@ -16,12 +16,13 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map as flowMap
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
-import java.text.SimpleDateFormat
 import java.util.Locale
 
 /**
@@ -67,11 +68,21 @@ class GalleryViewModel(
 
     val timeline: Flow<PagingData<GalleryTimelineItem>> =
         settings.gallerySort.flatMapLatest { sort ->
-            imageRepository.timelinePager(sort).withHeaders(sort)
+            when (sort) {
+                GallerySort.SIZE_DESC -> imageRepository
+                    .timelinePager(sort)
+                    .withSizeHeaders(imageRepository.observeTimelineSizeBucketCounts())
+
+                GallerySort.DATE_DESC, GallerySort.DATE_ASC -> imageRepository
+                    .timelinePager(sort)
+                    .withDateHeaders(imageRepository.observeTimelineDateBucketCounts())
+            }
         }.cachedIn(viewModelScope)
 
     val favoriteTimeline: Flow<PagingData<GalleryTimelineItem>> =
-        imageRepository.favoriteTimelinePager().withDateHeaders()
+        imageRepository
+            .favoriteTimelinePager()
+            .withDateHeaders(imageRepository.observeFavoriteDateBucketCounts())
             .cachedIn(viewModelScope)
 
     val favoriteCount: Flow<Int> = imageRepository.observeFavoriteCount()
@@ -129,14 +140,11 @@ sealed class GalleryTimelineItem {
     data class Photo(val image: ImageEntity) : GalleryTimelineItem()
 }
 
-private fun Flow<PagingData<ImageEntity>>.withHeaders(sort: GallerySort): Flow<PagingData<GalleryTimelineItem>> =
-    when (sort) {
-        GallerySort.SIZE_DESC -> withSizeHeaders()
-        GallerySort.DATE_DESC, GallerySort.DATE_ASC -> withDateHeaders()
-    }
-
-private fun Flow<PagingData<ImageEntity>>.withDateHeaders(): Flow<PagingData<GalleryTimelineItem>> =
+private fun Flow<PagingData<ImageEntity>>.withDateHeaders(
+    bucketCounts: Flow<Map<Long, Int>>,
+): Flow<PagingData<GalleryTimelineItem>> =
     flowMap { pagingData: PagingData<ImageEntity> ->
+        val counts = bucketCounts.first()
         pagingData
             .pagingMap { image: ImageEntity -> GalleryTimelineItem.Photo(image) as GalleryTimelineItem }
             .insertSeparators { before: GalleryTimelineItem?, after: GalleryTimelineItem? ->
@@ -144,15 +152,21 @@ private fun Flow<PagingData<ImageEntity>>.withDateHeaders(): Flow<PagingData<Gal
                 val beforePhoto = before as? GalleryTimelineItem.Photo
                 val afterKey = dayKey(afterPhoto.image.mtime)
                 if (beforePhoto == null || dayKey(beforePhoto.image.mtime) != afterKey) {
-                    GalleryTimelineItem.Header(key = "d-$afterKey", label = dayLabel(afterPhoto.image.mtime))
+                    GalleryTimelineItem.Header(
+                        key = "d-$afterKey",
+                        label = headerLabel(dayLabel(afterPhoto.image.mtime), counts[afterKey]),
+                    )
                 } else {
                     null
                 }
             }
     }
 
-private fun Flow<PagingData<ImageEntity>>.withSizeHeaders(): Flow<PagingData<GalleryTimelineItem>> =
+private fun Flow<PagingData<ImageEntity>>.withSizeHeaders(
+    bucketCounts: Flow<Map<Long, Int>>,
+): Flow<PagingData<GalleryTimelineItem>> =
     flowMap { pagingData: PagingData<ImageEntity> ->
+        val counts = bucketCounts.first()
         pagingData
             .pagingMap { image: ImageEntity -> GalleryTimelineItem.Photo(image) as GalleryTimelineItem }
             .insertSeparators { before: GalleryTimelineItem?, after: GalleryTimelineItem? ->
@@ -160,21 +174,27 @@ private fun Flow<PagingData<ImageEntity>>.withSizeHeaders(): Flow<PagingData<Gal
                 val beforePhoto = before as? GalleryTimelineItem.Photo
                 val afterKey = sizeBucketId(afterPhoto.image.size)
                 if (beforePhoto == null || sizeBucketId(beforePhoto.image.size) != afterKey) {
-                    GalleryTimelineItem.Header(key = "s-$afterKey", label = sizeBucketLabel(afterPhoto.image.size))
+                    GalleryTimelineItem.Header(
+                        key = "s-$afterKey",
+                        label = headerLabel(sizeBucketLabel(afterPhoto.image.size), counts[afterKey]),
+                    )
                 } else {
                     null
                 }
             }
     }
 
+private fun headerLabel(label: String, count: Int?): String =
+    if (count == null) label else "$label（$count）"
+
 // ---- 日期分桶 ----
 
-private fun dayKey(timestampMs: Long): Int {
+private fun dayKey(timestampMs: Long): Long {
     val calendar = Calendar.getInstance()
     calendar.timeInMillis = timestampMs
     val year = calendar.get(Calendar.YEAR)
     val day = calendar.get(Calendar.DAY_OF_YEAR)
-    return year * 1000 + day
+    return year * 1000L + day
 }
 
 private val dateFormatter = SimpleDateFormat("yyyy年M月d日", Locale.CHINA)

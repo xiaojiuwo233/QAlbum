@@ -226,6 +226,49 @@ interface ImageDao {
     """)
     fun pagingActiveTimelineBySize(): PagingSource<Int, ImageEntity>
 
+    @Query("""
+        SELECT
+            CAST(strftime('%Y', mtime / 1000, 'unixepoch', 'localtime') AS INTEGER) * 1000
+                + CAST(strftime('%j', mtime / 1000, 'unixepoch', 'localtime') AS INTEGER) AS bucketKey,
+            COUNT(*) AS count
+        FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb'
+        GROUP BY bucketKey
+    """)
+    fun observeTimelineDateBucketCounts(): Flow<List<BucketCountRow>>
+
+    @Query("""
+        SELECT
+            CASE
+                WHEN size >= 10485760 THEN 100000
+                WHEN size >= 1048576 THEN 10000 + (size / 1048576)
+                WHEN size >= 102400 THEN 1000 + (size / 102400)
+                WHEN size >= 10240 THEN 100 + (size / 10240)
+                ELSE 0
+            END AS bucketKey,
+            COUNT(*) AS count
+        FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb'
+        GROUP BY bucketKey
+    """)
+    fun observeTimelineSizeBucketCounts(): Flow<List<BucketCountRow>>
+
+    @Query("""
+        SELECT
+            CAST(strftime('%Y', mtime / 1000, 'unixepoch', 'localtime') AS INTEGER) * 1000
+                + CAST(strftime('%j', mtime / 1000, 'unixepoch', 'localtime') AS INTEGER) AS bucketKey,
+            COUNT(*) AS count
+        FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND is_protected = 1
+        GROUP BY bucketKey
+    """)
+    fun observeFavoriteDateBucketCounts(): Flow<List<BucketCountRow>>
+
+    data class BucketCountRow(
+        val bucketKey: Long,
+        val count: Int,
+    )
+
     /** 详情页左右滑动使用同一套时间线排序。 */
     @Query("""
         SELECT * FROM images
