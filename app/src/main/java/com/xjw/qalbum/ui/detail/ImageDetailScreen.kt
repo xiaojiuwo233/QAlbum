@@ -3,6 +3,8 @@ package com.xjw.qalbum.ui.detail
 import android.content.Intent
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.AnimatedVisibilityScope
+import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
@@ -85,6 +87,7 @@ import coil3.request.ImageRequest
 import coil3.request.crossfade
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.db.entity.OcrTextEntity
+import com.xjw.qalbum.ui.anim.sharedImage
 import com.xjw.qalbum.ui.imageloading.ImageEntityModel
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
@@ -99,6 +102,8 @@ fun ImageDetailScreen(
     onBack: () -> Unit,
     contentPadding: PaddingValues = PaddingValues(0.dp),
     favoritesOnly: Boolean = false,
+    sharedScope: SharedTransitionScope? = null,
+    animatedScope: AnimatedVisibilityScope? = null,
     viewModel: ImageDetailViewModel = koinViewModel(),
 ) {
     LaunchedEffect(imageId, favoritesOnly) { viewModel.load(imageId, favoritesOnly) }
@@ -145,6 +150,8 @@ fun ImageDetailScreen(
                 },
                 onMoveToTrash = { viewModel.moveCurrentToTrash(onExhausted = onBack) },
                 onDeletePermanently = { viewModel.deleteCurrentPermanently(onExhausted = onBack) },
+                sharedScope = sharedScope,
+                animatedScope = animatedScope,
             )
         }
     }
@@ -161,6 +168,8 @@ private fun ImmersivePhotoViewer(
     onOpenExternal: () -> Unit,
     onMoveToTrash: () -> Unit,
     onDeletePermanently: () -> Unit,
+    sharedScope: SharedTransitionScope? = null,
+    animatedScope: AnimatedVisibilityScope? = null,
 ) {
     var chromeVisible by rememberSaveable { mutableStateOf(true) }
     var detailsVisible by rememberSaveable { mutableStateOf(false) }
@@ -293,6 +302,8 @@ private fun ImmersivePhotoViewer(
                     onZoomChanged = { zoom ->
                         if (page == state.currentIndex) currentZoom = zoom
                     },
+                    sharedScope = if (page == pagerState.currentPage) sharedScope else null,
+                    animatedScope = animatedScope,
                 )
             }
 
@@ -365,6 +376,8 @@ private fun FullscreenPhoto(
     fallback: ImageEntity?,
     entityFor: suspend (Long) -> ImageEntity?,
     onZoomChanged: (Float) -> Unit,
+    sharedScope: SharedTransitionScope? = null,
+    animatedScope: AnimatedVisibilityScope? = null,
 ) {
     val context = LocalContext.current
     // 当前页用 fallback（已加载的 current）立即显示；相邻页按 id 异步取实体
@@ -440,7 +453,8 @@ private fun FullscreenPhoto(
                     scaleY = scale
                     translationX = offset.x
                     translationY = offset.y
-                },
+                }
+                .sharedImage("image-$id", sharedScope, animatedScope),
         )
     }
 }

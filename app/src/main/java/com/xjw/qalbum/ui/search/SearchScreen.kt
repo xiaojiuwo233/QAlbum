@@ -1,5 +1,7 @@
 package com.xjw.qalbum.ui.search
 
+import androidx.compose.animation.AnimatedVisibilityScope
+import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -55,6 +57,7 @@ import coil3.request.crossfade
 import com.xjw.qalbum.data.db.dao.OcrDao
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.service.ai.SemanticHit
+import com.xjw.qalbum.ui.anim.sharedContainer
 import com.xjw.qalbum.ui.imageloading.FileAccessPath
 import com.xjw.qalbum.ui.imageloading.ImageEntityModel
 import org.koin.androidx.compose.koinViewModel
@@ -74,6 +77,8 @@ fun SearchScreen(
     contentPadding: PaddingValues,
     onResultClick: (Long) -> Unit = {},
     onBack: (() -> Unit)? = null,
+    sharedScope: SharedTransitionScope? = null,
+    animatedScope: AnimatedVisibilityScope? = null,
     viewModel: SearchViewModel = koinViewModel(),
 ) {
     val query by viewModel.query.collectAsState()
@@ -82,6 +87,7 @@ fun SearchScreen(
     val state by viewModel.state.collectAsState()
 
     Scaffold(
+        modifier = Modifier.sharedContainer("search-bar", sharedScope, animatedScope),
         topBar = {
             Column(
                 modifier = Modifier

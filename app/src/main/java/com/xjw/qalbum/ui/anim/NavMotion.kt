@@ -2,8 +2,11 @@
 
 package com.xjw.qalbum.ui.anim
 
+import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.FiniteAnimationSpec
 import androidx.compose.animation.core.LinearOutSlowInEasing
@@ -21,6 +24,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.IntOffset
 
@@ -30,6 +34,8 @@ import androidx.compose.ui.unit.IntOffset
  * - 一级 Tab 之间：Fade Through（旧页先淡出，新页延迟淡入 + 轻微放大），切换不带方向感。
  * - 进出二级页：Shared Axis X（横向位移 1/6 屏宽 + 淡入淡出），位移用 [MaterialTheme.motionScheme]
  *   的 spring 规格，带 Expressive 回弹。
+ * - 容器变换：[sharedContainer]（边界 morph + 内容各自淡入淡出，用于入口→整页）、
+ *   [sharedImage]（同一元素 morph，用于缩略图↔全屏图）。
  *
  * 位移/缩放（spatial）用带回弹的 spring，透明度（effects）用无回弹规格 —— 由调用方从
  * `MaterialTheme.motionScheme` 取好 spec 传入，避免在非 @Composable 的转场 lambda 里读主题。
@@ -85,5 +91,51 @@ fun Modifier.pressScale(
     return graphicsLayer {
         scaleX = scale
         scaleY = scale
+    }
+}
+
+// ---- Container Transform 共享元素 ----
+
+/**
+ * 容器变换：容器边界在两个页面间 morph，内容各自淡入淡出（入口"长大"成整页）。
+ * 用于设置入口、搜索/收藏入口、清理 SummaryCard → 子页。scope 为空（如 preview）时退化为无动画。
+ */
+@OptIn(ExperimentalSharedTransitionApi::class)
+@Composable
+fun Modifier.sharedContainer(
+    key: String,
+    sharedScope: SharedTransitionScope?,
+    animatedScope: AnimatedVisibilityScope?,
+): Modifier {
+    if (sharedScope == null || animatedScope == null) return this
+    val boundsSpec = MaterialTheme.motionScheme.defaultSpatialSpec<Rect>()
+    return with(sharedScope) {
+        this@sharedContainer.sharedBounds(
+            sharedContentState = rememberSharedContentState(key = key),
+            animatedVisibilityScope = animatedScope,
+            boundsTransform = { _, _ -> boundsSpec },
+        )
+    }
+}
+
+/**
+ * 共享元素：同一元素在两个页面间 morph（缩略图 ↔ 全屏图）。
+ * scope 为空时退化为无动画。
+ */
+@OptIn(ExperimentalSharedTransitionApi::class)
+@Composable
+fun Modifier.sharedImage(
+    key: String,
+    sharedScope: SharedTransitionScope?,
+    animatedScope: AnimatedVisibilityScope?,
+): Modifier {
+    if (sharedScope == null || animatedScope == null) return this
+    val boundsSpec = MaterialTheme.motionScheme.defaultSpatialSpec<Rect>()
+    return with(sharedScope) {
+        this@sharedImage.sharedElement(
+            rememberSharedContentState(key = key),
+            animatedVisibilityScope = animatedScope,
+            boundsTransform = { _, _ -> boundsSpec },
+        )
     }
 }

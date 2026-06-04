@@ -2,6 +2,8 @@ package com.xjw.qalbum.ui.cleanup
 
 import android.content.Intent
 import android.widget.Toast
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -64,6 +66,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
@@ -76,6 +79,10 @@ import com.xjw.qalbum.service.analysis.AnalysisState
 import com.xjw.qalbum.domain.model.CleanupConfig
 import com.xjw.qalbum.domain.model.CleanupPreset
 import com.xjw.qalbum.service.cleanup.CleanupBatch
+import com.xjw.qalbum.ui.anim.sharedAxisXEnter
+import com.xjw.qalbum.ui.anim.sharedAxisXExit
+import com.xjw.qalbum.ui.anim.sharedAxisXPopEnter
+import com.xjw.qalbum.ui.anim.sharedAxisXPopExit
 import com.xjw.qalbum.ui.imageloading.ImageEntityModel
 import org.koin.androidx.compose.koinViewModel
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -118,6 +125,8 @@ fun CleanupScreen(
     val recycleBinItems by viewModel.quarantine.collectAsState()
     val thumbnailTrashSummary by viewModel.thumbnailTrashSummary.collectAsState()
     val context = LocalContext.current
+    val slideSpec = MaterialTheme.motionScheme.defaultSpatialSpec<IntOffset>()
+    val fadeSpec = MaterialTheme.motionScheme.defaultEffectsSpec<Float>()
 
     val recycleBinCount = recycleBinItems.size + thumbnailTrashSummary.count
     val recycleBinBytes = recycleBinItems.sumOf { it.size } + thumbnailTrashSummary.bytes
@@ -138,7 +147,18 @@ fun CleanupScreen(
         },
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
     ) { topPadding ->
-        if (activePage == CleanupPage.Review.name && reviewBatch != null) {
+        AnimatedContent(
+            targetState = activePage,
+            transitionSpec = {
+                if (targetState == CleanupPage.Main.name) {
+                    sharedAxisXPopEnter(slideSpec, fadeSpec) togetherWith sharedAxisXPopExit(slideSpec, fadeSpec)
+                } else {
+                    sharedAxisXEnter(slideSpec, fadeSpec) togetherWith sharedAxisXExit(slideSpec, fadeSpec)
+                }
+            },
+            label = "cleanupPage",
+        ) { page ->
+        if (page == CleanupPage.Review.name && reviewBatch != null) {
             ReviewCleanupSection(
                 review = reviewBatch!!,
                 selectedDeleteIds = selectedReviewDeleteIds,
@@ -157,7 +177,7 @@ fun CleanupScreen(
                     bottom = contentPadding.calculateBottomPadding(),
                 ),
             )
-        } else if (activePage == CleanupPage.RecycleBin.name) {
+        } else if (page == CleanupPage.RecycleBin.name) {
             RecycleBinSection(
                 items = recycleBinItems,
                 thumbnailSummary = thumbnailTrashSummary,
@@ -217,6 +237,7 @@ fun CleanupScreen(
                     onOpen = { activePage = CleanupPage.RecycleBin.name },
                 )
             }
+        }
         }
     }
 }

@@ -123,28 +123,28 @@ fun AppNavigation() {
                 startDestination = NavDestination.Dashboard.route,
                 enterTransition = {
                     when {
-                        isSettingsContainerTransition() -> fadeIn(fadeSpec)
+                        isContainerTransition() -> fadeIn(fadeSpec)
                         involvesSecondary() -> sharedAxisXEnter(slideSpec, fadeSpec)
                         else -> fadeThroughEnter()
                     }
                 },
                 exitTransition = {
                     when {
-                        isSettingsContainerTransition() -> fadeOut(fadeSpec)
+                        isContainerTransition() -> fadeOut(fadeSpec)
                         involvesSecondary() -> sharedAxisXExit(slideSpec, fadeSpec)
                         else -> fadeThroughExit()
                     }
                 },
                 popEnterTransition = {
                     when {
-                        isSettingsContainerTransition() -> fadeIn(fadeSpec)
+                        isContainerTransition() -> fadeIn(fadeSpec)
                         involvesSecondary() -> sharedAxisXPopEnter(slideSpec, fadeSpec)
                         else -> fadeThroughEnter()
                     }
                 },
                 popExitTransition = {
                     when {
-                        isSettingsContainerTransition() -> fadeOut(fadeSpec)
+                        isContainerTransition() -> fadeOut(fadeSpec)
                         involvesSecondary() -> sharedAxisXPopExit(slideSpec, fadeSpec)
                         else -> fadeThroughExit()
                     }
@@ -159,6 +159,8 @@ fun AppNavigation() {
                         onImageClick = { id -> navController.navigate("image/$id") },
                         onOpenSearch = { navController.navigate(NavDestination.Search.route) },
                         onOpenFavorites = { navController.navigate("favorites") },
+                        sharedScope = this@SharedTransitionLayout,
+                        animatedScope = this,
                     )
                 }
                 composable("favorites") {
@@ -166,6 +168,8 @@ fun AppNavigation() {
                         contentPadding = contentPadding,
                         onBack = { navController.popBackStack() },
                         onImageClick = { id -> navController.navigate("favorites/image/$id") },
+                        sharedScope = this@SharedTransitionLayout,
+                        animatedScope = this,
                     )
                 }
                 composable(NavDestination.Search.route) {
@@ -173,6 +177,8 @@ fun AppNavigation() {
                         contentPadding = contentPadding,
                         onResultClick = { id -> navController.navigate("image/$id") },
                         onBack = { navController.popBackStack() },
+                        sharedScope = this@SharedTransitionLayout,
+                        animatedScope = this,
                     )
                 }
                 composable(NavDestination.Cleanup.route) {
@@ -243,6 +249,8 @@ fun AppNavigation() {
                     ImageDetailScreen(
                         imageId = id,
                         onBack = { navController.popBackStack() },
+                        sharedScope = this@SharedTransitionLayout,
+                        animatedScope = this,
                     )
                 }
                 composable(
@@ -254,6 +262,8 @@ fun AppNavigation() {
                         imageId = id,
                         favoritesOnly = true,
                         onBack = { navController.popBackStack() },
+                        sharedScope = this@SharedTransitionLayout,
+                        animatedScope = this,
                     )
                 }
             }
@@ -276,12 +286,25 @@ private fun NavBackStackEntry.isSecondary(): Boolean =
 private fun AnimatedContentTransitionScope<NavBackStackEntry>.involvesSecondary(): Boolean =
     initialState.isSecondary() || targetState.isSecondary()
 
-/** 本次转场是否在"设置首页↔设置二级页"之间（走 Container Transform，转场本体用 fade） */
-private fun AnimatedContentTransitionScope<NavBackStackEntry>.isSettingsContainerTransition(): Boolean {
-    val from = initialState.destination.route
-    val to = targetState.destination.route
-    return from != to && from in settingsRoutes && to in settingsRoutes
+/**
+ * 本次转场是否走 Container Transform（转场本体用 fade，让共享元素 morph 主导）：
+ * 设置域内、图库↔搜索/收藏、以及任一侧是图片详情（缩略图共享元素）。
+ */
+private fun AnimatedContentTransitionScope<NavBackStackEntry>.isContainerTransition(): Boolean {
+    val from = initialState.destination.route ?: return false
+    val to = targetState.destination.route ?: return false
+    if (from == to) return false
+    if (from in settingsRoutes && to in settingsRoutes) return true
+    val gallery = NavDestination.Gallery.route
+    val galleryContainers = setOf(NavDestination.Search.route, "favorites")
+    if (from == gallery && to in galleryContainers) return true
+    if (to == gallery && from in galleryContainers) return true
+    if (from.isImageRoute() || to.isImageRoute()) return true
+    return false
 }
+
+private fun String.isImageRoute(): Boolean =
+    startsWith("image/") || startsWith("favorites/image/")
 
 /** 把 Scaffold 的 PaddingValues 拆掉顶部，只保留底部（导航栏高度）与左右 */
 @Composable
