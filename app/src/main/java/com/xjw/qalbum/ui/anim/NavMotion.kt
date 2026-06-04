@@ -15,6 +15,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.interaction.InteractionSource
@@ -54,6 +55,13 @@ fun fadeThroughEnter(): EnterTransition =
 
 fun fadeThroughExit(): ExitTransition =
     fadeOut(tween(FadeOutDuration, easing = FastOutLinearInEasing))
+
+// ---- 图片详情：缩放淡入淡出（看图专用，取代横向滑入；下滑退出由页面内 drag-dismiss 处理）----
+fun imageDetailEnter(fadeSpec: FiniteAnimationSpec<Float>, scaleSpec: FiniteAnimationSpec<Float>): EnterTransition =
+    fadeIn(fadeSpec) + scaleIn(initialScale = 0.92f, animationSpec = scaleSpec)
+
+fun imageDetailExit(fadeSpec: FiniteAnimationSpec<Float>, scaleSpec: FiniteAnimationSpec<Float>): ExitTransition =
+    fadeOut(fadeSpec) + scaleOut(targetScale = 0.92f, animationSpec = scaleSpec)
 
 // ---- Shared Axis X（进出二级页）----
 // 仅位移屏宽的 1/6，配合 fade —— 符合 Material Shared Axis 规格（位移不喧宾夺主）

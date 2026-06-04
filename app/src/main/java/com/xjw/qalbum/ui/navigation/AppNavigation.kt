@@ -35,6 +35,8 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.xjw.qalbum.ui.anim.fadeThroughEnter
 import com.xjw.qalbum.ui.anim.fadeThroughExit
+import com.xjw.qalbum.ui.anim.imageDetailEnter
+import com.xjw.qalbum.ui.anim.imageDetailExit
 import com.xjw.qalbum.ui.anim.sharedAxisXEnter
 import com.xjw.qalbum.ui.anim.sharedAxisXExit
 import com.xjw.qalbum.ui.anim.sharedAxisXPopEnter
@@ -79,6 +81,7 @@ fun AppNavigation() {
 
     val slideSpec = MaterialTheme.motionScheme.defaultSpatialSpec<IntOffset>()
     val fadeSpec = MaterialTheme.motionScheme.defaultEffectsSpec<Float>()
+    val scaleSpec = MaterialTheme.motionScheme.defaultSpatialSpec<Float>()
 
     SharedTransitionLayout {
         Scaffold(
@@ -123,6 +126,8 @@ fun AppNavigation() {
                 startDestination = NavDestination.Dashboard.route,
                 enterTransition = {
                     when {
+                        targetState.isImage() -> imageDetailEnter(fadeSpec, scaleSpec)
+                        initialState.isImage() -> fadeIn(fadeSpec)
                         isContainerTransition() -> fadeIn(fadeSpec)
                         involvesSecondary() -> sharedAxisXEnter(slideSpec, fadeSpec)
                         else -> fadeThroughEnter()
@@ -130,6 +135,8 @@ fun AppNavigation() {
                 },
                 exitTransition = {
                     when {
+                        initialState.isImage() -> imageDetailExit(fadeSpec, scaleSpec)
+                        targetState.isImage() -> fadeOut(fadeSpec)
                         isContainerTransition() -> fadeOut(fadeSpec)
                         involvesSecondary() -> sharedAxisXExit(slideSpec, fadeSpec)
                         else -> fadeThroughExit()
@@ -137,6 +144,8 @@ fun AppNavigation() {
                 },
                 popEnterTransition = {
                     when {
+                        initialState.isImage() -> fadeIn(fadeSpec)
+                        targetState.isImage() -> imageDetailEnter(fadeSpec, scaleSpec)
                         isContainerTransition() -> fadeIn(fadeSpec)
                         involvesSecondary() -> sharedAxisXPopEnter(slideSpec, fadeSpec)
                         else -> fadeThroughEnter()
@@ -144,6 +153,8 @@ fun AppNavigation() {
                 },
                 popExitTransition = {
                     when {
+                        initialState.isImage() -> imageDetailExit(fadeSpec, scaleSpec)
+                        targetState.isImage() -> fadeOut(fadeSpec)
                         isContainerTransition() -> fadeOut(fadeSpec)
                         involvesSecondary() -> sharedAxisXPopExit(slideSpec, fadeSpec)
                         else -> fadeThroughExit()
@@ -249,8 +260,6 @@ fun AppNavigation() {
                     ImageDetailScreen(
                         imageId = id,
                         onBack = { navController.popBackStack() },
-                        sharedScope = this@SharedTransitionLayout,
-                        animatedScope = this,
                     )
                 }
                 composable(
@@ -262,8 +271,6 @@ fun AppNavigation() {
                         imageId = id,
                         favoritesOnly = true,
                         onBack = { navController.popBackStack() },
-                        sharedScope = this@SharedTransitionLayout,
-                        animatedScope = this,
                     )
                 }
             }
@@ -299,12 +306,11 @@ private fun AnimatedContentTransitionScope<NavBackStackEntry>.isContainerTransit
     val galleryContainers = setOf(NavDestination.Search.route, "favorites")
     if (from == gallery && to in galleryContainers) return true
     if (to == gallery && from in galleryContainers) return true
-    if (from.isImageRoute() || to.isImageRoute()) return true
     return false
 }
 
-private fun String.isImageRoute(): Boolean =
-    startsWith("image/") || startsWith("favorites/image/")
+private fun NavBackStackEntry.isImage(): Boolean =
+    (destination.route ?: "").let { it.startsWith("image/") || it.startsWith("favorites/image/") }
 
 /** 把 Scaffold 的 PaddingValues 拆掉顶部，只保留底部（导航栏高度）与左右 */
 @Composable
