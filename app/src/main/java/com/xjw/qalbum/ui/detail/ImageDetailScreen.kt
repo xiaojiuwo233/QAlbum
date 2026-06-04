@@ -4,8 +4,10 @@ import android.content.Intent
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -76,7 +78,9 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -169,6 +173,11 @@ private fun ImmersivePhotoViewer(
     var dismissOffsetY by remember { mutableFloatStateOf(0f) }
     val scope = rememberCoroutineScope()
     val velocityTracker = remember { VelocityTracker() }
+    val configuration = LocalConfiguration.current
+    val density = LocalDensity.current
+    val dismissFlyOutPx = remember(configuration, density) {
+        with(density) { configuration.screenHeightDp.dp.toPx() }
+    }
     var draggingClose by remember { mutableStateOf(false) }
     var dragDirectionDecided by remember { mutableStateOf(false) }
     val springBack = remember { Animatable(0f) }
@@ -223,7 +232,16 @@ private fun ImmersivePhotoViewer(
                         draggingClose = false
                         dragDirectionDecided = false
                         if (finalOffset > 120f || velocity > 600f) {
-                            onBack()
+                            // 关闭：图片顺势继续飞出屏幕（不跳回原位），飞出后再返回，
+                            // 让"手势 → 退出"一气呵成，消除松手时的跳变与卡顿
+                            scope.launch {
+                                springBack.snapTo(finalOffset)
+                                springBack.animateTo(
+                                    dismissFlyOutPx,
+                                    tween(durationMillis = 200, easing = FastOutLinearInEasing),
+                                )
+                                onBack()
+                            }
                         } else {
                             scope.launch {
                                 springBack.snapTo(finalOffset)
