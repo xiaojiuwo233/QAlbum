@@ -2,6 +2,7 @@ package com.xjw.qalbum.ui.navigation
 
 import androidx.compose.animation.AnimatedContentTransitionScope
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.fadeIn
@@ -20,6 +21,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.stringResource
@@ -33,6 +35,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.ui.anim.fadeThroughEnter
 import com.xjw.qalbum.ui.anim.fadeThroughExit
 import com.xjw.qalbum.ui.anim.imageDetailEnter
@@ -56,6 +59,7 @@ import com.xjw.qalbum.ui.settings.PersonalizationSettingsScreen
 import com.xjw.qalbum.ui.settings.ScanSettingsScreen
 import com.xjw.qalbum.ui.settings.SettingsCategory
 import com.xjw.qalbum.ui.settings.SettingsScreen
+import org.koin.compose.koinInject
 
 /**
  * 应用根导航：底部 NavigationBar + Navigation Compose。
@@ -82,6 +86,9 @@ fun AppNavigation() {
     val slideSpec = MaterialTheme.motionScheme.defaultSpatialSpec<IntOffset>()
     val fadeSpec = MaterialTheme.motionScheme.defaultEffectsSpec<Float>()
     val scaleSpec = MaterialTheme.motionScheme.defaultSpatialSpec<Float>()
+    // 详情转场方案开关：true=缩略图共享元素，false=缩放进入 + 图库立即垫底
+    val settings = koinInject<SettingsRepository>()
+    val sharedTransition by settings.detailSharedTransition.collectAsState(initial = false)
 
     SharedTransitionLayout {
         Scaffold(
@@ -126,7 +133,7 @@ fun AppNavigation() {
                 startDestination = NavDestination.Dashboard.route,
                 enterTransition = {
                     when {
-                        targetState.isImage() -> imageDetailEnter(fadeSpec, scaleSpec)
+                        targetState.isImage() -> if (sharedTransition) fadeIn(fadeSpec) else imageDetailEnter(fadeSpec, scaleSpec)
                         initialState.isImage() -> fadeIn(fadeSpec)
                         isContainerTransition() -> fadeIn(fadeSpec)
                         involvesSecondary() -> sharedAxisXEnter(slideSpec, fadeSpec)
@@ -135,7 +142,7 @@ fun AppNavigation() {
                 },
                 exitTransition = {
                     when {
-                        initialState.isImage() -> imageDetailExit(fadeSpec, scaleSpec)
+                        initialState.isImage() -> if (sharedTransition) fadeOut(fadeSpec) else imageDetailExit(fadeSpec, scaleSpec)
                         targetState.isImage() -> fadeOut(fadeSpec)
                         isContainerTransition() -> fadeOut(fadeSpec)
                         involvesSecondary() -> sharedAxisXExit(slideSpec, fadeSpec)
@@ -144,8 +151,10 @@ fun AppNavigation() {
                 },
                 popEnterTransition = {
                     when {
-                        initialState.isImage() -> fadeIn(fadeSpec)
-                        targetState.isImage() -> imageDetailEnter(fadeSpec, scaleSpec)
+                        // 从详情返回：off 时图库立即出现在下层（详情缩小淡出露出它，避免黑屏）；
+                        // on 时图库淡入，配合共享元素把大图缩回缩略图
+                        initialState.isImage() -> if (sharedTransition) fadeIn(fadeSpec) else EnterTransition.None
+                        targetState.isImage() -> if (sharedTransition) fadeIn(fadeSpec) else imageDetailEnter(fadeSpec, scaleSpec)
                         isContainerTransition() -> fadeIn(fadeSpec)
                         involvesSecondary() -> sharedAxisXPopEnter(slideSpec, fadeSpec)
                         else -> fadeThroughEnter()
@@ -153,7 +162,7 @@ fun AppNavigation() {
                 },
                 popExitTransition = {
                     when {
-                        initialState.isImage() -> imageDetailExit(fadeSpec, scaleSpec)
+                        initialState.isImage() -> if (sharedTransition) fadeOut(fadeSpec) else imageDetailExit(fadeSpec, scaleSpec)
                         targetState.isImage() -> fadeOut(fadeSpec)
                         isContainerTransition() -> fadeOut(fadeSpec)
                         involvesSecondary() -> sharedAxisXPopExit(slideSpec, fadeSpec)
@@ -172,6 +181,7 @@ fun AppNavigation() {
                         onOpenFavorites = { navController.navigate("favorites") },
                         sharedScope = this@SharedTransitionLayout,
                         animatedScope = this,
+                        imageShared = sharedTransition,
                     )
                 }
                 composable("favorites") {
@@ -181,6 +191,7 @@ fun AppNavigation() {
                         onImageClick = { id -> navController.navigate("favorites/image/$id") },
                         sharedScope = this@SharedTransitionLayout,
                         animatedScope = this,
+                        imageShared = sharedTransition,
                     )
                 }
                 composable(NavDestination.Search.route) {
@@ -260,6 +271,8 @@ fun AppNavigation() {
                     ImageDetailScreen(
                         imageId = id,
                         onBack = { navController.popBackStack() },
+                        sharedScope = if (sharedTransition) this@SharedTransitionLayout else null,
+                        animatedScope = this,
                     )
                 }
                 composable(
@@ -271,6 +284,8 @@ fun AppNavigation() {
                         imageId = id,
                         favoritesOnly = true,
                         onBack = { navController.popBackStack() },
+                        sharedScope = if (sharedTransition) this@SharedTransitionLayout else null,
+                        animatedScope = this,
                     )
                 }
             }

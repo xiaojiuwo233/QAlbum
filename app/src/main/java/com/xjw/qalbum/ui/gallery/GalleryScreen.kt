@@ -98,6 +98,7 @@ import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.domain.model.GallerySort
 import com.xjw.qalbum.ui.anim.sharedContainer
+import com.xjw.qalbum.ui.anim.sharedImage
 import com.xjw.qalbum.ui.imageloading.ImageEntityModel
 import org.koin.androidx.compose.koinViewModel
 
@@ -109,6 +110,7 @@ fun GalleryScreen(
     onOpenFavorites: () -> Unit = {},
     sharedScope: SharedTransitionScope? = null,
     animatedScope: AnimatedVisibilityScope? = null,
+    imageShared: Boolean = false,
     viewModel: GalleryViewModel = koinViewModel(),
 ) {
     val items = viewModel.timeline.collectAsLazyPagingItems()
@@ -195,6 +197,8 @@ fun GalleryScreen(
                         onToggleSelection = toggleSelection,
                         onSelect = selectOne,
                         onApplySelection = applySelection,
+                        sharedScope = if (imageShared) sharedScope else null,
+                        animatedScope = animatedScope,
                     )
                 }
             }
@@ -246,6 +250,7 @@ fun FavoriteGalleryScreen(
     onImageClick: (Long) -> Unit = {},
     sharedScope: SharedTransitionScope? = null,
     animatedScope: AnimatedVisibilityScope? = null,
+    imageShared: Boolean = false,
     viewModel: GalleryViewModel = koinViewModel(),
 ) {
     val items = viewModel.favoriteTimeline.collectAsLazyPagingItems()
@@ -322,6 +327,8 @@ fun FavoriteGalleryScreen(
                     onToggleSelection = toggleSelection,
                     onSelect = selectOne,
                     onApplySelection = applySelection,
+                    sharedScope = if (imageShared) sharedScope else null,
+                    animatedScope = animatedScope,
                 )
             }
 
@@ -526,6 +533,8 @@ private fun TimelineGrid(
     onToggleSelection: (Long) -> Unit,
     onSelect: (Long) -> Unit,
     onApplySelection: (Long, Boolean) -> Unit,
+    sharedScope: SharedTransitionScope? = null,
+    animatedScope: AnimatedVisibilityScope? = null,
 ) {
     val photoBounds = remember { mutableStateMapOf<Long, Rect>() }
     var containerBounds by remember { mutableStateOf(Rect.Zero) }
@@ -639,6 +648,8 @@ private fun TimelineGrid(
                         if (selectionMode) onToggleSelection(item.image.id) else onImageClick(item.image.id)
                     },
                     onLongClick = { onSelect(item.image.id) },
+                    sharedScope = sharedScope,
+                    animatedScope = animatedScope,
                 )
                 null -> Unit
             }
@@ -678,6 +689,8 @@ private fun TimelinePhoto(
     onBounds: (Rect) -> Unit,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
+    sharedScope: SharedTransitionScope? = null,
+    animatedScope: AnimatedVisibilityScope? = null,
 ) {
     val context = LocalContext.current
     val selectedScale by animateFloatAsState(
@@ -708,7 +721,9 @@ private fun TimelinePhoto(
                 .build(),
             contentDescription = image.filename,
             contentScale = ContentScale.Crop,
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxSize()
+                .sharedImage("image-${image.id}", sharedScope, animatedScope),
         )
         if (image.isFavorite && !selectionMode && !selected) {
             Icon(

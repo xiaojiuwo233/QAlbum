@@ -156,6 +156,14 @@ class SettingsRepository(private val context: Context) {
         ds.edit { it[Keys.DYNAMIC_COLOR] = enabled }
     }
 
+    // ---- 图库动画增强：true=缩略图共享元素（实验性），false=缩放进入+飞出下滑（默认稳定）----
+
+    val detailSharedTransition: Flow<Boolean> = ds.data.map { it[Keys.DETAIL_SHARED_TRANSITION] ?: false }
+
+    suspend fun setDetailSharedTransition(enabled: Boolean) {
+        ds.edit { it[Keys.DETAIL_SHARED_TRANSITION] = enabled }
+    }
+
     companion object {
         const val DEFAULT_CHATPIC_PATH =
             "/storage/emulated/0/Android/data/com.tencent.mobileqq/Tencent/MobileQQ/chatpic"
@@ -193,5 +201,6 @@ class SettingsRepository(private val context: Context) {
         val CLEANUP_CONFIG = stringPreferencesKey("cleanup_config")
 
         val DYNAMIC_COLOR = booleanPreferencesKey("dynamic_color")
+        val DETAIL_SHARED_TRANSITION = booleanPreferencesKey("detail_shared_transition")
     }
 }

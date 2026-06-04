@@ -628,6 +628,15 @@ fun PersonalizationSettingsScreen(
                 onCheckedChange = viewModel::setDynamicColor,
             )
         }
+        SettingsSection(header = "动效") {
+            val sharedTransition by viewModel.detailSharedTransition.collectAsState()
+            SettingsSwitchRow(
+                title = "图库动画增强",
+                subtitle = "更顺滑的动画体验（实验性）",
+                checked = sharedTransition,
+                onCheckedChange = viewModel::setDetailSharedTransition,
+            )
+        }
     }
 }
 

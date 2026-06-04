@@ -94,6 +94,13 @@ class SettingsViewModel(
         viewModelScope.launch { settings.setDynamicColorEnabled(enabled) }
     }
 
+    val detailSharedTransition: StateFlow<Boolean> = settings.detailSharedTransition
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    fun setDetailSharedTransition(enabled: Boolean) {
+        viewModelScope.launch { settings.setDetailSharedTransition(enabled) }
+    }
+
     fun checkAccess() {
         viewModelScope.launch {
             val provider = accessManager.current()

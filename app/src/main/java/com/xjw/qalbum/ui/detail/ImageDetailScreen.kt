@@ -3,11 +3,11 @@ package com.xjw.qalbum.ui.detail
 import android.content.Intent
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.AnimatedVisibilityScope
+import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -78,9 +78,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -89,6 +87,7 @@ import coil3.request.ImageRequest
 import coil3.request.crossfade
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.db.entity.OcrTextEntity
+import com.xjw.qalbum.ui.anim.sharedImage
 import com.xjw.qalbum.ui.imageloading.ImageEntityModel
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
@@ -103,6 +102,8 @@ fun ImageDetailScreen(
     onBack: () -> Unit,
     contentPadding: PaddingValues = PaddingValues(0.dp),
     favoritesOnly: Boolean = false,
+    sharedScope: SharedTransitionScope? = null,
+    animatedScope: AnimatedVisibilityScope? = null,
     viewModel: ImageDetailViewModel = koinViewModel(),
 ) {
     LaunchedEffect(imageId, favoritesOnly) { viewModel.load(imageId, favoritesOnly) }
@@ -149,6 +150,8 @@ fun ImageDetailScreen(
                 },
                 onMoveToTrash = { viewModel.moveCurrentToTrash(onExhausted = onBack) },
                 onDeletePermanently = { viewModel.deleteCurrentPermanently(onExhausted = onBack) },
+                sharedScope = sharedScope,
+                animatedScope = animatedScope,
             )
         }
     }
@@ -165,6 +168,8 @@ private fun ImmersivePhotoViewer(
     onOpenExternal: () -> Unit,
     onMoveToTrash: () -> Unit,
     onDeletePermanently: () -> Unit,
+    sharedScope: SharedTransitionScope? = null,
+    animatedScope: AnimatedVisibilityScope? = null,
 ) {
     var chromeVisible by rememberSaveable { mutableStateOf(true) }
     var detailsVisible by rememberSaveable { mutableStateOf(false) }
@@ -173,11 +178,6 @@ private fun ImmersivePhotoViewer(
     var dismissOffsetY by remember { mutableFloatStateOf(0f) }
     val scope = rememberCoroutineScope()
     val velocityTracker = remember { VelocityTracker() }
-    val configuration = LocalConfiguration.current
-    val density = LocalDensity.current
-    val dismissFlyOutPx = remember(configuration, density) {
-        with(density) { configuration.screenHeightDp.dp.toPx() }
-    }
     var draggingClose by remember { mutableStateOf(false) }
     var dragDirectionDecided by remember { mutableStateOf(false) }
     val springBack = remember { Animatable(0f) }
@@ -229,20 +229,14 @@ private fun ImmersivePhotoViewer(
                         } catch (_: Exception) {
                             0f
                         }
-                        draggingClose = false
                         dragDirectionDecided = false
                         if (finalOffset > 120f || velocity > 600f) {
-                            // 关闭：图片顺势继续飞出屏幕（不跳回原位），飞出后再返回，
-                            // 让"手势 → 退出"一气呵成，消除松手时的跳变与卡顿
-                            scope.launch {
-                                springBack.snapTo(finalOffset)
-                                springBack.animateTo(
-                                    dismissFlyOutPx,
-                                    tween(durationMillis = 200, easing = FastOutLinearInEasing),
-                                )
-                                onBack()
-                            }
+                            // 关闭：图片停在当前下滑位置（draggingClose 不复位，避免跳回原位），
+                            // 直接返回 —— 配合「图库 popEnter 立即显示 + 详情 popExit 缩小淡出」，
+                            // 图片淡出即露出图库，没有飞出后那段纯黑
+                            onBack()
                         } else {
+                            draggingClose = false
                             scope.launch {
                                 springBack.snapTo(finalOffset)
                                 springBack.animateTo(
@@ -319,6 +313,8 @@ private fun ImmersivePhotoViewer(
                     onZoomChanged = { zoom ->
                         if (page == state.currentIndex) currentZoom = zoom
                     },
+                    sharedScope = sharedScope,
+                    animatedScope = animatedScope,
                 )
             }
 
@@ -391,6 +387,8 @@ private fun FullscreenPhoto(
     fallback: ImageEntity?,
     entityFor: suspend (Long) -> ImageEntity?,
     onZoomChanged: (Float) -> Unit,
+    sharedScope: SharedTransitionScope? = null,
+    animatedScope: AnimatedVisibilityScope? = null,
 ) {
     val context = LocalContext.current
     // 当前页用 fallback（已加载的 current）立即显示；相邻页按 id 异步取实体
@@ -466,7 +464,8 @@ private fun FullscreenPhoto(
                     scaleY = scale
                     translationX = offset.x
                     translationY = offset.y
-                },
+                }
+                .sharedImage("image-$id", sharedScope, animatedScope),
         )
     }
 }
