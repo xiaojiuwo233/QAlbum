@@ -1,0 +1,63 @@
+name: Build APK
+
+# 每次推送提交 / 发起 PR 时自动构建 APK，并上传为可下载的产物
+on:
+  push:
+    branches:
+      - "**"
+    paths-ignore:
+      - "**/*.md"
+  pull_request:
+    paths-ignore:
+      - "**/*.md"
+  workflow_dispatch: # 支持在 Actions 页面手动触发
+
+# 同一分支出现新提交时，自动取消上一次仍在进行的构建，节省 CI 额度
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: 构建 Release APK
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. 拉取源码
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2. 配置 JDK 17（项目 compileOptions / kotlinOptions 均为 17）
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # 3. 配置 Gradle，并启用依赖与构建缓存，加速后续构建
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # 4. 确保 gradlew 具备可执行权限
+      - name: Grant execute permission for gradlew
+        run: chmod +x ./gradlew
+
+      # 5. 构建 Release APK（release 复用 debug 签名，产物可直接安装）
+      - name: Build Release APK
+        run: ./gradlew assembleRelease --stacktrace
+
+      # 6. 输出产物路径与体积，便于在构建日志中确认
+      - name: List APK output
+        run: ls -lh app/build/outputs/apk/release/
+
+      # 7. 上传 APK 为可下载产物（在本次 workflow run 的 Artifacts 区下载）
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: QAlbum-release-${{ github.run_number }}
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 30
