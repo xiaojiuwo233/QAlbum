@@ -7,6 +7,7 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.xjw.qalbum.data.db.dao.CleanupDao
+import com.xjw.qalbum.data.db.dao.DirSnapshotDao
 import com.xjw.qalbum.data.db.dao.EmbeddingDao
 import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.db.dao.MatchedMessageDao
@@ -15,6 +16,7 @@ import com.xjw.qalbum.data.db.dao.TagDao
 import com.xjw.qalbum.data.db.dao.UserActionDao
 import com.xjw.qalbum.data.db.entity.CleanupBatchEntity
 import com.xjw.qalbum.data.db.entity.CleanupCandidateEntity
+import com.xjw.qalbum.data.db.entity.DirSnapshotEntity
 import com.xjw.qalbum.data.db.entity.ImageEmbeddingEntity
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.db.entity.ImageTagEntity
@@ -45,8 +47,9 @@ import com.xjw.qalbum.data.db.entity.UserActionEntity
         MatchedMessageEntity::class,
         UserActionEntity::class,
         ImageEmbeddingEntity::class,
+        DirSnapshotEntity::class,
     ],
-    version = 5,
+    version = 6,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -58,6 +61,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun matchedMessageDao(): MatchedMessageDao
     abstract fun userActionDao(): UserActionDao
     abstract fun embeddingDao(): EmbeddingDao
+    abstract fun dirSnapshotDao(): DirSnapshotDao
 
     companion object {
         const val DB_NAME = "qalbum.db"
@@ -73,13 +77,52 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v5 → v6：扫描管线重构（目录剪枝增量）。
+         * 1. 新增 dir_snapshots 目录快照表 —— 增量扫描只 stat 目录层即可跳过未变化目录。
+         * 2. 一次性补齐历史 chatthumb 行的回收站状态（原来每次扫描都全表跑
+         *    markThumbnailsAsTrash 兜底，重写全部缩略图行；现在收敛为插入/更新时
+         *    设置 + 本次迁移修复存量，扫描路径不再做全表 UPDATE）。
+         *    排除已是 thumbnail_trash 的行，正常情况下匹配 0 行，瞬时完成。
+         */
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `dir_snapshots` (
+                        `dir_path` TEXT NOT NULL,
+                        `mtime` INTEGER NOT NULL,
+                        `scanned_at` INTEGER NOT NULL,
+                        PRIMARY KEY(`dir_path`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    UPDATE images
+                    SET status = 'thumbnail_trash',
+                        hash_done = 0,
+                        ocr_done = 0,
+                        ai_done = 0,
+                        embedding_done = 0,
+                        variant_group = NULL,
+                        is_variant_primary = 0,
+                        duplicate_group_id = NULL,
+                        is_duplicate_best = 0
+                    WHERE source_type = 'chatthumb'
+                      AND status NOT IN ('deleted', 'quarantined', 'thumbnail_trash')
+                    """.trimIndent()
+                )
+            }
+        }
+
         fun build(context: Context): AppDatabase {
             return Room.databaseBuilder(
                 context.applicationContext,
                 AppDatabase::class.java,
                 DB_NAME,
             )
-                .addMigrations(MIGRATION_4_5)
+                .addMigrations(MIGRATION_4_5, MIGRATION_5_6)
                 // 已注册的版本走 Migration 保数据；只有遇到未覆盖的版本跳变才回退重建兜底
                 .fallbackToDestructiveMigration()
                 .build()

@@ -75,6 +75,8 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+        // 扫描传输层的 IFileOps.aidl（Root/Shizuku 常驻文件服务）
+        aidl = true
     }
 
     lint {
@@ -149,6 +151,8 @@ dependencies {
     // --- libsu（Root 高级模式）---
     implementation(libs.libsu.core)
     implementation(libs.libsu.io)
+    // RootService：扫描用的 root 进程常驻文件服务（原生 IO 替代逐条 shell 命令）
+    implementation(libs.libsu.service)
 
     // --- 网络 & 序列化 ---
     implementation(libs.okhttp)

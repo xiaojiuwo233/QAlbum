@@ -17,15 +17,17 @@ import timber.log.Timber
 /**
  * 扫描调度器（应用级单例）
  *
- * - 持有当前扫描进度 [progress]，UI 多页面可以共享订阅（Dashboard / Settings / 扫描提示等）
+ * - 持有当前扫描进度 [progress]，UI 多页面共享订阅（Dashboard / Settings 等）
  * - 保证同一时间只有一个扫描任务在跑（[currentJob]）
  *
- * 真正的扫描逻辑委托给 [ImageIndexer] / [IncrementalScanner]。
+ * 三档入口共用 [ScanPipeline]：
+ * - [startIncrementalScan]：目录剪枝，常态秒级；
+ * - [startFullScan]：所有目录做文件级 diff（只对新增/变化读文件头）；
+ * - [startDeepVerify]：全量基础上重读所有文件头，修历史误判（低频、耗时较长）。
  */
 class ScanController(
     private val settings: SettingsRepository,
-    private val indexer: ImageIndexer,
-    private val incrementalScanner: IncrementalScanner,
+    private val pipeline: ScanPipeline,
 ) {
     // SupervisorJob：单个扫描失败不影响 controller 后续工作
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -38,37 +40,24 @@ class ScanController(
 
     private var currentJob: Job? = null
 
-    fun startFullScan() {
-        if (_running.value) {
-            Timber.w("ScanController.startFullScan: another scan is running, ignore")
-            return
-        }
-        currentJob = scope.launch {
-            _running.value = true
-            try {
-                val root = settings.chatpicPath.first()
-                indexer.fullScan(root, force = true).collect { _progress.value = it }
-            } catch (t: Throwable) {
-                Timber.e(t, "Full scan failed")
-                _progress.value = ScanProgress.Failed(t.message ?: "未知错误")
-            } finally {
-                _running.value = false
-            }
-        }
-    }
+    fun startIncrementalScan() = start(ScanMode.INCREMENTAL)
 
-    fun startIncrementalScan() {
+    fun startFullScan() = start(ScanMode.FULL)
+
+    fun startDeepVerify() = start(ScanMode.DEEP_VERIFY)
+
+    private fun start(mode: ScanMode) {
         if (_running.value) {
-            Timber.w("ScanController.startIncrementalScan: another scan is running, ignore")
+            Timber.w("ScanController.start($mode): another scan is running, ignore")
             return
         }
         currentJob = scope.launch {
             _running.value = true
             try {
                 val root = settings.chatpicPath.first()
-                incrementalScanner.scan(root).collect { _progress.value = it }
+                pipeline.scan(root, mode).collect { _progress.value = it }
             } catch (t: Throwable) {
-                Timber.e(t, "Incremental scan failed")
+                Timber.e(t, "Scan($mode) failed")
                 _progress.value = ScanProgress.Failed(t.message ?: "未知错误")
             } finally {
                 _running.value = false

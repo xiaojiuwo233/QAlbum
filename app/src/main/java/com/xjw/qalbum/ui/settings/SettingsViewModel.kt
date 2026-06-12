@@ -111,6 +111,7 @@ class SettingsViewModel(
 
     fun startFullScan() = scanController.startFullScan()
     fun startIncrementalScan() = scanController.startIncrementalScan()
+    fun startDeepVerify() = scanController.startDeepVerify()
     fun cancelScan() = scanController.cancel()
 
     // ---- AI 配置 ----

@@ -760,9 +760,9 @@ private fun formatCount(n: Int): String = when {
 private fun statusText(running: Boolean, progress: ScanProgress?): String = when (progress) {
     is ScanProgress.Failed -> "失败：${progress.reason}"
     is ScanProgress.Done -> "完成，新增/更新 ${progress.total} 张"
-    is ScanProgress.Indexing -> "正在识别 ${progress.processed}/${progress.total}"
+    is ScanProgress.Indexing -> "正在扫描目录 ${progress.processed}/${progress.total}"
     is ScanProgress.Enumerating ->
-        if (progress.total > 0) "正在查找图片… 已发现 ${progress.total}" else "正在查找图片…"
+        if (progress.total > 0) "正在对比目录… 已发现 ${progress.total}" else "正在对比目录…"
     null -> if (running) "启动中…" else ""
 }
 

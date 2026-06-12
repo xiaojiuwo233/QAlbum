@@ -31,6 +31,11 @@
 # --- libsu ---
 -keep class com.topjohnwu.superuser.** { *; }
 
+# --- 扫描 AIDL 文件服务 ---
+# Root（libsu RootService）/ Shizuku（UserService）的远程进程按类名反射实例化
+# 服务类，且 AIDL Stub 的 binder 协议依赖完整类结构，必须整体保留。
+-keep class com.xjw.qalbum.fileops.** { *; }
+
 # --- ML Kit ---
 -keep class com.google.mlkit.** { *; }
 -keep class com.google.android.gms.** { *; }

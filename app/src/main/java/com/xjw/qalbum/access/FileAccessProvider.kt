@@ -27,16 +27,6 @@ interface FileAccessProvider {
     /** 列出目录下的所有文件/子目录（不递归） */
     fun listFiles(dir: String): Flow<FileInfo>
 
-    /**
-     * 高效递归枚举：用一条 shell 命令列出 [roots] 下深度在 [minDepth, maxDepth] 之间的
-     * 所有普通文件（非目录），边解析边发射。
-     *
-     * 相比逐个目录调用 [listFiles]（chatpic 有成百上千个三字符索引目录 → N 次跨进程 IPC），
-     * 这里把整个枚举压缩成「一次 find + 分批 stat」，是数量级的提速，
-     * 也是消除扫描「卡在启动中」的关键。
-     */
-    fun enumerateFiles(roots: List<String>, minDepth: Int, maxDepth: Int): Flow<FileInfo>
-
     /** 读取文件流；调用方负责关闭 */
     suspend fun readFile(path: String): InputStream
 

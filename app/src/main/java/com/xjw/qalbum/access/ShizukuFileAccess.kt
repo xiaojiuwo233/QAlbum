@@ -15,13 +15,12 @@ import java.io.InputStream
 /**
  * Shizuku 模式文件访问实现
  *
- * 命令执行通过 Shizuku.newProcess(...) 派发到 shell 用户（UID 2000）。
- * 文件读取通过 `cat` / `head -c` 的进程 stdout 管道完成；枚举通过 [ShellEnumerator]
- * 的「find + stat」一次性完成。
+ * 命令执行通过 Shizuku.newProcess(...) 派发到 shell 用户（UID 2000），
+ * 文件读取通过 `cat` / `head -c` 的进程 stdout 管道完成。
  *
  * 说明：[Shizuku.newProcess] 在 13.x 之后是 hidden API（@RestrictTo），
- * 这里用反射临时调用。长期更优解是自定义 AIDL UserService + ParcelFileDescriptor
- * （零拷贝读文件），可作为后续演进方向。
+ * 这里经 [ShizukuShell] 反射调用。**扫描管线已不走这里**——它优先使用
+ * AIDL UserService（com.xjw.qalbum.fileops），仅在绑定失败时降级 shell。
  */
 class ShizukuFileAccess : FileAccessProvider {
 
@@ -54,15 +53,6 @@ class ShizukuFileAccess : FileAccessProvider {
             parseStatLine(line)?.let { emit(it) }
         }
     }.flowOn(Dispatchers.IO)
-
-    override fun enumerateFiles(roots: List<String>, minDepth: Int, maxDepth: Int): Flow<FileInfo> =
-        ShellEnumerator.enumerate(
-            roots = roots,
-            minDepth = minDepth,
-            maxDepth = maxDepth,
-            escape = { it.escape() },
-            exec = { cmd -> runShell(cmd) },
-        ).flowOn(Dispatchers.IO)
 
     override suspend fun readFile(path: String): InputStream = withContext(Dispatchers.IO) {
         if (!isAvailable()) throw AccessException("Shizuku 不可用")
@@ -131,19 +121,8 @@ class ShizukuFileAccess : FileAccessProvider {
         }
     }
 
-    /** 反射调用 Shizuku.newProcess(String[], String[], String) */
-    private fun invokeNewProcess(cmd: Array<String>): Process? = try {
-        val method = Shizuku::class.java.getDeclaredMethod(
-            "newProcess",
-            Array<String>::class.java,
-            Array<String>::class.java,
-            String::class.java,
-        ).apply { isAccessible = true }
-        method.invoke(null, cmd, null, null) as? Process
-    } catch (t: Throwable) {
-        Timber.w(t, "Shizuku newProcess reflection failed")
-        null
-    }
+    /** 反射调用 Shizuku.newProcess —— 已抽到 [ShizukuShell] 与扫描兜底共用 */
+    private fun invokeNewProcess(cmd: Array<String>): Process? = ShizukuShell.newProcess(cmd)
 
     /** 解析 `size|mtimeSec|/full/path` 一行（stat -c '%s|%Y|%n' 的输出） */
     private fun parseStatLine(line: String): FileInfo? {

@@ -36,12 +36,45 @@ interface ImageDao {
     @Query("UPDATE images SET last_seen = :ts WHERE id = :id")
     suspend fun touchLastSeen(id: Long, ts: Long)
 
+    // ---- 扫描（目录剪枝管线）----
+
     /**
-     * 按 path 批量刷新 last_seen（增量扫描里"仍存在且未变化"的文件）。
-     * 调用方需按 SQLite 变量上限（999）分批；替代原先每文件一次独立 UPDATE。
+     * 取某个三字符目录下所有行的扫描判定字段（增量 diff 用，避免全表装载）。
+     * [low] = "dir/"、[high] = "dir0"（'0' 是 '/' 的下一个 ASCII 字符），
+     * 构成覆盖 "dir/..." 前缀的右开区间，走 path 索引做范围扫描。
      */
-    @Query("UPDATE images SET last_seen = :ts WHERE path IN (:paths)")
-    suspend fun touchLastSeenByPaths(paths: List<String>, ts: Long)
+    @Query("""
+        SELECT id, path, size, mtime, status, mime, is_animated AS isAnimated
+        FROM images
+        WHERE path >= :low AND path < :high
+    """)
+    suspend fun listScanRowsInPathRange(low: String, high: String): List<ScanRow>
+
+    data class ScanRow(
+        val id: Long,
+        val path: String,
+        val size: Long,
+        val mtime: Long,
+        val status: String,
+        val mime: String,
+        val isAnimated: Boolean,
+    )
+
+    /** 磁盘上已消失的活跃图片 → missing（图库查询只认 active，幽灵记录自动从图库消失） */
+    @Query("UPDATE images SET status = 'missing' WHERE id IN (:ids) AND status = 'active'")
+    suspend fun markMissingByIds(ids: List<Long>)
+
+    /** 整个三字符目录消失时按 path 范围批量标记 missing */
+    @Query("UPDATE images SET status = 'missing' WHERE path >= :low AND path < :high AND status = 'active'")
+    suspend fun markMissingInPathRange(low: String, high: String)
+
+    /** 文件以相同 size/mtime 重新出现：仅恢复 missing → active，不重置分析状态 */
+    @Query("UPDATE images SET status = 'active' WHERE id IN (:ids) AND status = 'missing'")
+    suspend fun reviveByIds(ids: List<Long>)
+
+    /** 深度校验：仅修正 mime / 动图标记，不动分析状态 */
+    @Query("UPDATE images SET mime = :mime, is_animated = :isAnimated WHERE id = :id")
+    suspend fun fixMimeType(id: Long, mime: String, isAnimated: Boolean)
 
     @Query("""
         UPDATE images
@@ -123,33 +156,6 @@ interface ImageDao {
 
     @Query("SELECT * FROM images WHERE path = :path LIMIT 1")
     suspend fun getByPath(path: String): ImageEntity?
-
-    /** 仅取必要字段做增量扫描 diff，避免装载整行 */
-    @Query("SELECT id, path, size, mtime, last_seen FROM images")
-    suspend fun listPathSizeMtime(): List<PathSizeMtime>
-
-    data class PathSizeMtime(
-        val id: Long,
-        val path: String,
-        val size: Long,
-        val mtime: Long,
-        val last_seen: Long,
-    )
-
-    @Query("""
-        UPDATE images
-        SET status = 'thumbnail_trash',
-            hash_done = 0,
-            ocr_done = 0,
-            ai_done = 0,
-            embedding_done = 0,
-            variant_group = NULL,
-            is_variant_primary = 0,
-            duplicate_group_id = NULL,
-            is_duplicate_best = 0
-        WHERE source_type = 'chatthumb' AND status NOT IN ('deleted', 'quarantined')
-    """)
-    suspend fun markThumbnailsAsTrash()
 
     /** 仅重置本地分析（hash/质量/重复/评分）标记与结果；OCR/AI/向量 不动 */
     @Query("""
@@ -401,10 +407,6 @@ interface ImageDao {
         val duplicateGroups: Int,
         val reclaimableBytes: Long,
     )
-
-    /** 已存在的 path 集合，用于增量扫描快速判重（一次性拉取） */
-    @Query("SELECT path FROM images")
-    suspend fun listAllPaths(): List<String>
 
     // ---- Phase 2：Hash / 质量 / 重复组 ----
 

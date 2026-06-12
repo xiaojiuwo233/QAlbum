@@ -329,13 +329,22 @@ fun ScanSettingsScreen(
             }
         }
         SettingsSection(header = "扫描") {
-            SettingsBlurb("增量扫描只处理新增图片；全量扫描重新核对全部目录。")
+            SettingsBlurb(
+                "增量扫描只对比有变化的目录，常态秒级完成；全量扫描重新核对全部目录" +
+                    "（含删除检测）；深度校验额外重读所有文件头、修正历史格式误判，" +
+                    "耗时较长，仅在怀疑识别有误时使用。",
+            )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (running) {
                     OutlinedButton(onClick = viewModel::cancelScan) { Text("取消扫描") }
                 } else {
                     OutlinedButton(onClick = viewModel::startIncrementalScan) { Text("增量扫描") }
                     Button(onClick = viewModel::startFullScan) { Text("全量扫描") }
+                }
+            }
+            if (!running) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = viewModel::startDeepVerify) { Text("深度校验") }
                 }
             }
         }

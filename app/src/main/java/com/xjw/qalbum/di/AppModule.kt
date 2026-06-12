@@ -17,9 +17,10 @@ import com.xjw.qalbum.service.cleanup.CleanupRecommender
 import com.xjw.qalbum.service.cleanup.QuarantineManager
 import com.xjw.qalbum.service.cleanup.ThumbnailTrashManager
 import com.xjw.qalbum.service.cleanup.ImageFileManager
-import com.xjw.qalbum.service.indexer.ImageIndexer
-import com.xjw.qalbum.service.indexer.IncrementalScanner
+import com.xjw.qalbum.fileops.FileOpsClient
 import com.xjw.qalbum.service.indexer.ScanController
+import com.xjw.qalbum.service.indexer.ScanPipeline
+import com.xjw.qalbum.service.indexer.transport.ScanTransportFactory
 import com.xjw.qalbum.service.ocr.LocalOcrEngine
 import com.xjw.qalbum.ui.dashboard.DashboardViewModel
 import com.xjw.qalbum.ui.gallery.GalleryViewModel
@@ -52,6 +53,7 @@ val appModule = module {
     single { get<AppDatabase>().matchedMessageDao() }
     single { get<AppDatabase>().userActionDao() }
     single { get<AppDatabase>().embeddingDao() }
+    single { get<AppDatabase>().dirSnapshotDao() }
 
     single { SettingsRepository(get()) }
     single { ImageRepository(imageDao = get(), ocrDao = get()) }
@@ -64,9 +66,17 @@ val appModule = module {
 
     // ---- 索引服务 ----
 
-    single { ImageIndexer(accessManager = get(), imageDao = get()) }
-    single { IncrementalScanner(imageIndexer = get()) }
-    single { ScanController(settings = get(), indexer = get(), incrementalScanner = get()) }
+    single { FileOpsClient(context = get()) }
+    single { ScanTransportFactory(accessManager = get(), fileOpsClient = get()) }
+    single {
+        ScanPipeline(
+            db = get(),
+            imageDao = get(),
+            dirSnapshotDao = get(),
+            transportFactory = get(),
+        )
+    }
+    single { ScanController(settings = get(), pipeline = get()) }
 
     // ---- 分析 / 清理 / OCR / AI 服务 ----
 
