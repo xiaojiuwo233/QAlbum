@@ -102,6 +102,7 @@ class ImageRepository(
 
     fun observeImageCount(): Flow<Int> = imageDao.observeImageCount()
     fun observeTotalSize(): Flow<Long> = imageDao.observeTotalSize()
+    fun observeCleanedStats(): Flow<ImageDao.CleanedStatsRow> = imageDao.observeCleanedStats()
     fun observeSourceBreakdown(): Flow<List<ImageDao.SourceBreakdownRow>> = imageDao.observeSourceBreakdown()
     fun observeAnalysisProgress(): Flow<ImageDao.AnalysisProgressRow> = imageDao.observeAnalysisProgress()
     fun observeImageHealth(): Flow<ImageDao.ImageHealthRow> = imageDao.observeImageHealth()

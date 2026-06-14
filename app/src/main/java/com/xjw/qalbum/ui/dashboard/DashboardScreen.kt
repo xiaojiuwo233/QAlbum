@@ -1,10 +1,12 @@
 package com.xjw.qalbum.ui.dashboard
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,6 +26,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.CleaningServices
 import androidx.compose.material.icons.outlined.DeleteSweep
 import androidx.compose.material.icons.outlined.Favorite
 import androidx.compose.material.icons.outlined.Folder
@@ -47,6 +50,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -80,11 +84,13 @@ fun DashboardScreen(
     val progress by viewModel.scanProgress.collectAsState()
     val analysisState by viewModel.analysisState.collectAsState()
     val analysisRunning by viewModel.analysisRunningProgress.collectAsState()
+    val cleanedStats by viewModel.cleanedStats.collectAsState()
 
     Scaffold(
         topBar = {
             CenterAlignedTopAppBar(
                 title = { Text(stringResource(R.string.app_name), style = MaterialTheme.typography.titleLarge) },
+                actions = { CleanedStatsLabel(cleanedStats) },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface,
                 ),
@@ -116,6 +122,38 @@ fun DashboardScreen(
                 running = analysisRunning,
             )
             ImageHealthCard(state)
+        }
+    }
+}
+
+// ── Cleaned Stats（顶栏右侧「已清理」小文本）──────────────────────────
+
+@Composable
+private fun CleanedStatsLabel(stats: ImageDao.CleanedStatsRow) {
+    // 还没清理过任何图片时不显示，避免顶栏出现无意义的「0 B」
+    if (stats.count <= 0) return
+    var showCount by remember { mutableStateOf(false) }
+    Row(
+        modifier = Modifier
+            .padding(end = 4.dp)
+            .clip(CircleShape)
+            .clickable { showCount = !showCount }
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = Icons.Outlined.CleaningServices,
+            contentDescription = "已清理",
+            modifier = Modifier.size(16.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.width(4.dp))
+        AnimatedContent(targetState = showCount, label = "cleaned-stats") { isCount ->
+            Text(
+                text = if (isCount) "${formatCount(stats.count)} 张" else formatBytes(stats.bytes),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

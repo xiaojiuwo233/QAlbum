@@ -343,6 +343,17 @@ interface ImageDao {
     @Query("SELECT IFNULL(SUM(size), 0) FROM images WHERE status = 'active' AND source_type <> 'chatthumb'")
     fun observeTotalSize(): Flow<Long>
 
+    /**
+     * 「已清理」累计：经本 app 永久删除的图片张数与原始字节总和。
+     * status='deleted' 仅由三条永久删除路径写入（直接删除 / 回收站清空 / 缩略图清空），
+     * 扫描器对磁盘消失的文件用独立的 'missing' 状态、从不写 'deleted'，故此聚合精确等于
+     * 「本 app 永久清理量」，且天然涵盖功能上线前已删的历史；不加 source_type 过滤＝全部都算。
+     */
+    @Query("SELECT COUNT(*) AS count, IFNULL(SUM(size), 0) AS bytes FROM images WHERE status = 'deleted'")
+    fun observeCleanedStats(): Flow<CleanedStatsRow>
+
+    data class CleanedStatsRow(val count: Int, val bytes: Long)
+
     @Query("""
         SELECT source_type AS source, COUNT(*) AS count, IFNULL(SUM(size), 0) AS bytes
         FROM images

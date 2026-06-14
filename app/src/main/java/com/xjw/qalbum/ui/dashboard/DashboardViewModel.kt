@@ -54,6 +54,14 @@ class DashboardViewModel(
         initialValue = DashboardUiState(),
     )
 
+    /** 「已清理」累计（独立 stateIn，不挤进已嵌套到上限的 uiState combine） */
+    val cleanedStats: StateFlow<ImageDao.CleanedStatsRow> =
+        imageRepository.observeCleanedStats().stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5_000),
+            initialValue = ImageDao.CleanedStatsRow(0, 0L),
+        )
+
     val scanRunning: StateFlow<Boolean> = scanController.running
     val scanProgress: StateFlow<ScanProgress?> = scanController.progress
 
