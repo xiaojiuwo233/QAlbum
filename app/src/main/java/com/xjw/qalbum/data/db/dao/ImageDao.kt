@@ -616,12 +616,19 @@ interface ImageDao {
     """)
     suspend fun getByIds(ids: List<Long>): List<ImageEntity>
 
+    /** 求给定 id 集合的原始字节总和；调用方需分块传入，避免触及 SQLite 变量上限 */
+    @Query("SELECT IFNULL(SUM(size), 0) FROM images WHERE id IN (:ids)")
+    suspend fun sumSizeByIds(ids: List<Long>): Long
+
     // ---- 清理候选池（方案 A：按维度规则筛选）----
 
     /**
      * 清理候选池：已排除收藏 / 用户保留的图，只取规则判定所需的最小字段，
      * 避免把整行装载进内存。具体命中哪个维度由
      * [com.xjw.qalbum.service.cleanup.CleanupRules] 在内存判定。
+     *
+     * 按分析顺序（mtime 升/降序）排序，让「生成审核清理」遵守与分析一致的早到晚/晚到早顺序，
+     * 从而每次只纳入对应方向的前 N 张候选。
      */
     @Query("""
         SELECT id,
@@ -629,6 +636,7 @@ interface ImageDao {
                height,
                blur_score AS blurScore,
                size,
+               mtime,
                is_blank AS isBlank,
                is_corrupt AS isCorrupt,
                duplicate_group_id AS duplicateGroupId,
@@ -637,9 +645,9 @@ interface ImageDao {
         FROM images
         WHERE status = 'active' AND source_type <> 'chatthumb'
           AND is_protected = 0 AND (user_keep IS NULL OR user_keep = 0)
-        ORDER BY delete_score DESC
+        ORDER BY (CASE WHEN :oldestFirst THEN mtime ELSE -mtime END) ASC
     """)
-    suspend fun cleanupCandidatePool(): List<CleanupSignalRow>
+    suspend fun cleanupCandidatePool(oldestFirst: Boolean): List<CleanupSignalRow>
 }
 
 /** 清理判定所需的最小图片信号投影（由 [ImageDao.cleanupCandidatePool] 用列别名填充） */
@@ -649,6 +657,7 @@ data class CleanupSignalRow(
     val height: Int,
     val blurScore: Float?,
     val size: Long,
+    val mtime: Long,
     val isBlank: Boolean,
     val isCorrupt: Boolean,
     val duplicateGroupId: Long?,

@@ -8,6 +8,7 @@ import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.db.dao.OcrDao
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.domain.model.AccessMode
+import com.xjw.qalbum.domain.model.AutoFavoriteConfig
 import com.xjw.qalbum.domain.model.CleanupConfig
 import com.xjw.qalbum.domain.model.CleanupPreset
 import com.xjw.qalbum.domain.model.ScanProgress
@@ -189,6 +190,33 @@ class SettingsViewModel(
     fun setAnalysisOldestFirst(oldestFirst: Boolean) {
         viewModelScope.launch { settings.setAnalysisOldestFirst(oldestFirst) }
     }
+
+    // ---- 每次审核数量 ----
+
+    val reviewLimit: StateFlow<Int> = settings.reviewLimit
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsRepository.DEFAULT_REVIEW_LIMIT)
+
+    fun setReviewLimit(limit: Int) {
+        viewModelScope.launch { settings.setReviewLimit(limit) }
+    }
+
+    // ---- 自动收藏配置（分析阶段，默认关闭，规则可自定义）----
+
+    val autoFavoriteConfig: StateFlow<AutoFavoriteConfig> = settings.autoFavoriteConfig
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AutoFavoriteConfig.DEFAULT)
+
+    private fun updateAutoFavoriteConfig(transform: (AutoFavoriteConfig) -> AutoFavoriteConfig) {
+        viewModelScope.launch {
+            settings.setAutoFavoriteConfig(transform(settings.autoFavoriteConfig.first()))
+        }
+    }
+
+    fun setAutoFavoriteEnabled(enabled: Boolean) = updateAutoFavoriteConfig { it.copy(enabled = enabled) }
+    fun setAutoFavoriteIdNumber(enabled: Boolean) = updateAutoFavoriteConfig { it.copy(idNumber = enabled) }
+    fun setAutoFavoriteOrderNo(enabled: Boolean) = updateAutoFavoriteConfig { it.copy(orderNo = enabled) }
+    fun setAutoFavoriteAmount(enabled: Boolean) = updateAutoFavoriteConfig { it.copy(amount = enabled) }
+    fun setAutoFavoritePhone(enabled: Boolean) = updateAutoFavoriteConfig { it.copy(phone = enabled) }
+    fun setAutoFavoriteAddress(enabled: Boolean) = updateAutoFavoriteConfig { it.copy(address = enabled) }
 
     /** 仅重置本地分析（hash/质量/重复/评分），重新分析时只重跑这些免费的本地阶段 */
     fun resetLocalAnalysis(onDone: () -> Unit = {}) {

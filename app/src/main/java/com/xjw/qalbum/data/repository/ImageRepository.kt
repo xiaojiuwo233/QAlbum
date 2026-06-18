@@ -81,6 +81,12 @@ class ImageRepository(
     suspend fun getByIds(ids: List<Long>): List<ImageEntity> =
         if (ids.isEmpty()) emptyList() else imageDao.getByIds(ids)
 
+    /** 选中图片的原始字节总和；分块查询，避免 id 过多触及 SQLite 变量上限 */
+    suspend fun sumSizeByIds(ids: List<Long>): Long {
+        if (ids.isEmpty()) return 0L
+        return ids.chunked(SQL_IDS_CHUNK).sumOf { imageDao.sumSizeByIds(it) }
+    }
+
     suspend fun getByDuplicateGroup(groupId: Long): List<ImageEntity> =
         imageDao.getByDuplicateGroup(groupId)
 
@@ -109,6 +115,11 @@ class ImageRepository(
     fun observeFavoriteCount(): Flow<Int> = imageDao.observeFavoriteCount()
     fun observeThumbnailTrashSummary(): Flow<ImageDao.ThumbnailTrashSummary> =
         imageDao.observeThumbnailTrashSummary()
+
+    companion object {
+        /** 单条 IN 查询里 id 的安全上限（远低于 SQLite 999/32766 变量限制） */
+        private const val SQL_IDS_CHUNK = 900
+    }
 }
 
 private fun List<ImageDao.BucketCountRow>.toBucketCountMap(): Map<Long, Int> =

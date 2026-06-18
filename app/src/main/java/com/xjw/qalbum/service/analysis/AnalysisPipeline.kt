@@ -6,6 +6,7 @@ import com.xjw.qalbum.data.db.dao.OcrDao
 import com.xjw.qalbum.data.db.entity.OcrTextEntity
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.data.remote.OpenAiCompatClient
+import com.xjw.qalbum.domain.model.AutoFavoriteConfig
 import com.xjw.qalbum.service.ai.AiTaggingService
 import com.xjw.qalbum.service.ai.AiTaggingShared
 import com.xjw.qalbum.service.ai.SemanticIndex
@@ -332,6 +333,8 @@ class AnalysisPipeline(
     private suspend fun runScore() {
         // 全库遍历主图，重新计算 info_score / delete_score 并写回
         // 评分时会读取关联的 OCR 结果（hasPhone / hasAmount 等）作为强信号
+        // 自动收藏改为可选特性：仅当用户在设置中开启后，按其自定义规则命中才收藏
+        val autoFav = settings.autoFavoriteConfig.first()
         var processed = 0
         var afterId = 0L
         while (true) {
@@ -343,8 +346,8 @@ class AnalysisPipeline(
                 val del = ScoringEngine.computeDeleteScore(img, ocr)
                 imageDao.updateInfoScore(img.id, info)
                 imageDao.updateDeleteScore(img.id, del)
-                // 含敏感信息（手机/金额/证件/订单）自动加入收藏，避免误删
-                if (ocr != null && (ocr.hasIdNumber || ocr.hasOrderNo || ocr.hasAmount)) {
+                // 自动收藏（默认关闭）：开启且命中用户勾选的敏感信息类型时，加入收藏避免误删
+                if (autoFav.enabled && ocr != null && matchesAutoFavorite(autoFav, ocr)) {
                     imageDao.setFavorite(img.id, true)
                 }
                 processed++
@@ -355,6 +358,14 @@ class AnalysisPipeline(
         _progress.value = AnalysisProgress(AnalysisPhase.SCORE, processed, processed, msg = "完成")
         Timber.i("AnalysisPipeline.runScore: scored $processed primary images")
     }
+
+    /** 判断一条 OCR 结果是否命中用户启用的任一自动收藏规则 */
+    private fun matchesAutoFavorite(config: AutoFavoriteConfig, ocr: OcrTextEntity): Boolean =
+        (config.idNumber && ocr.hasIdNumber) ||
+            (config.orderNo && ocr.hasOrderNo) ||
+            (config.amount && ocr.hasAmount) ||
+            (config.phone && ocr.hasPhone) ||
+            (config.address && ocr.hasAddress)
 
     companion object {
         private const val SCORE_BATCH = 500

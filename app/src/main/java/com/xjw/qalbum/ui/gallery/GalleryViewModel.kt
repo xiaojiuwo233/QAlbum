@@ -87,6 +87,9 @@ class GalleryViewModel(
 
     val favoriteCount: Flow<Int> = imageRepository.observeFavoriteCount()
 
+    /** 选中图片的原始字节总和（用于删除确认框展示「N 张图片 · X MB」） */
+    suspend fun selectedSize(ids: Set<Long>): Long = imageRepository.sumSizeByIds(ids.toList())
+
     fun exportImages(ids: Set<Long>, onDone: (Int) -> Unit = {}) {
         viewModelScope.launch {
             val count = ids.count { imageFileManager.exportToGallery(it) }

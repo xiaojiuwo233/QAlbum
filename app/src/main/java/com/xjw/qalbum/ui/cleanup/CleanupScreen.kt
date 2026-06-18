@@ -65,7 +65,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
@@ -97,6 +96,16 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.material3.Surface
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import com.xjw.qalbum.service.cleanup.CleanupRules
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -124,6 +133,7 @@ fun CleanupScreen(
     val selectedReviewDeleteIds by viewModel.selectedReviewDeleteIds.collectAsState()
     val recycleBinItems by viewModel.quarantine.collectAsState()
     val thumbnailTrashSummary by viewModel.thumbnailTrashSummary.collectAsState()
+    val purgeProgress by viewModel.purgeProgress.collectAsState()
     val context = LocalContext.current
     val slideSpec = MaterialTheme.motionScheme.defaultSpatialSpec<IntOffset>()
     val fadeSpec = MaterialTheme.motionScheme.defaultEffectsSpec<Float>()
@@ -136,52 +146,48 @@ fun CleanupScreen(
         if (reviewBatch != null) activePage = CleanupPage.Review.name
     }
 
-    Scaffold(
-        topBar = {
-            CenterAlignedTopAppBar(
-                title = { Text("清理", style = MaterialTheme.typography.titleLarge) },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                ),
-            )
+    // 系统返回：在审核 / 回收站子页时拦截，回到清理主页，而不是退出整个清理 Tab 跳回应用首页。
+    // 这样审核卡片（lastBatch）也会保留在主页上，可随时再次进入审核。
+    BackHandler(enabled = activePage != CleanupPage.Main.name) {
+        activePage = CleanupPage.Main.name
+    }
+
+    AnimatedContent(
+        targetState = activePage,
+        modifier = Modifier.fillMaxSize(),
+        transitionSpec = {
+            if (targetState == CleanupPage.Main.name) {
+                sharedAxisXPopEnter(slideSpec, fadeSpec) togetherWith sharedAxisXPopExit(slideSpec, fadeSpec)
+            } else {
+                sharedAxisXEnter(slideSpec, fadeSpec) togetherWith sharedAxisXExit(slideSpec, fadeSpec)
+            }
         },
-        contentWindowInsets = WindowInsets(0, 0, 0, 0),
-    ) { topPadding ->
-        AnimatedContent(
-            targetState = activePage,
-            transitionSpec = {
-                if (targetState == CleanupPage.Main.name) {
-                    sharedAxisXPopEnter(slideSpec, fadeSpec) togetherWith sharedAxisXPopExit(slideSpec, fadeSpec)
-                } else {
-                    sharedAxisXEnter(slideSpec, fadeSpec) togetherWith sharedAxisXExit(slideSpec, fadeSpec)
-                }
-            },
-            label = "cleanupPage",
-        ) { page ->
-        if (page == CleanupPage.Review.name && reviewBatch != null) {
-            ReviewCleanupSection(
+        label = "cleanupPage",
+    ) { page ->
+        when {
+            page == CleanupPage.Review.name && reviewBatch != null -> ReviewCleanupSection(
                 review = reviewBatch!!,
                 selectedDeleteIds = selectedReviewDeleteIds,
                 busy = busy,
+                contentPadding = contentPadding,
                 onBack = { activePage = CleanupPage.Main.name },
-                onSelectDisposable = viewModel::setReviewItemSelected,
-                onSelectDuplicateDelete = viewModel::selectDuplicateDelete,
+                onToggleSelect = viewModel::setReviewItemSelected,
+                onSelectIds = viewModel::selectReviewIds,
+                onDeselectIds = viewModel::deselectReviewIds,
+                onInvertIds = viewModel::invertReviewIds,
                 onApply = {
                     viewModel.applyReviewSelection { count ->
                         Toast.makeText(context, "已移入回收站 $count 张", Toast.LENGTH_SHORT).show()
                         activePage = CleanupPage.Main.name
                     }
                 },
-                contentPadding = PaddingValues(
-                    top = topPadding.calculateTopPadding(),
-                    bottom = contentPadding.calculateBottomPadding(),
-                ),
             )
-        } else if (page == CleanupPage.RecycleBin.name) {
-            RecycleBinSection(
+
+            page == CleanupPage.RecycleBin.name -> RecycleBinSection(
                 items = recycleBinItems,
                 thumbnailSummary = thumbnailTrashSummary,
                 busy = busy,
+                purgeProgress = purgeProgress,
                 onRestore = viewModel::restore,
                 onPurge = viewModel::purge,
                 onPurgeAll = {
@@ -193,51 +199,99 @@ fun CleanupScreen(
                     context.startActivity(Intent(context, ThumbnailTrashActivity::class.java))
                 },
                 onBack = { activePage = CleanupPage.Main.name },
-                contentPadding = PaddingValues(
-                    top = topPadding.calculateTopPadding(),
-                    bottom = contentPadding.calculateBottomPadding(),
+                contentPadding = contentPadding,
+            )
+
+            else -> MainCleanupSection(
+                contentPadding = contentPadding,
+                analysisState = analysisState,
+                analysisProgress = analysisProgress,
+                analysisOverview = analysisOverview,
+                cleanupConfig = cleanupConfig,
+                busy = busy,
+                lastBatch = lastBatch,
+                reviewSelectedCount = selectedReviewDeleteIds.size,
+                recycleBinCount = recycleBinCount,
+                recycleBinBytes = recycleBinBytes,
+                onStartAnalysis = viewModel::startAnalysis,
+                onCancelAnalysis = viewModel::cancelAnalysis,
+                onSelectPreset = viewModel::applyPreset,
+                onGenerate = viewModel::generateBatch,
+                onOpenReview = { activePage = CleanupPage.Review.name },
+                onOpenRecycleBin = { activePage = CleanupPage.RecycleBin.name },
+            )
+        }
+    }
+}
+
+/** 清理主页：分析卡片 + 清理策略 + 审核清理卡片（条件） + 回收站入口 */
+@Composable
+private fun MainCleanupSection(
+    contentPadding: PaddingValues,
+    analysisState: AnalysisState,
+    analysisProgress: com.xjw.qalbum.service.analysis.AnalysisProgress?,
+    analysisOverview: ImageDao.AnalysisProgressRow,
+    cleanupConfig: CleanupConfig,
+    busy: Boolean,
+    lastBatch: CleanupBatch?,
+    reviewSelectedCount: Int,
+    recycleBinCount: Int,
+    recycleBinBytes: Long,
+    onStartAnalysis: () -> Unit,
+    onCancelAnalysis: () -> Unit,
+    onSelectPreset: (CleanupPreset) -> Unit,
+    onGenerate: () -> Unit,
+    onOpenReview: () -> Unit,
+    onOpenRecycleBin: () -> Unit,
+) {
+    Scaffold(
+        topBar = {
+            CenterAlignedTopAppBar(
+                title = { Text("清理", style = MaterialTheme.typography.titleLarge) },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
                 ),
             )
-        } else {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(top = topPadding.calculateTopPadding())
-                    .padding(contentPadding)
-                    .verticalScroll(rememberScrollState())
-                    .padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp),
-            ) {
-                AnalysisCard(
-                    state = analysisState,
-                    progress = analysisProgress,
-                    overview = analysisOverview,
-                    onStart = viewModel::startAnalysis,
-                    onCancel = viewModel::cancelAnalysis,
-                )
+        },
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+    ) { topPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(top = topPadding.calculateTopPadding())
+                .padding(contentPadding)
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            AnalysisCard(
+                state = analysisState,
+                progress = analysisProgress,
+                overview = analysisOverview,
+                onStart = onStartAnalysis,
+                onCancel = onCancelAnalysis,
+            )
 
-                StrategyCard(
-                    config = cleanupConfig,
-                    busy = busy,
-                    onSelectPreset = viewModel::applyPreset,
-                    onGenerate = viewModel::generateBatch,
-                )
+            StrategyCard(
+                config = cleanupConfig,
+                busy = busy,
+                onSelectPreset = onSelectPreset,
+                onGenerate = onGenerate,
+            )
 
-                lastBatch?.let { batch ->
-                    ReviewSummaryCard(
-                        batch = batch,
-                        selectedCount = selectedReviewDeleteIds.size,
-                        onOpen = { activePage = CleanupPage.Review.name },
-                    )
-                }
-
-                RecycleBinSummaryCard(
-                    count = recycleBinCount,
-                    bytes = recycleBinBytes,
-                    onOpen = { activePage = CleanupPage.RecycleBin.name },
+            lastBatch?.let { batch ->
+                ReviewSummaryCard(
+                    batch = batch,
+                    selectedCount = reviewSelectedCount,
+                    onOpen = onOpenReview,
                 )
             }
-        }
+
+            RecycleBinSummaryCard(
+                count = recycleBinCount,
+                bytes = recycleBinBytes,
+                onOpen = onOpenRecycleBin,
+            )
         }
     }
 }
@@ -517,162 +571,237 @@ private fun ReviewCleanupSection(
     review: CleanupReviewBatch,
     selectedDeleteIds: Set<Long>,
     busy: Boolean,
-    onBack: () -> Unit,
-    onSelectDisposable: (Long, Boolean) -> Unit,
-    onSelectDuplicateDelete: (Long, Long) -> Unit,
-    onApply: () -> Unit,
     contentPadding: PaddingValues,
+    onBack: () -> Unit,
+    onToggleSelect: (Long, Boolean) -> Unit,
+    onSelectIds: (Collection<Long>) -> Unit,
+    onDeselectIds: (Collection<Long>) -> Unit,
+    onInvertIds: (Collection<Long>) -> Unit,
+    onApply: () -> Unit,
 ) {
     var category by rememberSaveable(review.batch.id) { mutableStateOf(ReviewCategory.All.name) }
-    val showDuplicates = category != ReviewCategory.Disposable.name
-    val showDisposable = category != ReviewCategory.Duplicate.name
+    var columns by rememberSaveable(review.batch.id) { mutableIntStateOf(3) }
+    var preview by remember { mutableStateOf<ImageEntity?>(null) }
+    var showConfirm by remember { mutableStateOf(false) }
+
+    // 各分类计数（用于筛选 chip 上的数字，以及决定是否展示某个 chip）
+    val countByCategory = remember(review.tiles) {
+        review.tiles.groupingBy { it.reviewCategory() }.eachCount()
+    }
+    // 当前筛选下可见的格子；分类顺序固定：重复 → 低分辨率 → 极小文件 → 无用
+    val current = ReviewCategory.fromName(category)
+    val visibleTiles = remember(review.tiles, category) {
+        review.tiles.filter { current == ReviewCategory.All || it.reviewCategory() == current }
+    }
+    val visibleIds = remember(visibleTiles) { visibleTiles.map { it.image.id } }
     val selectedBytes = review.selectedBytes(selectedDeleteIds)
 
-    LazyVerticalGrid(
-        columns = GridCells.Adaptive(148.dp),
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(top = contentPadding.calculateTopPadding()),
-        contentPadding = PaddingValues(
-            start = 12.dp,
-            end = 12.dp,
-            top = 12.dp,
-            bottom = contentPadding.calculateBottomPadding() + 16.dp,
-        ),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        item(span = { GridItemSpan(maxLineSpan) }) {
-            ReviewHeader(
+    Scaffold(
+        topBar = {
+            ReviewTopBar(
                 selectedCount = selectedDeleteIds.size,
                 selectedBytes = selectedBytes,
                 busy = busy,
+                category = category,
+                countByCategory = countByCategory,
+                totalCount = review.tiles.size,
                 onBack = onBack,
-                onApply = onApply,
+                onSelectCategory = { category = it.name },
+                onSelectAll = { onSelectIds(visibleIds) },
+                onSelectNone = { onDeselectIds(visibleIds) },
+                onInvert = { onInvertIds(visibleIds) },
+                onApply = { if (selectedDeleteIds.isNotEmpty() && !busy) showConfirm = true },
             )
-        }
-        item(span = { GridItemSpan(maxLineSpan) }) {
-            ReviewCategoryChips(
-                current = category,
-                duplicateCount = review.duplicatePairs.size,
-                disposableCount = review.disposableItems.size,
-                onSelect = { category = it.name },
-            )
-        }
-
-        if (showDuplicates && review.duplicatePairs.isNotEmpty()) {
-            item(span = { GridItemSpan(maxLineSpan) }) {
-                ReviewSectionLabel("重复", "左右对比，默认选中清晰度较低的一张")
+        },
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+    ) { topPadding ->
+        if (review.tiles.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(top = topPadding.calculateTopPadding()),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("没有需要审核的清理项", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            items(
-                items = review.duplicatePairs,
-                key = { "dup-${it.groupId}-${it.deleteImage.id}" },
-                span = { GridItemSpan(maxLineSpan) },
-            ) { pair ->
-                DuplicateCompareCard(
-                    pair = pair,
-                    selectedDeleteIds = selectedDeleteIds,
-                    onSelectDelete = onSelectDuplicateDelete,
-                )
-            }
+            return@Scaffold
         }
 
-        if (showDisposable && review.disposableItems.isNotEmpty()) {
-            item(span = { GridItemSpan(maxLineSpan) }) {
-                ReviewSectionLabel("无用", "损坏、空白、模糊或极小文件")
-            }
-            items(
-                items = review.disposableItems,
-                key = { "item-${it.image.id}" },
-            ) { item ->
-                DisposableReviewTile(
-                    item = item,
-                    selected = item.image.id in selectedDeleteIds,
-                    onSelectedChange = { selected -> onSelectDisposable(item.image.id, selected) },
-                )
-            }
-        }
-
-        if (review.duplicatePairs.isEmpty() && review.disposableItems.isEmpty()) {
-            item(span = { GridItemSpan(maxLineSpan) }) {
-                Box(
-                    modifier = Modifier.fillMaxWidth().padding(top = 80.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text("没有需要审核的清理项", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        val orderedCategories = listOf(
+            ReviewCategory.Duplicate,
+            ReviewCategory.LowRes,
+            ReviewCategory.TinyFile,
+            ReviewCategory.Useless,
+        )
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(columns),
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(top = topPadding.calculateTopPadding())
+                .reviewPinchColumns(columns) { columns = it },
+            contentPadding = PaddingValues(
+                start = 10.dp,
+                end = 10.dp,
+                top = 10.dp,
+                bottom = contentPadding.calculateBottomPadding() + 16.dp,
+            ),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            orderedCategories.forEach { cat ->
+                val catTiles = visibleTiles.filter { it.reviewCategory() == cat }
+                if (catTiles.isNotEmpty()) {
+                    item(span = { GridItemSpan(maxLineSpan) }, key = "label-${cat.name}") {
+                        ReviewSectionLabel(cat.label, catTiles.size, reviewCategoryHint(cat))
+                    }
+                    items(
+                        items = catTiles,
+                        key = { "tile-${it.image.id}" },
+                    ) { tile ->
+                        ReviewTileItem(
+                            tile = tile,
+                            selected = tile.image.id in selectedDeleteIds,
+                            onToggle = { onToggleSelect(tile.image.id, tile.image.id !in selectedDeleteIds) },
+                            onLongPress = { preview = tile.image },
+                        )
+                    }
                 }
             }
         }
     }
+
+    preview?.let { image ->
+        ReviewPreviewDialog(image = image, onClose = { preview = null })
+    }
+
+    if (showConfirm) {
+        AlertDialog(
+            onDismissRequest = { showConfirm = false },
+            title = { Text("移入回收站？") },
+            text = {
+                Text(
+                    "本次将清理 ${selectedDeleteIds.size} 张，共 ${formatBytes(selectedBytes)}。" +
+                        "移入回收站后仍可在回收站恢复。",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showConfirm = false
+                    onApply()
+                }) { Text("移入回收站") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showConfirm = false }) { Text("取消") }
+            },
+        )
+    }
 }
 
+/** 审核页固定顶栏：返回 + 标题/已选信息 + 移入回收站 + 筛选 chip + 全选/反选/全不选（下滑不消失） */
 @Composable
-private fun ReviewHeader(
+private fun ReviewTopBar(
     selectedCount: Int,
     selectedBytes: Long,
     busy: Boolean,
+    category: String,
+    countByCategory: Map<ReviewCategory, Int>,
+    totalCount: Int,
     onBack: () -> Unit,
+    onSelectCategory: (ReviewCategory) -> Unit,
+    onSelectAll: () -> Unit,
+    onSelectNone: () -> Unit,
+    onInvert: () -> Unit,
     onApply: () -> Unit,
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(bottom = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
+    Surface(
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 2.dp,
+        shadowElevation = 2.dp,
     ) {
-        OutlinedButton(onClick = onBack) { Text("返回") }
-        Spacer(Modifier.size(12.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                "审核清理",
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(
-                "已选 $selectedCount 项 · ${formatBytes(selectedBytes)}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        Button(
-            onClick = onApply,
-            enabled = selectedCount > 0 && !busy,
-        ) {
-            Text("移入回收站")
+        Column(modifier = Modifier.statusBarsPadding()) {
+            // 第一行：返回 + 标题/已选 + 移入回收站
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 4.dp, top = 6.dp, end = 12.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
+                }
+                Column(modifier = Modifier.weight(1f).padding(start = 4.dp)) {
+                    Text(
+                        "审核清理",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        "已选 $selectedCount 项 · ${formatBytes(selectedBytes)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                FilledTonalButton(
+                    onClick = onApply,
+                    enabled = selectedCount > 0 && !busy,
+                ) {
+                    Icon(Icons.Outlined.Delete, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.size(6.dp))
+                    Text("移入回收站")
+                }
+            }
+            // 第二行：筛选 chip（横向滚动）
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 12.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                FilterChip(
+                    selected = category == ReviewCategory.All.name,
+                    onClick = { onSelectCategory(ReviewCategory.All) },
+                    label = { Text("全部 $totalCount") },
+                )
+                listOf(
+                    ReviewCategory.Duplicate,
+                    ReviewCategory.LowRes,
+                    ReviewCategory.TinyFile,
+                    ReviewCategory.Useless,
+                ).forEach { cat ->
+                    val count = countByCategory[cat] ?: 0
+                    if (count > 0) {
+                        FilterChip(
+                            selected = category == cat.name,
+                            onClick = { onSelectCategory(cat) },
+                            label = { Text("${cat.label} $count") },
+                        )
+                    }
+                }
+            }
+            // 第三行：全选 / 反选 / 全不选
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 4.dp, end = 12.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(onClick = onSelectAll) { Text("全选") }
+                TextButton(onClick = onInvert) { Text("反选") }
+                TextButton(onClick = onSelectNone) { Text("全不选") }
+            }
         }
     }
 }
 
 @Composable
-private fun ReviewCategoryChips(
-    current: String,
-    duplicateCount: Int,
-    disposableCount: Int,
-    onSelect: (ReviewCategory) -> Unit,
-) {
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        FilterChip(
-            selected = current == ReviewCategory.All.name,
-            onClick = { onSelect(ReviewCategory.All) },
-            label = { Text("全部 ${duplicateCount + disposableCount}") },
+private fun ReviewSectionLabel(title: String, count: Int, subtitle: String) {
+    Column(modifier = Modifier.padding(start = 2.dp, top = 8.dp, bottom = 2.dp)) {
+        Text(
+            "$title · $count",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
         )
-        FilterChip(
-            selected = current == ReviewCategory.Duplicate.name,
-            onClick = { onSelect(ReviewCategory.Duplicate) },
-            label = { Text("重复 $duplicateCount") },
-        )
-        FilterChip(
-            selected = current == ReviewCategory.Disposable.name,
-            onClick = { onSelect(ReviewCategory.Disposable) },
-            label = { Text("无用 $disposableCount") },
-        )
-    }
-}
-
-@Composable
-private fun ReviewSectionLabel(title: String, subtitle: String) {
-    Column(modifier = Modifier.padding(top = 8.dp, bottom = 2.dp)) {
-        Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         Text(
             subtitle,
             style = MaterialTheme.typography.bodySmall,
@@ -681,71 +810,95 @@ private fun ReviewSectionLabel(title: String, subtitle: String) {
     }
 }
 
+/**
+ * 审核格子：方形容器内用 [ContentScale.Fit] 完整展示图片（非正方形留黑边，避免裁切丢信息），
+ * 点击切换勾选、长按全屏预览。重复组的最优图标「建议保留」，其余标「建议删除」。
+ */
 @Composable
-private fun DuplicateCompareCard(
-    pair: DuplicateReviewPair,
-    selectedDeleteIds: Set<Long>,
-    onSelectDelete: (Long, Long) -> Unit,
+private fun ReviewTileItem(
+    tile: ReviewTile,
+    selected: Boolean,
+    onToggle: () -> Unit,
+    onLongPress: () -> Unit,
 ) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
-        shape = MaterialTheme.shapes.large,
+    val context = LocalContext.current
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .aspectRatio(1f)
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+            .combinedClickable(onClick = onToggle, onLongClick = onLongPress),
     ) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    "重复组 #${pair.groupId}",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.weight(1f),
-                )
-                Text(
-                    "系统按清晰度推荐",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Spacer(Modifier.height(8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                DuplicateChoicePane(
-                    image = pair.keepImage,
-                    badge = "推荐保留",
-                    selectedForDelete = pair.keepImage.id in selectedDeleteIds,
-                    onClick = { onSelectDelete(pair.keepImage.id, pair.deleteImage.id) },
-                    modifier = Modifier.weight(1f),
-                )
-                DuplicateChoicePane(
-                    image = pair.deleteImage,
-                    badge = "建议删除",
-                    selectedForDelete = pair.deleteImage.id in selectedDeleteIds,
-                    onClick = { onSelectDelete(pair.deleteImage.id, pair.keepImage.id) },
-                    modifier = Modifier.weight(1f),
-                )
-            }
+        AsyncImage(
+            model = ImageRequest.Builder(context)
+                .data(ImageEntityModel(tile.image))
+                .crossfade(true)
+                .build(),
+            contentDescription = tile.image.filename,
+            contentScale = ContentScale.Fit,
+            modifier = Modifier.fillMaxSize(),
+        )
+        if (selected) {
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .background(MaterialTheme.colorScheme.error.copy(alpha = 0.20f)),
+            )
         }
+        // 底部原因 / 建议标签
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(5.dp)
+                .clip(RoundedCornerShape(999.dp))
+                .background(Color.Black.copy(alpha = 0.55f))
+                .padding(horizontal = 8.dp, vertical = 3.dp),
+        ) {
+            Text(
+                reviewTileBadge(tile),
+                style = MaterialTheme.typography.labelSmall,
+                color = Color.White,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        // 选择圈
+        Icon(
+            if (selected) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
+            contentDescription = null,
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(5.dp)
+                .size(22.dp)
+                .clip(CircleShape)
+                .background(
+                    if (selected) MaterialTheme.colorScheme.error else Color.Black.copy(alpha = 0.36f),
+                ),
+            tint = Color.White,
+        )
     }
 }
 
+/** 审核页长按全屏预览：完整展示（Fit），点任意处关闭 */
 @Composable
-private fun DuplicateChoicePane(
+private fun ReviewPreviewDialog(
     image: ImageEntity,
-    badge: String,
-    selectedForDelete: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
+    onClose: () -> Unit,
 ) {
     val context = LocalContext.current
-    Column(
-        modifier = modifier
-            .clip(RoundedCornerShape(8.dp))
-            .clickable(onClick = onClick),
+    Dialog(
+        onDismissRequest = onClose,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false,
+        ),
     ) {
         Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(1f)
-                .clip(RoundedCornerShape(8.dp)),
+                .fillMaxSize()
+                .background(Color.Black)
+                .clickable(onClick = onClose),
         ) {
             AsyncImage(
                 model = ImageRequest.Builder(context)
@@ -753,117 +906,43 @@ private fun DuplicateChoicePane(
                     .crossfade(true)
                     .build(),
                 contentDescription = image.filename,
-                contentScale = ContentScale.Crop,
+                contentScale = ContentScale.Fit,
                 modifier = Modifier.fillMaxSize(),
             )
-            Text(
-                badge,
-                style = MaterialTheme.typography.labelSmall,
-                color = Color.White,
+            Row(
                 modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(6.dp)
-                    .clip(RoundedCornerShape(999.dp))
-                    .background(Color.Black.copy(alpha = 0.48f))
-                    .padding(horizontal = 8.dp, vertical = 3.dp),
-            )
-            Icon(
-                if (selectedForDelete) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
-                contentDescription = null,
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(6.dp)
-                    .size(24.dp)
-                    .clip(CircleShape),
-                tint = if (selectedForDelete) MaterialTheme.colorScheme.error else Color.White,
-            )
-        }
-        Spacer(Modifier.height(6.dp))
-        Text(
-            if (selectedForDelete) "将删除" else "将保留",
-            style = MaterialTheme.typography.labelMedium,
-            color = if (selectedForDelete) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
-        )
-        SourceTypeText(image.sourceType)
-        Text(
-            imageMeta(image),
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-}
-
-@Composable
-private fun DisposableReviewTile(
-    item: CleanupReviewItem,
-    selected: Boolean,
-    onSelectedChange: (Boolean) -> Unit,
-) {
-    val context = LocalContext.current
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable { onSelectedChange(!selected) },
-        colors = CardDefaults.cardColors(
-            containerColor = if (selected) {
-                MaterialTheme.colorScheme.errorContainer
-            } else {
-                MaterialTheme.colorScheme.surfaceContainerHigh
-            },
-        ),
-    ) {
-        Column(modifier = Modifier.padding(8.dp)) {
-            Box(
-                modifier = Modifier
+                    .align(Alignment.TopCenter)
                     .fillMaxWidth()
-                    .aspectRatio(1f)
-                    .clip(RoundedCornerShape(6.dp)),
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Color.Black.copy(alpha = 0.72f), Color.Transparent),
+                        ),
+                    )
+                    .statusBarsPadding()
+                    .padding(start = 4.dp, top = 6.dp, end = 12.dp, bottom = 28.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                AsyncImage(
-                    model = ImageRequest.Builder(context)
-                        .data(ImageEntityModel(item.image))
-                        .crossfade(true)
-                        .build(),
-                    contentDescription = item.image.filename,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize(),
-                )
-                Icon(
-                    if (selected) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
-                    contentDescription = null,
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(6.dp)
-                        .size(24.dp)
-                        .clip(CircleShape),
-                    tint = if (selected) MaterialTheme.colorScheme.error else Color.White,
-                )
+                IconButton(onClick = onClose) {
+                    Icon(Icons.Outlined.Close, contentDescription = "关闭", tint = Color.White)
+                }
+                Column(modifier = Modifier.weight(1f).padding(start = 4.dp)) {
+                    Text(
+                        image.filename.ifBlank { "图片" },
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        imageMeta(image),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.White.copy(alpha = 0.72f),
+                    )
+                }
             }
-            Spacer(Modifier.height(6.dp))
-            Text(
-                item.candidate.reason,
-                style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
-            SourceTypeText(item.image.sourceType)
-            Text(
-                imageMeta(item.image),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Start,
-            )
         }
     }
-}
-
-@Composable
-private fun SourceTypeText(sourceType: String) {
-    Text(
-        sourceTypeLabel(sourceType),
-        style = MaterialTheme.typography.labelSmall,
-        fontWeight = FontWeight.SemiBold,
-        color = MaterialTheme.colorScheme.primary,
-    )
 }
 
 @Composable
@@ -905,6 +984,7 @@ private fun RecycleBinSection(
     items: List<QuarantineEntity>,
     thumbnailSummary: ImageDao.ThumbnailTrashSummary,
     busy: Boolean,
+    purgeProgress: PurgeProgress?,
     onRestore: (Long) -> Unit,
     onPurge: (Long) -> Unit,
     onPurgeAll: () -> Unit,
@@ -917,62 +997,89 @@ private fun RecycleBinSection(
     var showClearConfirm by remember { mutableStateOf(false) }
     var preview by remember { mutableStateOf<QuarantineEntity?>(null) }
 
-    LazyVerticalGrid(
-        columns = GridCells.Fixed(3),
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(top = contentPadding.calculateTopPadding()),
-        contentPadding = PaddingValues(
-            start = 10.dp,
-            end = 10.dp,
-            top = 4.dp,
-            bottom = contentPadding.calculateBottomPadding() + 16.dp,
-        ),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        item(span = { GridItemSpan(maxLineSpan) }) {
-            RecycleBinHeader(
-                count = totalCount,
-                bytes = totalBytes,
-                busy = busy,
-                onBack = onBack,
-                onClear = { showClearConfirm = true },
-            )
-        }
-        item(span = { GridItemSpan(maxLineSpan) }) {
-            ThumbnailEntryCard(
-                summary = thumbnailSummary,
-                onOpen = onOpenThumbnails,
-            )
-        }
-
-        if (items.isEmpty()) {
-            item(span = { GridItemSpan(maxLineSpan) }) {
-                Box(modifier = Modifier.fillMaxWidth().padding(top = 56.dp), contentAlignment = Alignment.Center) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(
-                            Icons.Outlined.Inventory2,
-                            contentDescription = null,
-                            modifier = Modifier.size(56.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        Text("没有已移入回收站的图片", color = MaterialTheme.colorScheme.onSurfaceVariant)
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
                     }
-                }
-            }
-        } else {
+                },
+                title = {
+                    Column {
+                        Text(
+                            "回收站",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            "$totalCount 项 · ${formatBytes(totalBytes)}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                },
+                actions = {
+                    TextButton(
+                        onClick = { showClearConfirm = true },
+                        enabled = totalCount > 0 && !busy,
+                    ) { Text("一键清理") }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                ),
+            )
+        },
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+    ) { topPadding ->
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(3),
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(top = topPadding.calculateTopPadding()),
+            contentPadding = PaddingValues(
+                start = 10.dp,
+                end = 10.dp,
+                top = 4.dp,
+                bottom = contentPadding.calculateBottomPadding() + 16.dp,
+            ),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
             item(span = { GridItemSpan(maxLineSpan) }) {
-                Text(
-                    "已删除图片 · 点按查看",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 8.dp, bottom = 2.dp),
+                ThumbnailEntryCard(
+                    summary = thumbnailSummary,
+                    onOpen = onOpenThumbnails,
                 )
             }
-            items(items, key = { it.id }) { record ->
-                QuarantineTile(record = record, onClick = { preview = record })
+
+            if (items.isEmpty()) {
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    Box(modifier = Modifier.fillMaxWidth().padding(top = 56.dp), contentAlignment = Alignment.Center) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(
+                                Icons.Outlined.Inventory2,
+                                contentDescription = null,
+                                modifier = Modifier.size(56.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Text("没有已移入回收站的图片", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+            } else {
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    Text(
+                        "已删除图片 · 点按查看",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 8.dp, bottom = 2.dp),
+                    )
+                }
+                items(items, key = { it.id }) { record ->
+                    QuarantineTile(record = record, onClick = { preview = record })
+                }
             }
         }
     }
@@ -1013,44 +1120,38 @@ private fun RecycleBinSection(
             },
         )
     }
+
+    purgeProgress?.let { PurgeProgressDialog(it) }
 }
 
+/** 一键清理进度对话框：清理期间显示，完成后由调用方把进度置空自动消失，不可手动关闭 */
 @Composable
-private fun RecycleBinHeader(
-    count: Int,
-    bytes: Long,
-    busy: Boolean,
-    onBack: () -> Unit,
-    onClear: () -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(bottom = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        IconButton(onClick = onBack) {
-            Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
-        }
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                "回收站",
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(
-                "$count 项 · ${formatBytes(bytes)}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        Button(
-            onClick = onClear,
-            enabled = count > 0 && !busy,
-        ) {
-            Text("一键清理")
-        }
+internal fun PurgeProgressDialog(progress: PurgeProgress) {
+    val fraction = if (progress.total > 0) {
+        (progress.done.toFloat() / progress.total).coerceIn(0f, 1f)
+    } else {
+        0f
     }
+    AlertDialog(
+        onDismissRequest = { },
+        confirmButton = { },
+        title = { Text("正在清理…") },
+        text = {
+            Column {
+                Text(
+                    "已清理 ${progress.done} / ${progress.total} 项",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Spacer(Modifier.height(12.dp))
+                LinearProgressIndicator(
+                    progress = { fraction },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(MaterialTheme.shapes.extraSmall),
+                )
+            }
+        },
+    )
 }
 
 @Composable
@@ -1307,20 +1408,77 @@ private enum class CleanupPage {
     Review,
 }
 
-private enum class ReviewCategory {
-    All,
-    Duplicate,
-    Disposable,
+/** 审核页筛选分类：低分辨率 / 极小文件从「无用」中拆出，单独成 tab */
+private enum class ReviewCategory(val label: String) {
+    All("全部"),
+    Duplicate("重复"),
+    LowRes("低分辨率"),
+    TinyFile("极小文件"),
+    Useless("无用");
+
+    companion object {
+        fun fromName(name: String): ReviewCategory =
+            entries.firstOrNull { it.name == name } ?: All
+    }
 }
 
-private fun CleanupReviewBatch.selectedBytes(selectedIds: Set<Long>): Long {
-    val images = duplicatePairs.flatMap { listOf(it.keepImage, it.deleteImage) } +
-        disposableItems.map { it.image }
-    return images
-        .distinctBy { it.id }
-        .filter { it.id in selectedIds }
-        .sumOf { it.size }
+/** 把一个 tile 归到某个筛选分类 */
+private fun ReviewTile.reviewCategory(): ReviewCategory = when {
+    duplicateGroupId != null -> ReviewCategory.Duplicate
+    reason == CleanupRules.REASON_LOW_RESOLUTION -> ReviewCategory.LowRes
+    reason == CleanupRules.REASON_TINY_FILE -> ReviewCategory.TinyFile
+    else -> ReviewCategory.Useless
 }
+
+/** 分组小标题下的说明文案 */
+private fun reviewCategoryHint(category: ReviewCategory): String = when (category) {
+    ReviewCategory.Duplicate -> "同组可任意勾选，默认选中非最优的几张"
+    ReviewCategory.LowRes -> "分辨率过低的图"
+    ReviewCategory.TinyFile -> "文件极小的图"
+    ReviewCategory.Useless -> "损坏、空白或模糊的图"
+    ReviewCategory.All -> ""
+}
+
+/** 格子底部标签：重复组标注建议保留 / 建议删除，其余直接显示原因 */
+private fun reviewTileBadge(tile: ReviewTile): String = when {
+    tile.duplicateGroupId != null -> if (tile.recommendedDelete) "重复·建议删除" else "重复·建议保留"
+    else -> tile.reason
+}
+
+private fun CleanupReviewBatch.selectedBytes(selectedIds: Set<Long>): Long =
+    tiles
+        .distinctBy { it.image.id }
+        .filter { it.image.id in selectedIds }
+        .sumOf { it.image.size }
+
+/** 审核网格的双指捏合调列数（与图库一致）：放大减列、缩小加列，范围 2–6 列 */
+private fun Modifier.reviewPinchColumns(columns: Int, onColumns: (Int) -> Unit): Modifier =
+    this.pointerInput(columns) {
+        awaitEachGesture {
+            var startDistance = 0f
+            var changed = false
+            while (true) {
+                val event = awaitPointerEvent(PointerEventPass.Initial)
+                val pressed = event.changes.filter { it.pressed }
+                if (pressed.size < 2) break
+                val distance = (pressed[0].position - pressed[1].position).getDistance()
+                if (startDistance == 0f) startDistance = distance
+                val ratio = if (startDistance == 0f) 1f else distance / startDistance
+                if (!changed) {
+                    when {
+                        ratio > 1.16f -> {
+                            onColumns((columns - 1).coerceIn(2, 6))
+                            changed = true
+                        }
+                        ratio < 0.86f -> {
+                            onColumns((columns + 1).coerceIn(2, 6))
+                            changed = true
+                        }
+                    }
+                }
+            }
+        }
+    }
 
 private fun imageMeta(image: ImageEntity): String {
     val size = formatBytes(image.size)
@@ -1331,13 +1489,6 @@ private fun imageMeta(image: ImageEntity): String {
     }
     val clarity = image.blurScore?.let { " · 清晰度 ${String.format("%.0f", it)}" } ?: ""
     return "$dimensions · $size$clarity"
-}
-
-private fun sourceTypeLabel(sourceType: String): String = when (sourceType) {
-    "chatimg" -> "img"
-    "chatraw" -> "raw"
-    "chatthumb" -> "thumb"
-    else -> sourceType.ifBlank { "其他" }
 }
 
 private fun presetHint(preset: CleanupPreset?): String = when (preset) {

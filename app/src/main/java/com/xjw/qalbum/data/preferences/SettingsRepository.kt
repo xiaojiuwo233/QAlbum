@@ -10,6 +10,7 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.xjw.qalbum.domain.model.AccessMode
+import com.xjw.qalbum.domain.model.AutoFavoriteConfig
 import com.xjw.qalbum.domain.model.CleanupConfig
 import com.xjw.qalbum.domain.model.GallerySort
 import kotlinx.coroutines.flow.Flow
@@ -132,6 +133,15 @@ class SettingsRepository(private val context: Context) {
         ds.edit { it[Keys.ANALYSIS_OLDEST_FIRST] = oldestFirst }
     }
 
+    /** 每次「生成审核清理」最多纳入多少张候选图（遵守分析顺序，从早/晚开始取） */
+    val reviewLimit: Flow<Int> = ds.data.map {
+        (it[Keys.REVIEW_LIMIT] ?: DEFAULT_REVIEW_LIMIT).coerceIn(MIN_REVIEW_LIMIT, MAX_REVIEW_LIMIT)
+    }
+
+    suspend fun setReviewLimit(limit: Int) {
+        ds.edit { it[Keys.REVIEW_LIMIT] = limit.coerceIn(MIN_REVIEW_LIMIT, MAX_REVIEW_LIMIT) }
+    }
+
     // ---- 图库页偏好（列数 / 排序 / 大图标记阈值） ----
 
     /** 图库每行图片数；与捏合缩放共用，范围 [MIN_GALLERY_COLUMNS, MAX_GALLERY_COLUMNS] */
@@ -173,6 +183,19 @@ class SettingsRepository(private val context: Context) {
         ds.edit { it[Keys.CLEANUP_CONFIG] = cleanupJson.encodeToString(config) }
     }
 
+    // ---- 自动收藏配置（分析阶段按敏感信息自动收藏，默认关闭）----
+
+    /** 自动收藏规则；缺省或解析失败回退到 [AutoFavoriteConfig.DEFAULT]（关闭） */
+    val autoFavoriteConfig: Flow<AutoFavoriteConfig> = ds.data.map { prefs ->
+        prefs[Keys.AUTO_FAVORITE_CONFIG]?.let { raw ->
+            runCatching { cleanupJson.decodeFromString<AutoFavoriteConfig>(raw) }.getOrNull()
+        } ?: AutoFavoriteConfig.DEFAULT
+    }
+
+    suspend fun setAutoFavoriteConfig(config: AutoFavoriteConfig) {
+        ds.edit { it[Keys.AUTO_FAVORITE_CONFIG] = cleanupJson.encodeToString(config) }
+    }
+
     // ---- 主题动态取色 ----
 
     val dynamicColorEnabled: Flow<Boolean> = ds.data.map { it[Keys.DYNAMIC_COLOR] ?: true }
@@ -196,6 +219,10 @@ class SettingsRepository(private val context: Context) {
         const val DEFAULT_ANALYSIS_LIMIT = 500
         const val MIN_ANALYSIS_LIMIT = 50
         const val MAX_ANALYSIS_LIMIT = 20_000
+
+        const val DEFAULT_REVIEW_LIMIT = 200
+        const val MIN_REVIEW_LIMIT = 20
+        const val MAX_REVIEW_LIMIT = 5_000
 
         const val DEFAULT_AI_CONCURRENCY = 2
         const val MIN_AI_CONCURRENCY = 1
@@ -229,12 +256,14 @@ class SettingsRepository(private val context: Context) {
         val QUARANTINE_DAYS = intPreferencesKey("quarantine_days")
         val ANALYSIS_LIMIT = intPreferencesKey("analysis_limit")
         val ANALYSIS_OLDEST_FIRST = booleanPreferencesKey("analysis_oldest_first")
+        val REVIEW_LIMIT = intPreferencesKey("review_limit")
 
         val GALLERY_COLUMNS = intPreferencesKey("gallery_columns")
         val GALLERY_SORT = stringPreferencesKey("gallery_sort")
         val GALLERY_LARGE_BYTES = longPreferencesKey("gallery_large_bytes")
 
         val CLEANUP_CONFIG = stringPreferencesKey("cleanup_config")
+        val AUTO_FAVORITE_CONFIG = stringPreferencesKey("auto_favorite_config")
 
         val DYNAMIC_COLOR = booleanPreferencesKey("dynamic_color")
         val DETAIL_SHARED_TRANSITION = booleanPreferencesKey("detail_shared_transition")

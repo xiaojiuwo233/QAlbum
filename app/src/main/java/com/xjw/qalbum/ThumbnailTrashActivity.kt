@@ -10,6 +10,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -53,19 +54,24 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import coil3.request.crossfade
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.ui.cleanup.CleanupViewModel
+import com.xjw.qalbum.ui.cleanup.PurgeProgressDialog
 import com.xjw.qalbum.ui.imageloading.ImageEntityModel
 import com.xjw.qalbum.ui.theme.QAlbumTheme
 import org.koin.android.ext.android.inject
@@ -100,7 +106,9 @@ private fun ThumbnailTrashScreen(
 ) {
     val items by viewModel.thumbnailTrash.collectAsState()
     val busy by viewModel.busy.collectAsState()
+    val purgeProgress by viewModel.purgeProgress.collectAsState()
     var selectedIds by remember { mutableStateOf(setOf<Long>()) }
+    var preview by remember { mutableStateOf<ImageEntity?>(null) }
 
     val totalBytes = items.sumOf { it.size }
     val bottomInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
@@ -147,10 +155,17 @@ private fun ThumbnailTrashScreen(
                     selectedIds = selectedIds,
                     bottomInset = bottomInset,
                     onToggle = toggle,
+                    onLongPress = { preview = it },
                 )
             }
         }
     }
+
+    preview?.let { image ->
+        ThumbnailPreviewDialog(image = image, onClose = { preview = null })
+    }
+
+    purgeProgress?.let { PurgeProgressDialog(it) }
 }
 
 @Composable
@@ -230,6 +245,7 @@ private fun ThumbnailTrashGrid(
     selectedIds: Set<Long>,
     bottomInset: Dp,
     onToggle: (Long) -> Unit,
+    onLongPress: (ImageEntity) -> Unit,
 ) {
     LazyVerticalGrid(
         columns = GridCells.Fixed(4),
@@ -249,6 +265,7 @@ private fun ThumbnailTrashGrid(
                 selected = image.id in selectedIds,
                 selectionMode = selectedIds.isNotEmpty(),
                 onClick = { onToggle(image.id) },
+                onLongPress = { onLongPress(image) },
             )
         }
     }
@@ -260,6 +277,7 @@ private fun ThumbnailTile(
     selected: Boolean,
     selectionMode: Boolean,
     onClick: () -> Unit,
+    onLongPress: () -> Unit,
 ) {
     val context = LocalContext.current
     val scale by animateFloatAsState(
@@ -277,7 +295,7 @@ private fun ThumbnailTile(
             }
             .clip(RoundedCornerShape(if (selected) 8.dp else 0.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant)
-            .clickable(onClick = onClick),
+            .combinedClickable(onClick = onClick, onLongClick = onLongPress),
     ) {
         AsyncImage(
             model = ImageRequest.Builder(context)
@@ -300,6 +318,71 @@ private fun ThumbnailTile(
                     .background(if (selected) MaterialTheme.colorScheme.primary else Color.Black.copy(alpha = 0.36f)),
                 tint = Color.White,
             )
+        }
+    }
+}
+
+/** 缩略图长按全屏预览：完整展示（Fit），点任意处关闭 */
+@Composable
+private fun ThumbnailPreviewDialog(
+    image: ImageEntity,
+    onClose: () -> Unit,
+) {
+    val context = LocalContext.current
+    Dialog(
+        onDismissRequest = onClose,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false,
+        ),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+                .clickable(onClick = onClose),
+        ) {
+            AsyncImage(
+                model = ImageRequest.Builder(context)
+                    .data(ImageEntityModel(image))
+                    .crossfade(true)
+                    .build(),
+                contentDescription = image.filename,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize(),
+            )
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Color.Black.copy(alpha = 0.72f), Color.Transparent),
+                        ),
+                    )
+                    .statusBarsPadding()
+                    .padding(start = 4.dp, top = 6.dp, end = 12.dp, bottom = 28.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = onClose) {
+                    Icon(Icons.Outlined.Close, contentDescription = "关闭", tint = Color.White)
+                }
+                Column(modifier = Modifier.weight(1f).padding(start = 4.dp)) {
+                    Text(
+                        image.filename.ifBlank { "缩略图" },
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        formatBytes(image.size),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.White.copy(alpha = 0.72f),
+                    )
+                }
+            }
         }
     }
 }

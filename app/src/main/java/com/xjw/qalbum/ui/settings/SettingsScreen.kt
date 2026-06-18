@@ -63,12 +63,14 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -360,6 +362,7 @@ fun AnalysisSettingsScreen(
 ) {
     val limit by viewModel.analysisLimit.collectAsState()
     val oldestFirst by viewModel.analysisOldestFirst.collectAsState()
+    val autoFavorite by viewModel.autoFavoriteConfig.collectAsState()
     var showResetDialog by remember { mutableStateOf(false) }
 
     SettingsDetailScaffold(
@@ -395,7 +398,7 @@ fun AnalysisSettingsScreen(
         }
 
         SettingsSection(header = "分析顺序") {
-            SettingsBlurb("决定优先分析哪一批图片。")
+            SettingsBlurb("决定优先分析哪一批图片，「生成审核清理」也会遵守此顺序。")
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip(
                     selected = oldestFirst,
@@ -407,6 +410,55 @@ fun AnalysisSettingsScreen(
                     onClick = { viewModel.setAnalysisOldestFirst(false) },
                     label = { Text("从晚到早") },
                 )
+            }
+        }
+
+        SettingsSection(header = "自动收藏") {
+            SettingsSwitchRow(
+                title = "分析时自动收藏",
+                subtitle = "分析（评分）阶段，命中下列敏感信息的图片自动加入收藏，避免误删。默认关闭。",
+                checked = autoFavorite.enabled,
+                onCheckedChange = {
+                    viewModel.setAutoFavoriteEnabled(it)
+                    notify(if (it) "已开启自动收藏" else "已关闭自动收藏")
+                },
+            )
+            if (autoFavorite.enabled) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+                SettingsBlurb("命中规则（任选其一即收藏）：")
+                SettingsSwitchRow(
+                    title = "证件号",
+                    subtitle = "身份证等证件号码",
+                    checked = autoFavorite.idNumber,
+                    onCheckedChange = viewModel::setAutoFavoriteIdNumber,
+                )
+                SettingsSwitchRow(
+                    title = "订单号",
+                    subtitle = "订单 / 快递单号",
+                    checked = autoFavorite.orderNo,
+                    onCheckedChange = viewModel::setAutoFavoriteOrderNo,
+                )
+                SettingsSwitchRow(
+                    title = "金额",
+                    subtitle = "含金额信息",
+                    checked = autoFavorite.amount,
+                    onCheckedChange = viewModel::setAutoFavoriteAmount,
+                )
+                SettingsSwitchRow(
+                    title = "手机号",
+                    subtitle = "含手机号码",
+                    checked = autoFavorite.phone,
+                    onCheckedChange = viewModel::setAutoFavoritePhone,
+                )
+                SettingsSwitchRow(
+                    title = "地址",
+                    subtitle = "含地址信息",
+                    checked = autoFavorite.address,
+                    onCheckedChange = viewModel::setAutoFavoriteAddress,
+                )
+                if (!autoFavorite.hasAnyRule) {
+                    SettingsBlurb("当前未勾选任何规则，自动收藏不会生效。")
+                }
             }
         }
 
@@ -439,6 +491,7 @@ fun CleanupSettingsScreen(
     animatedScope: AnimatedVisibilityScope? = null,
 ) {
     val config by viewModel.cleanupConfig.collectAsState()
+    val reviewLimit by viewModel.reviewLimit.collectAsState()
     val activePreset = CleanupPreset.match(config)
 
     SettingsDetailScaffold(
@@ -447,7 +500,35 @@ fun CleanupSettingsScreen(
         sharedKey = settingsSharedKey(SettingsCategory.CLEANUP.route),
         sharedScope = sharedScope,
         animatedScope = animatedScope,
-    ) { _ ->
+    ) { notify ->
+        SettingsSection(header = "每次审核数量") {
+            SettingsBlurb(
+                "每次「生成审核清理」最多纳入多少张候选图。会遵守「分析」里的顺序（从早到晚 / 从晚到早），处理完即止。",
+            )
+            InstantSaveTextField(
+                value = reviewLimit.toString(),
+                label = "数量（${SettingsRepository.MIN_REVIEW_LIMIT}–${SettingsRepository.MAX_REVIEW_LIMIT}）",
+                keyboardType = KeyboardType.Number,
+                onSave = { input ->
+                    val value = input.filter { it.isDigit() }.toIntOrNull()
+                    if (value != null) {
+                        val clamped = value.coerceIn(
+                            SettingsRepository.MIN_REVIEW_LIMIT,
+                            SettingsRepository.MAX_REVIEW_LIMIT,
+                        )
+                        viewModel.setReviewLimit(clamped)
+                        notify("已保存审核数量 $clamped")
+                    }
+                },
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = {
+                    viewModel.setReviewLimit(SettingsRepository.DEFAULT_REVIEW_LIMIT)
+                    notify("已恢复默认 ${SettingsRepository.DEFAULT_REVIEW_LIMIT}")
+                }) { Text("默认 ${SettingsRepository.DEFAULT_REVIEW_LIMIT}") }
+            }
+        }
+
         SettingsSection(header = "快捷预设") {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 CleanupPreset.entries.forEach { preset ->
@@ -923,7 +1004,10 @@ private fun SettingsSwitchRow(
 }
 
 /**
- * 即时保存文本框：本地编辑，失焦或按键盘「完成」时若内容有变就调用 [onSave]。
+ * 即时保存文本框：本地编辑，失焦 / 按键盘「完成」/ 离开页面（dispose）时若内容有变就调用 [onSave]。
+ *
+ * 之前只在失焦时提交，而用户直接点返回 / 系统返回时往往不会触发失焦，导致输入未保存
+ * （例如分析上限输入后退出重进仍是旧值）。这里补充 dispose 时的兜底提交，确保离开即落盘。
  */
 @Composable
 private fun InstantSaveTextField(
@@ -941,6 +1025,15 @@ private fun InstantSaveTextField(
     val focusManager = LocalFocusManager.current
     val commit = {
         if (text != value) onSave(text)
+    }
+    // dispose 兜底提交：用最新的 text / value / onSave，避免离开页面时丢失编辑
+    val latestText by rememberUpdatedState(text)
+    val latestValue by rememberUpdatedState(value)
+    val latestOnSave by rememberUpdatedState(onSave)
+    DisposableEffect(Unit) {
+        onDispose {
+            if (latestText != latestValue) latestOnSave(latestText)
+        }
     }
     OutlinedTextField(
         value = text,

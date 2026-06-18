@@ -46,9 +46,11 @@ class CleanupRecommender(
         config: CleanupConfig,
         label: String,
         maxCount: Int = 500,
+        oldestFirst: Boolean = true,
     ): CleanupBatch {
-        // 候选池已按 delete_score DESC 排序；命中启用维度的取前 maxCount 个
-        val pool = imageDao.cleanupCandidatePool()
+        // 候选池按分析顺序（mtime 升/降序）排序；命中启用维度的取前 maxCount 个，
+        // 让本次审核遵守与分析一致的早到晚/晚到早顺序
+        val pool = imageDao.cleanupCandidatePool(oldestFirst)
         val hits = pool
             .mapNotNull { row -> CleanupRules.classify(row, config)?.let { reason -> row to reason } }
             .take(maxCount)

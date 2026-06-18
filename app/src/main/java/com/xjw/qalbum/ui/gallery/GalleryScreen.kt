@@ -69,6 +69,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -206,6 +207,8 @@ fun GalleryScreen(
             if (showDeleteConfirm) {
                 DeleteSelectionDialog(
                     count = selectedIds.size,
+                    ids = selectedIds,
+                    sizeProvider = viewModel::selectedSize,
                     onDismiss = { showDeleteConfirm = false },
                     onTrash = {
                         val ids = selectedIds
@@ -335,6 +338,8 @@ fun FavoriteGalleryScreen(
             if (showDeleteConfirm) {
                 DeleteSelectionDialog(
                     count = selectedIds.size,
+                    ids = selectedIds,
+                    sizeProvider = viewModel::selectedSize,
                     onDismiss = { showDeleteConfirm = false },
                     onTrash = {
                         val ids = selectedIds
@@ -869,14 +874,32 @@ private fun thresholdLabel(bytes: Long): String =
 @Composable
 private fun DeleteSelectionDialog(
     count: Int,
+    ids: Set<Long>,
+    sizeProvider: suspend (Set<Long>) -> Long,
     onDismiss: () -> Unit,
     onTrash: () -> Unit,
     onPermanent: () -> Unit,
 ) {
+    // 异步统计选中图片的总大小，未算出前显示「计算中…」
+    val bytes by produceState(initialValue = -1L, ids) { value = sizeProvider(ids) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("删除 $count 张图片？") },
-        text = { Text("可以先移动到回收站，或直接永久删除。永久删除后不可恢复。") },
+        text = {
+            Column {
+                Text("可以先移动到回收站，或直接永久删除。永久删除后不可恢复。")
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = if (bytes >= 0) {
+                        "$count 张图片 · ${formatBytes(bytes)}"
+                    } else {
+                        "$count 张图片 · 计算中…"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
         confirmButton = {
             TextButton(onClick = onTrash) { Text("移动到回收站") }
         },
@@ -887,6 +910,15 @@ private fun DeleteSelectionDialog(
             }
         },
     )
+}
+
+/** 字节数格式化为人类可读（与清理页一致） */
+private fun formatBytes(bytes: Long): String {
+    if (bytes <= 0) return "0 B"
+    val units = arrayOf("B", "KB", "MB", "GB", "TB")
+    val exp = (Math.log10(bytes.toDouble()) / Math.log10(1024.0)).toInt().coerceAtMost(units.size - 1)
+    val value = bytes.toDouble() / Math.pow(1024.0, exp.toDouble())
+    return String.format("%.1f %s", value, units[exp])
 }
 
 @Composable
