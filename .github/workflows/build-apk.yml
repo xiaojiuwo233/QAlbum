@@ -45,15 +45,32 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x ./gradlew
 
-      # 5. 构建 Release APK（release 复用 debug 签名，产物可直接安装）
+      # 5. 还原 release 签名密钥（来自 GitHub Secrets 的 base64；未配置则跳过，构建回退 debug 签名）
+      - name: Decode keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$GITHUB_WORKSPACE/release.keystore"
+            echo "已写入 release.keystore（$(stat -c%s "$GITHUB_WORKSPACE/release.keystore") bytes）"
+          else
+            echo "未配置 KEYSTORE_BASE64 Secret，本次构建回退使用 debug 签名"
+          fi
+
+      # 6. 构建 Release APK（配置了密钥则用正式 release 签名，多次构建签名一致、可覆盖升级）
       - name: Build Release APK
+        env:
+          KEYSTORE_FILE: ${{ github.workspace }}/release.keystore
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: ./gradlew assembleRelease --stacktrace
 
-      # 6. 输出产物路径与体积，便于在构建日志中确认
+      # 7. 输出产物路径与体积，便于在构建日志中确认
       - name: List APK output
         run: ls -lh app/build/outputs/apk/release/
 
-      # 7. 上传 APK 为可下载产物（在本次 workflow run 的 Artifacts 区下载）
+      # 8. 上传 APK 为可下载产物（在本次 workflow run 的 Artifacts 区下载）
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
