@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!--
+      允许明文 HTTP 流量。
+      本应用的 AI 能力通常对接用户自建/本地的 OpenAI 兼容服务
+      （如 LM Studio、Ollama、vLLM），这些服务多为内网 http:// 地址，
+      而 Android 9+（targetSdk≥28）默认禁止明文 HTTP，会直接抛
+      "CLEARTEXT communication not permitted" 导致 AI 调用全部失败。
+      这里放开明文，同时保留系统证书以便 https:// 正常工作。
+    -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

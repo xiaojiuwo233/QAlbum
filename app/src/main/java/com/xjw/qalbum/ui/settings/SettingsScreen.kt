@@ -534,6 +534,9 @@ fun AiSettingsScreen(
 ) {
     val state by viewModel.uiState.collectAsState()
     val safety = remember(state.aiEndpoint) { AiPrivacyGuard.classify(state.aiEndpoint) }
+    val disableThinking by viewModel.aiDisableThinking.collectAsState()
+    val concurrency by viewModel.aiConcurrency.collectAsState()
+    val maxTokens by viewModel.aiMaxTokens.collectAsState()
     var showPrivacyDialog by remember { mutableStateOf(false) }
     var keyVisible by remember { mutableStateOf(false) }
 
@@ -574,11 +577,12 @@ fun AiSettingsScreen(
                 value = state.aiEndpoint,
                 label = "Endpoint（OpenAI 兼容）",
                 placeholder = "https://api.openai.com 或 http://192.168.1.100:11434",
+                supporting = "填根地址或带 /v1 都可（如 http://192.168.5.25:1234）。本地服务可不填 Key。",
                 onSave = { viewModel.setAiEndpoint(it); notify("已保存 Endpoint") },
             )
             InstantSaveTextField(
                 value = state.aiApiKey,
-                label = "API Key",
+                label = "API Key（本地服务可留空）",
                 visualTransformation = if (keyVisible) VisualTransformation.None else PasswordVisualTransformation(),
                 trailingIcon = {
                     IconButton(onClick = { keyVisible = !keyVisible }) {
@@ -593,6 +597,7 @@ fun AiSettingsScreen(
             InstantSaveTextField(
                 value = state.aiModel,
                 label = "Chat 模型",
+                supporting = "图片打标签需要支持视觉(vision)的多模态模型，纯文本模型会失败。",
                 onSave = { viewModel.setAiModel(it); notify("已保存 Chat 模型") },
             )
             InstantSaveTextField(
@@ -600,6 +605,53 @@ fun AiSettingsScreen(
                 label = "Embedding 模型",
                 onSave = { viewModel.setAiEmbeddingModel(it); notify("已保存 Embedding 模型") },
             )
+        }
+
+        SettingsSection(header = "推理与性能") {
+            SettingsSwitchRow(
+                title = "过滤模型思考（thinking）",
+                subtitle = "请求时关闭思考，并自动剥离响应中的 <think> 内容；思考模型请保持开启",
+                checked = disableThinking,
+                onCheckedChange = { viewModel.setAiDisableThinking(it); notify(if (it) "已开启思考过滤" else "已关闭思考过滤") },
+            )
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+            InstantSaveTextField(
+                value = maxTokens.toString(),
+                label = "最大 token（${SettingsRepository.MIN_AI_MAX_TOKENS}–${SettingsRepository.MAX_AI_MAX_TOKENS}）",
+                supporting = "Chat 单次回复的 token 上限。思考模型会先消耗大量 token 推理，过小会导致正文为空、打标签失败，建议 ≥1536。",
+                keyboardType = KeyboardType.Number,
+                onSave = { input ->
+                    val value = input.filter { it.isDigit() }.toIntOrNull()
+                    if (value != null) {
+                        val clamped = value.coerceIn(
+                            SettingsRepository.MIN_AI_MAX_TOKENS,
+                            SettingsRepository.MAX_AI_MAX_TOKENS,
+                        )
+                        viewModel.setAiMaxTokens(clamped)
+                        notify("已保存最大 token $clamped")
+                    }
+                },
+            )
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+            var sliderValue by remember(concurrency) { mutableStateOf(concurrency.toFloat()) }
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text("并发请求数：${sliderValue.toInt()}", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "AI 标签 / 向量阶段同时处理多少张图片。本地推理服务建议 1–4。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Slider(
+                    value = sliderValue,
+                    onValueChange = { sliderValue = it },
+                    valueRange = SettingsRepository.MIN_AI_CONCURRENCY.toFloat()..SettingsRepository.MAX_AI_CONCURRENCY.toFloat(),
+                    steps = (SettingsRepository.MAX_AI_CONCURRENCY - SettingsRepository.MIN_AI_CONCURRENCY - 1).coerceAtLeast(0),
+                    onValueChangeFinished = {
+                        viewModel.setAiConcurrency(sliderValue.toInt())
+                        notify("并发数已设为 ${sliderValue.toInt()}")
+                    },
+                )
+            }
         }
     }
 

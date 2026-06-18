@@ -50,35 +50,47 @@ class OpenAiCompatClient(
         isLenient = true
     }
 
-    /** Chat Completion（含 vision，imageBase64 不为空时附带图片） */
+    /**
+     * Chat Completion（含 vision，imageBase64 不为空时附带图片）
+     *
+     * [maxTokens] 为空时读取设置里的「最大 token」（思考模型需较大额度，否则正文为空）。
+     */
     suspend fun chatCompletion(
         messages: List<ChatMessage>,
         model: String? = null,
-        maxTokens: Int = 1024,
+        maxTokens: Int? = null,
         temperature: Float = 0.3f,
     ): ChatResponse? = withContext(Dispatchers.IO) {
         val cfg = settings.aiEnabled.first()
         if (!cfg) return@withContext null
-        val endpoint = settings.aiEndpoint.first().trimEnd('/')
+        val endpoint = settings.aiEndpoint.first()
         val apiKey = settings.aiApiKey.first()
         val defaultModel = settings.aiModel.first()
-        if (endpoint.isBlank() || apiKey.isBlank()) {
-            Timber.w("OpenAiCompatClient: AI endpoint or key is empty")
+        // 本地服务（LM Studio/Ollama 等）通常免鉴权，故 Key 可空，仅 endpoint 必填
+        if (endpoint.isBlank()) {
+            Timber.w("OpenAiCompatClient: AI endpoint is empty")
             return@withContext null
         }
+        val disableThinking = settings.aiDisableThinking.first()
+        val maxTok = maxTokens ?: settings.aiMaxTokens.first()
 
         val body = buildJsonObject {
             put("model", model ?: defaultModel)
-            put("max_tokens", maxTokens)
+            put("max_tokens", maxTok)
             put("temperature", temperature)
+            // 关闭思考：尽量兼容多种服务端实现（vLLM / LM Studio / 原生 qwen3 模板）
+            if (disableThinking) {
+                put("enable_thinking", false)
+                putJsonObject("chat_template_kwargs") { put("enable_thinking", false) }
+            }
             putJsonArray("messages") {
                 messages.forEach { msg -> add(buildMessage(msg)) }
             }
         }
 
         val req = Request.Builder()
-            .url("$endpoint/v1/chat/completions")
-            .addHeader("Authorization", "Bearer $apiKey")
+            .url(resolveUrl(endpoint, "chat/completions"))
+            .addHeader("Authorization", "Bearer ${apiKey.ifBlank { "not-needed" }}")
             .addHeader("Content-Type", "application/json")
             .post(body.toString().toRequestBody(JSON_MEDIA_TYPE))
             .build()
@@ -90,7 +102,7 @@ class OpenAiCompatClient(
                     Timber.w("ChatCompletion HTTP ${r.code}: ${r.body?.string()?.take(300)}")
                     return@use null
                 }
-                parseChatResponse(r.body?.string())
+                parseChatResponse(r.body?.string(), disableThinking)
             }
         } catch (t: Throwable) {
             Timber.w(t, "ChatCompletion failed")
@@ -102,10 +114,11 @@ class OpenAiCompatClient(
     suspend fun embedding(text: String, model: String? = null): FloatArray? = withContext(Dispatchers.IO) {
         val cfg = settings.aiEnabled.first()
         if (!cfg) return@withContext null
-        val endpoint = settings.aiEndpoint.first().trimEnd('/')
+        val endpoint = settings.aiEndpoint.first()
         val apiKey = settings.aiApiKey.first()
         val embModel = model ?: settings.aiEmbeddingModel.first()
-        if (endpoint.isBlank() || apiKey.isBlank()) return@withContext null
+        // 本地服务通常免鉴权，Key 可空，仅 endpoint 必填
+        if (endpoint.isBlank()) return@withContext null
 
         val body = buildJsonObject {
             put("model", embModel)
@@ -113,8 +126,8 @@ class OpenAiCompatClient(
         }
 
         val req = Request.Builder()
-            .url("$endpoint/v1/embeddings")
-            .addHeader("Authorization", "Bearer $apiKey")
+            .url(resolveUrl(endpoint, "embeddings"))
+            .addHeader("Authorization", "Bearer ${apiKey.ifBlank { "not-needed" }}")
             .addHeader("Content-Type", "application/json")
             .post(body.toString().toRequestBody(JSON_MEDIA_TYPE))
             .build()
@@ -131,6 +144,24 @@ class OpenAiCompatClient(
         } catch (t: Throwable) {
             Timber.w(t, "Embedding failed")
             null
+        }
+    }
+
+    // ---- URL 归一化 ----
+
+    /**
+     * 拼接最终请求 URL，避免用户在 endpoint 里已带 `/v1` 时重复拼接成 `/v1/v1/...`。
+     *
+     * - `http://host:1234`        + chat/completions → http://host:1234/v1/chat/completions
+     * - `http://host:1234/v1`     + chat/completions → http://host:1234/v1/chat/completions
+     * - `http://host:1234/v1/`    + chat/completions → http://host:1234/v1/chat/completions
+     */
+    private fun resolveUrl(endpoint: String, path: String): String {
+        val base = endpoint.trim().trimEnd('/')
+        return if (base.endsWith("/v1", ignoreCase = true)) {
+            "$base/$path"
+        } else {
+            "$base/v1/$path"
         }
     }
 
@@ -158,14 +189,20 @@ class OpenAiCompatClient(
         }
     }
 
-    private fun parseChatResponse(raw: String?): ChatResponse? {
+    private fun parseChatResponse(raw: String?, stripThinking: Boolean): ChatResponse? {
         if (raw.isNullOrBlank()) return null
         return try {
             val root = json.parseToJsonElement(raw).jsonObject
             val choices = root["choices"]?.jsonArray ?: return null
             val first = choices.firstOrNull()?.jsonObject ?: return null
             val message = first["message"]?.jsonObject ?: return null
-            val content = message["content"]?.jsonPrimitive?.content ?: return null
+            val rawContent = message["content"]?.jsonPrimitive?.content ?: return null
+            val content = if (stripThinking) cleanThinking(rawContent) else rawContent
+            if (content.isBlank()) {
+                // 部分思考模型会把全部 token 用于思考（reasoning_content），导致 content 为空，
+                // 此时给出明确日志，提示需要调大 max_tokens 或更换非思考模型
+                Timber.w("ChatCompletion content 为空（可能思考占满 max_tokens）：${raw.take(200)}")
+            }
             val usage = root["usage"]?.jsonObject
             ChatResponse(
                 content = content,
@@ -180,6 +217,25 @@ class OpenAiCompatClient(
             Timber.w(t, "parseChatResponse failed: ${raw.take(200)}")
             null
         }
+    }
+
+    /**
+     * 剥离响应正文里的思考内容（针对把 think 直接写进 content 的模型）。
+     * 处理成对的 `<think>…</think>` / `<thinking>…</thinking>`，
+     * 以及思考被截断只剩结束标签等残留情况。
+     */
+    private fun cleanThinking(text: String): String {
+        var s = text
+        // 1) 去掉成对思考块
+        s = THINK_BLOCK_REGEX.replace(s, "")
+        // 2) 残留未配对的结束标签：取最后一个结束标签之后的内容作为正文
+        val lastClose = maxOf(s.lastIndexOf("</think>"), s.lastIndexOf("</thinking>"))
+        if (lastClose >= 0) {
+            s = s.substring(lastClose)
+                .removePrefix("</think>")
+                .removePrefix("</thinking>")
+        }
+        return s.trim()
     }
 
     private fun parseEmbeddingResponse(raw: String?): FloatArray? {
@@ -198,6 +254,10 @@ class OpenAiCompatClient(
 
     companion object {
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+
+        /** 匹配 <think>…</think> / <thinking>…</thinking>（忽略大小写、跨行） */
+        private val THINK_BLOCK_REGEX =
+            Regex("<think(?:ing)?>.*?</think(?:ing)?>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
     }
 }
 

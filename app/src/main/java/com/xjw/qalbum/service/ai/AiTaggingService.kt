@@ -44,7 +44,7 @@ class AiTaggingService(
                 ChatMessage(role = "system", text = SYSTEM_PROMPT),
                 ChatMessage(role = "user", text = "请分析这张图片，按要求 JSON 格式返回。", imageBase64 = base64),
             ),
-            maxTokens = 500,
+            // maxTokens 留空：由设置里的「最大 token」决定（思考模型需留足额度，否则 content 为空）
             temperature = 0.1f,
         ) ?: return Result.Failed("AI 调用失败或未配置 endpoint")
 

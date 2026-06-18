@@ -232,8 +232,8 @@ class AnalysisPipeline(
     private suspend fun isAiReady(): Boolean {
         val enabled = settings.aiEnabled.first()
         val endpoint = settings.aiEndpoint.first()
-        val key = settings.aiApiKey.first()
-        return enabled && endpoint.isNotBlank() && key.isNotBlank()
+        // 本地服务通常免鉴权，故不再强制要求 API Key，仅需启用 + 填好 endpoint
+        return enabled && endpoint.isNotBlank()
     }
 
     private suspend fun runAiTag(limit: Int, oldestFirst: Boolean) {
@@ -246,17 +246,26 @@ class AnalysisPipeline(
             return
         }
         val total = batch.size
-        var processed = 0
-        for (img in batch) {
-            val result = aiTagging.tagImage(provider, img.id)
-            if (result is AiTaggingService.Result.Success) {
-                imageDao.update(img.copy(aiDone = true))
-            }
-            processed++
-            _progress.value = AnalysisProgress(AnalysisPhase.AI_TAG, processed, total)
+        // 按用户配置的并发数同时发起请求；本地推理服务多为串行队列，过高并发收益有限，由用户自行权衡
+        val concurrency = settings.aiConcurrency.first().coerceAtLeast(1)
+        val processed = AtomicInteger(0)
+        coroutineScope {
+            val semaphore = Semaphore(concurrency)
+            batch.map { img ->
+                async(Dispatchers.IO) {
+                    semaphore.withPermit {
+                        val result = aiTagging.tagImage(provider, img.id)
+                        if (result is AiTaggingService.Result.Success) {
+                            imageDao.update(img.copy(aiDone = true))
+                        }
+                        val done = processed.incrementAndGet()
+                        _progress.value = AnalysisProgress(AnalysisPhase.AI_TAG, done, total)
+                    }
+                }
+            }.awaitAll()
         }
         _progress.value = AnalysisProgress(AnalysisPhase.AI_TAG, total, total, msg = "完成")
-        Timber.i("AnalysisPipeline.runAiTag: tagged $processed/$total images (limit=$limit)")
+        Timber.i("AnalysisPipeline.runAiTag: tagged ${processed.get()}/$total images (limit=$limit, concurrency=$concurrency)")
     }
 
     private suspend fun runEmbedding(limit: Int, oldestFirst: Boolean) {
@@ -269,33 +278,43 @@ class AnalysisPipeline(
             return
         }
         val total = batch.size
-        var processed = 0
+        val concurrency = settings.aiConcurrency.first().coerceAtLeast(1)
+        val processed = AtomicInteger(0)
         val embModel = settings.aiEmbeddingModel.first()
-        for (img in batch) {
-            if (semanticIndex.hasEmbedding(img.id)) {
-                imageDao.update(img.copy(embeddingDone = true))
-                processed++
-                continue
-            }
-            // 用 OCR 文本 + 文件名等作为 embedding 输入（兼容更多模型）
-            val ocr = ocrDao.getByImageId(img.id)
-            val textForEmbedding = buildEmbeddingText(img, ocr)
-            if (textForEmbedding.isBlank()) {
-                // 无可嵌入文本：标记完成，避免反复占用名额
-                imageDao.update(img.copy(embeddingDone = true))
-                processed++
-                continue
-            }
-            val vec = aiClient.embedding(textForEmbedding)
-            if (vec != null) {
-                semanticIndex.upsert(img.id, embModel, vec)
-                imageDao.update(img.copy(embeddingDone = true))
-            }
-            processed++
-            _progress.value = AnalysisProgress(AnalysisPhase.EMBEDDING, processed, total)
+        coroutineScope {
+            val semaphore = Semaphore(concurrency)
+            batch.map { img ->
+                async(Dispatchers.IO) {
+                    semaphore.withPermit {
+                        embedOne(img, embModel)
+                        val done = processed.incrementAndGet()
+                        _progress.value = AnalysisProgress(AnalysisPhase.EMBEDDING, done, total)
+                    }
+                }
+            }.awaitAll()
         }
         _progress.value = AnalysisProgress(AnalysisPhase.EMBEDDING, total, total, msg = "完成")
-        Timber.i("AnalysisPipeline.runEmbedding: embedded $processed/$total images (limit=$limit)")
+        Timber.i("AnalysisPipeline.runEmbedding: embedded ${processed.get()}/$total images (limit=$limit, concurrency=$concurrency)")
+    }
+
+    /** 单张图片的向量化：已存在则直接标记完成；用 OCR 文本 + 文件名等作为 embedding 输入 */
+    private suspend fun embedOne(img: com.xjw.qalbum.data.db.entity.ImageEntity, embModel: String) {
+        if (semanticIndex.hasEmbedding(img.id)) {
+            imageDao.update(img.copy(embeddingDone = true))
+            return
+        }
+        val ocr = ocrDao.getByImageId(img.id)
+        val textForEmbedding = buildEmbeddingText(img, ocr)
+        if (textForEmbedding.isBlank()) {
+            // 无可嵌入文本：标记完成，避免反复占用名额
+            imageDao.update(img.copy(embeddingDone = true))
+            return
+        }
+        val vec = aiClient.embedding(textForEmbedding)
+        if (vec != null) {
+            semanticIndex.upsert(img.id, embModel, vec)
+            imageDao.update(img.copy(embeddingDone = true))
+        }
     }
 
     private fun buildEmbeddingText(

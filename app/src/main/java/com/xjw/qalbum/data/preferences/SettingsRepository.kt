@@ -83,6 +83,31 @@ class SettingsRepository(private val context: Context) {
         ds.edit { it[Keys.AI_EMBEDDING_MODEL] = model }
     }
 
+    /** 是否过滤/关闭模型思考（thinking）：开启后请求会要求服务端禁用思考，并剥离响应中的思考内容 */
+    val aiDisableThinking: Flow<Boolean> = ds.data.map { it[Keys.AI_DISABLE_THINKING] ?: true }
+
+    suspend fun setAiDisableThinking(enabled: Boolean) {
+        ds.edit { it[Keys.AI_DISABLE_THINKING] = enabled }
+    }
+
+    /** AI 标签 / 向量阶段的并发请求数（同时向接口发起多少张图的请求） */
+    val aiConcurrency: Flow<Int> = ds.data.map {
+        (it[Keys.AI_CONCURRENCY] ?: DEFAULT_AI_CONCURRENCY).coerceIn(MIN_AI_CONCURRENCY, MAX_AI_CONCURRENCY)
+    }
+
+    suspend fun setAiConcurrency(value: Int) {
+        ds.edit { it[Keys.AI_CONCURRENCY] = value.coerceIn(MIN_AI_CONCURRENCY, MAX_AI_CONCURRENCY) }
+    }
+
+    /** Chat 调用的 max_tokens 上限；思考模型需较大额度，否则思考占满后正文（content）为空 */
+    val aiMaxTokens: Flow<Int> = ds.data.map {
+        (it[Keys.AI_MAX_TOKENS] ?: DEFAULT_AI_MAX_TOKENS).coerceIn(MIN_AI_MAX_TOKENS, MAX_AI_MAX_TOKENS)
+    }
+
+    suspend fun setAiMaxTokens(value: Int) {
+        ds.edit { it[Keys.AI_MAX_TOKENS] = value.coerceIn(MIN_AI_MAX_TOKENS, MAX_AI_MAX_TOKENS) }
+    }
+
     // ---- 回收站保留时长 ----
 
     val quarantineRetentionDays: Flow<Int> = ds.data.map { it[Keys.QUARANTINE_DAYS] ?: 30 }
@@ -172,6 +197,14 @@ class SettingsRepository(private val context: Context) {
         const val MIN_ANALYSIS_LIMIT = 50
         const val MAX_ANALYSIS_LIMIT = 20_000
 
+        const val DEFAULT_AI_CONCURRENCY = 2
+        const val MIN_AI_CONCURRENCY = 1
+        const val MAX_AI_CONCURRENCY = 16
+
+        const val DEFAULT_AI_MAX_TOKENS = 2048
+        const val MIN_AI_MAX_TOKENS = 256
+        const val MAX_AI_MAX_TOKENS = 8192
+
         const val DEFAULT_GALLERY_COLUMNS = 4
         const val MIN_GALLERY_COLUMNS = 2
         const val MAX_GALLERY_COLUMNS = 6
@@ -189,6 +222,9 @@ class SettingsRepository(private val context: Context) {
         val AI_API_KEY = stringPreferencesKey("ai_api_key")
         val AI_MODEL = stringPreferencesKey("ai_model")
         val AI_EMBEDDING_MODEL = stringPreferencesKey("ai_embedding_model")
+        val AI_DISABLE_THINKING = booleanPreferencesKey("ai_disable_thinking")
+        val AI_CONCURRENCY = intPreferencesKey("ai_concurrency")
+        val AI_MAX_TOKENS = intPreferencesKey("ai_max_tokens")
 
         val QUARANTINE_DAYS = intPreferencesKey("quarantine_days")
         val ANALYSIS_LIMIT = intPreferencesKey("analysis_limit")

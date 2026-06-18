@@ -70,7 +70,7 @@ class SemanticSearchEngine(
                     imageBase64 = base64,
                 ),
             ),
-            maxTokens = 200,
+            // maxTokens 留空：由设置里的「最大 token」决定（思考模型推理会先吃掉大量 token，否则描述为空）
             temperature = 0.2f,
         ) ?: return null
         return resp.content

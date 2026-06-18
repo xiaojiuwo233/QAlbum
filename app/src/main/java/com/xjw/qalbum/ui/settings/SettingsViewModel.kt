@@ -132,6 +132,25 @@ class SettingsViewModel(
         viewModelScope.launch { settings.setAiEmbeddingModel(model.trim()) }
     }
 
+    val aiDisableThinking: StateFlow<Boolean> = settings.aiDisableThinking
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
+
+    val aiConcurrency: StateFlow<Int> = settings.aiConcurrency
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsRepository.DEFAULT_AI_CONCURRENCY)
+
+    val aiMaxTokens: StateFlow<Int> = settings.aiMaxTokens
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsRepository.DEFAULT_AI_MAX_TOKENS)
+
+    fun setAiDisableThinking(enabled: Boolean) {
+        viewModelScope.launch { settings.setAiDisableThinking(enabled) }
+    }
+    fun setAiConcurrency(value: Int) {
+        viewModelScope.launch { settings.setAiConcurrency(value) }
+    }
+    fun setAiMaxTokens(value: Int) {
+        viewModelScope.launch { settings.setAiMaxTokens(value) }
+    }
+
     // ---- 清理规则配置 ----
 
     val cleanupConfig: StateFlow<CleanupConfig> = settings.cleanupConfig
