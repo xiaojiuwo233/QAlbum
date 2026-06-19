@@ -1,9 +1,14 @@
 package com.xjw.qalbum.service.analysis
 
 import com.xjw.qalbum.access.AccessManager
+import com.xjw.qalbum.access.ImageBytesReader
+import com.xjw.qalbum.data.db.dao.HashQualityWrite
 import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.db.dao.OcrDao
+import com.xjw.qalbum.data.db.dao.ScoreWrite
 import com.xjw.qalbum.data.db.entity.OcrTextEntity
+import com.xjw.qalbum.fileops.FileOpsClient
+import com.xjw.qalbum.fileops.PrivilegedImageReader
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.data.remote.OpenAiCompatClient
 import com.xjw.qalbum.domain.model.AutoFavoriteConfig
@@ -44,6 +49,7 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 class AnalysisPipeline(
     private val accessManager: AccessManager,
+    private val fileOpsClient: FileOpsClient,
     private val imageDao: ImageDao,
     private val ocrDao: OcrDao,
     private val duplicateDetector: DuplicateDetector,
@@ -72,17 +78,20 @@ class AnalysisPipeline(
         }
         job = scope.launch {
             _state.value = AnalysisState.Running
+            // 整轮分析只绑定一次特权文件服务，HASH/OCR/AI 三阶段读图共用（原生 fd 直读，
+            // 绑定失败自动降级 provider 读）。finally 里解绑回收特权进程。
+            val reader = PrivilegedImageReader.open(accessManager, fileOpsClient)
             try {
                 // 每阶段各自的开关与数量上限；排序方向各阶段共用。每阶段只取「未完成」的前 limit 张，
                 // limit<=0 视为无限（分块跑完所有待办）。各 *_done 标记持久化，故天然「从上次增量继续」。
                 val config = settings.analysisConfig.first()
                 val oldestFirst = settings.analysisOldestFirst.first()
-                runHashAndQuality(config.hashLimit, oldestFirst)
+                runHashAndQuality(config.hashLimit, oldestFirst, reader)
                 runDuplicate()
-                if (config.ocrEnabled) runOcr(config.ocrLimit, oldestFirst)
+                if (config.ocrEnabled) runOcr(config.ocrLimit, oldestFirst, reader)
                 // AI 标签 / 向量：各自开关 + 全局 AI 服务可用（endpoint 已配）才执行；失败不影响整体
                 if (isAiReady()) {
-                    if (config.aiTagEnabled) runAiTag(config.aiLimit, oldestFirst)
+                    if (config.aiTagEnabled) runAiTag(config.aiLimit, oldestFirst, reader)
                     if (config.embeddingEnabled) runEmbedding(config.embeddingLimit, oldestFirst)
                 }
                 runScore()
@@ -91,6 +100,8 @@ class AnalysisPipeline(
                 Timber.e(t, "AnalysisPipeline failed")
                 _state.value = AnalysisState.Failed
                 _progress.value = AnalysisProgress(AnalysisPhase.SCORE, 0, 0, t.message ?: "未知错误")
+            } finally {
+                reader.close()
             }
         }
     }
@@ -103,11 +114,11 @@ class AnalysisPipeline(
     // ---- 各阶段 ----
 
     /**
-     * HASH + QUALITY 合并阶段：每张图**只读取一次**文件字节，随后在内存里同时算出
-     * xxHash / pHash / 宽高 / 模糊度 / 纯色 / 损坏（原实现是每图 3 次独立读取）。
-     * 批内并发处理（[CONCURRENCY]），让跨进程 IO 与解码 / DCT 的 CPU 开销相互重叠。
+     * HASH + QUALITY 合并阶段：每张图**只读取一次**文件字节（经 [reader] 原生 fd 直读），
+     * 随后在内存里同时算出 xxHash / pHash / 宽高 / 模糊度 / 纯色 / 损坏。
+     * 块内按 [HASH_CONCURRENCY] 并发，整块结果一次事务写回（[ImageDao.saveHashQualityBatch]）。
      */
-    private suspend fun runHashAndQuality(limit: Int, oldestFirst: Boolean) {
+    private suspend fun runHashAndQuality(limit: Int, oldestFirst: Boolean, reader: ImageBytesReader) {
         val provider = accessManager.current()
         if (!provider.isAvailable()) {
             Timber.w("Hash/Quality phase skipped: access provider not ready")
@@ -124,34 +135,35 @@ class AnalysisPipeline(
         val processed = AtomicInteger(0)
         ids.chunked(HASH_CHUNK).forEach { chunkIds ->
             val batch = imageDao.getByIds(chunkIds)
-            coroutineScope {
-                val semaphore = Semaphore(CONCURRENCY)
+            // 块内并发处理（读图现已是原生 fd 直读，瓶颈转向解码/DCT 的 CPU，故并发按核数）
+            val writes = coroutineScope {
+                val semaphore = Semaphore(HASH_CONCURRENCY)
                 batch.map { img ->
                     async(Dispatchers.IO) {
                         semaphore.withPermit {
-                            val r = analyzeOne(provider, img.path)
-                            imageDao.saveHash(img.id, r.xxhash, r.phash)
-                            imageDao.saveQuality(img.id, r.width, r.height, r.blur, r.blank, r.corrupt)
+                            val r = analyzeOne(reader, img.path)
                             val done = processed.incrementAndGet()
                             if (done % PROGRESS_STEP == 0 || done == total) {
                                 // StateFlow.value 写入线程安全，可在子协程直接更新
                                 _progress.value = AnalysisProgress(AnalysisPhase.HASH, done, total)
                             }
+                            HashQualityWrite(
+                                img.id, r.xxhash, r.phash, r.width, r.height, r.blur, r.blank, r.corrupt,
+                            )
                         }
                     }
                 }.awaitAll()
             }
+            // 整块结果一个事务写回（原是每图 2 次独立写 → 40w 事务争抢写锁）
+            imageDao.saveHashQualityBatch(writes)
         }
         _progress.value = AnalysisProgress(AnalysisPhase.HASH, processed.get(), total, msg = "完成")
         Timber.i("AnalysisPipeline.runHashAndQuality: analyzed ${processed.get()}/$total images (limit=$limit)")
     }
 
     /** 一次读取字节 → xxHash + pHash + 质量，避免对同一文件重复跨进程读取。 */
-    private suspend fun analyzeOne(
-        provider: com.xjw.qalbum.access.FileAccessProvider,
-        path: String,
-    ): HashQualityResult {
-        val bytes = HashEngine.readImageBytes(provider, path)
+    private suspend fun analyzeOne(reader: ImageBytesReader, path: String): HashQualityResult {
+        val bytes = reader.read(path, PrivilegedImageReader.MAX_IMAGE_BYTES)
             ?: return HashQualityResult(null, null, 0, 0, null, false, true)
         val xxhash = HashEngine.xxHashOf(bytes)
         val bitmap = HashEngine.decodeScaledBytes(bytes, QUALITY_DECODE_SIDE)
@@ -180,7 +192,7 @@ class AnalysisPipeline(
         _progress.value = AnalysisProgress(AnalysisPhase.DUPLICATE, 1, 1, msg = "完成")
     }
 
-    private suspend fun runOcr(limit: Int, oldestFirst: Boolean) {
+    private suspend fun runOcr(limit: Int, oldestFirst: Boolean, reader: ImageBytesReader) {
         if (ocrModelStore.currentStatus() !is OcrModelStatus.Ready) {
             _progress.value = AnalysisProgress(AnalysisPhase.OCR, 0, 0, msg = "未安装 OCR 模型")
             Timber.i("AnalysisPipeline.runOcr: skipped because OCR model is not installed")
@@ -198,7 +210,9 @@ class AnalysisPipeline(
         var processed = 0
         ids.chunked(OCR_CHUNK).forEach { chunkIds ->
             for (img in imageDao.getByIds(chunkIds)) {
-                val result = ocrEngine.recognize(provider, img.path)
+                // 走原生 fd 直读拿字节，再交给 OCR 引擎；不可读 → 空字节 → 引擎回 Empty 并标记完成
+                val bytes = reader.read(img.path, PrivilegedImageReader.MAX_IMAGE_BYTES) ?: ByteArray(0)
+                val result = ocrEngine.recognize(bytes)
                 val now = System.currentTimeMillis()
                 when (result) {
                     is OcrResult.Success -> {
@@ -254,7 +268,7 @@ class AnalysisPipeline(
         return enabled && endpoint.isNotBlank()
     }
 
-    private suspend fun runAiTag(limit: Int, oldestFirst: Boolean) {
+    private suspend fun runAiTag(limit: Int, oldestFirst: Boolean, reader: ImageBytesReader) {
         val provider = accessManager.current()
         if (!provider.isAvailable()) return
 
@@ -274,7 +288,7 @@ class AnalysisPipeline(
                 imageDao.getByIds(chunkIds).map { img ->
                     async(Dispatchers.IO) {
                         semaphore.withPermit {
-                            val result = aiTagging.tagImage(provider, img.id)
+                            val result = aiTagging.tagImage(reader, img.id)
                             if (result is AiTaggingService.Result.Success) {
                                 imageDao.update(img.copy(aiDone = true))
                             }
@@ -362,19 +376,23 @@ class AnalysisPipeline(
         while (true) {
             val page = imageDao.pagePrimaryHashed(afterId, SCORE_BATCH)
             if (page.isEmpty()) break
+            // 整页一次取 OCR（评分要读 hasPhone/hasAmount 等强信号），避免逐图 N+1 单查
+            val ocrMap = ocrDao.getByImageIds(page.map { it.id }).associateBy { it.imageId }
+            val writes = ArrayList<ScoreWrite>(page.size)
             for (img in page) {
-                val ocr = ocrDao.getByImageId(img.id)
+                val ocr = ocrMap[img.id]
                 val info = ScoringEngine.computeInfoScore(img, ocr)
                 val del = ScoringEngine.computeDeleteScore(img, ocr)
-                imageDao.updateInfoScore(img.id, info)
-                imageDao.updateDeleteScore(img.id, del)
+                writes.add(ScoreWrite(img.id, info, del))
                 // 自动收藏（默认关闭）：开启且命中用户勾选的敏感信息类型时，加入收藏避免误删
                 if (autoFav.enabled && ocr != null && matchesAutoFavorite(autoFav, ocr)) {
                     imageDao.setFavorite(img.id, true)
                 }
-                processed++
                 afterId = img.id
             }
+            // 整页评分一个事务写回（原是每图 2 次独立写）
+            imageDao.saveScoresBatch(writes)
+            processed += page.size
             _progress.value = AnalysisProgress(AnalysisPhase.SCORE, processed, processed)
         }
         _progress.value = AnalysisProgress(AnalysisPhase.SCORE, processed, processed, msg = "完成")
@@ -395,8 +413,11 @@ class AnalysisPipeline(
     companion object {
         private const val SCORE_BATCH = 500
 
-        /** hash+质量 合并阶段的并发度（IO 等待 + 解码/DCT CPU 混合，取中等并发避免过度争抢） */
-        private const val CONCURRENCY = 4
+        /**
+         * hash+质量 合并阶段的块内并发度。原生 fd 直读后读不再是瓶颈、转为解码/DCT 的 CPU 开销，
+         * 故按 CPU 核数取值；上限 8 防止过多并发 768px 解码 bitmap 造成内存抖动。
+         */
+        private val HASH_CONCURRENCY = Runtime.getRuntime().availableProcessors().coerceIn(4, 8)
 
         /** 质量 / pHash 的解码目标边长（pHash 再缩到 32，质量在此尺寸上评估） */
         private const val QUALITY_DECODE_SIDE = 768

@@ -23,6 +23,10 @@ interface OcrDao {
     @Query("SELECT * FROM ocr_text WHERE image_id = :imageId LIMIT 1")
     suspend fun getByImageId(imageId: Long): OcrTextEntity?
 
+    /** 批量取一页图片的 OCR 文本（评分阶段按页一次查，避免逐图 N+1 单查）；调用方分块控制在变量上限内。 */
+    @Query("SELECT * FROM ocr_text WHERE image_id IN (:imageIds)")
+    suspend fun getByImageIds(imageIds: List<Long>): List<OcrTextEntity>
+
     @Query("DELETE FROM ocr_text WHERE image_id = :imageId")
     suspend fun deleteByImageId(imageId: Long)
 

@@ -114,6 +114,7 @@ val appModule = module {
     single {
         AnalysisPipeline(
             accessManager = get(),
+            fileOpsClient = get(),
             imageDao = get(),
             ocrDao = get(),
             duplicateDetector = get(),

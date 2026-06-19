@@ -493,6 +493,37 @@ interface ImageDao {
     """)
     suspend fun saveQuality(id: Long, w: Int, h: Int, blur: Float?, blank: Boolean, corrupt: Boolean)
 
+    /** 合并 hash + 质量为单条 UPDATE：每图一次写（原是 saveHash + saveQuality 两次写两个事务）。 */
+    @Query("""
+        UPDATE images
+        SET xxhash = :xxhash, phash = :phash, hash_done = 1,
+            width = :w, height = :h,
+            blur_score = :blur, is_blank = :blank, is_corrupt = :corrupt
+        WHERE id = :id
+    """)
+    suspend fun saveHashQuality(
+        id: Long,
+        xxhash: String?,
+        phash: Long?,
+        w: Int,
+        h: Int,
+        blur: Float?,
+        blank: Boolean,
+        corrupt: Boolean,
+    )
+
+    /**
+     * 整块 hash+质量结果包在一个事务里写回：20w 图原本 40w 个独立事务（各自 fsync、
+     * 还在 4 个并发 worker 间争抢写锁），按块（[com.xjw.qalbum.service.analysis] 的 HASH_CHUNK）
+     * 批写后降到约千级事务。与扫描的 [updateBatchFromScan] 同范式。
+     */
+    @Transaction
+    suspend fun saveHashQualityBatch(rows: List<HashQualityWrite>) {
+        for (r in rows) {
+            saveHashQuality(r.id, r.xxhash, r.phash, r.width, r.height, r.blur, r.blank, r.corrupt)
+        }
+    }
+
     /** 重复组聚类辅助：按 xxhash 分组的 ID 列表（排除 hash 为 null） */
     @Query("""
         SELECT xxhash AS hash, GROUP_CONCAT(id) AS ids
@@ -542,6 +573,16 @@ interface ImageDao {
 
     @Query("UPDATE images SET info_score = :score WHERE id = :id")
     suspend fun updateInfoScore(id: Long, score: Float)
+
+    /** 合并 info+delete 评分为单条 UPDATE（原是两次独立写）。 */
+    @Query("UPDATE images SET info_score = :info, delete_score = :del WHERE id = :id")
+    suspend fun updateScores(id: Long, info: Float, del: Float)
+
+    /** 整页评分一个事务写回：全库 20w 评分原本 40w 个独立事务，按页批写后降到约 400 个。 */
+    @Transaction
+    suspend fun saveScoresBatch(rows: List<ScoreWrite>) {
+        for (r in rows) updateScores(r.id, r.info, r.del)
+    }
 
     /** 删除分数高于阈值的候选 */
     @Query("""
@@ -713,6 +754,25 @@ interface ImageDao {
     """)
     suspend fun imageIdsByTagChunk(tagId: Long, afterId: Long, limit: Int): List<Long>
 }
+
+/** 一张图的 info/delete 评分，供 [ImageDao.saveScoresBatch] 整页事务写回 */
+data class ScoreWrite(
+    val id: Long,
+    val info: Float,
+    val del: Float,
+)
+
+/** 一张图的 hash+质量分析结果，供 [ImageDao.saveHashQualityBatch] 整块事务写回 */
+data class HashQualityWrite(
+    val id: Long,
+    val xxhash: String?,
+    val phash: Long?,
+    val width: Int,
+    val height: Int,
+    val blur: Float?,
+    val blank: Boolean,
+    val corrupt: Boolean,
+)
 
 /** 清理判定所需的最小图片信号投影（由 [ImageDao.cleanupCandidatePool] 用列别名填充） */
 data class CleanupSignalRow(

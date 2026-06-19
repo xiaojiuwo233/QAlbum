@@ -3,7 +3,7 @@ package com.xjw.qalbum.service.ai
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Base64
-import com.xjw.qalbum.access.FileAccessProvider
+import com.xjw.qalbum.access.ImageBytesReader
 import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.db.dao.TagDao
 import com.xjw.qalbum.data.db.entity.ImageTagEntity
@@ -35,9 +35,9 @@ class AiTaggingService(
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
-    suspend fun tagImage(provider: FileAccessProvider, imageId: Long): Result {
+    suspend fun tagImage(reader: ImageBytesReader, imageId: Long): Result {
         val image = imageDao.getById(imageId) ?: return Result.Failed("图片不存在")
-        val base64 = encodeImage(provider, image.path) ?: return Result.Failed("图片编码失败")
+        val base64 = encodeImage(reader, image.path) ?: return Result.Failed("图片编码失败")
 
         val resp = aiClient.chatCompletion(
             messages = listOf(
@@ -67,10 +67,10 @@ class AiTaggingService(
         return tagDao.findByName(name) ?: TagEntity(id = 0, name = name, type = type)
     }
 
-    private suspend fun encodeImage(provider: FileAccessProvider, path: String): String? =
+    private suspend fun encodeImage(reader: ImageBytesReader, path: String): String? =
         withContext(Dispatchers.IO) {
             try {
-                val bytes = provider.readFile(path).use { it.readBytes() }
+                val bytes = reader.read(path, MAX_IMAGE_BYTES) ?: return@withContext null
                 val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                 BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
                 if (opts.outWidth <= 0) return@withContext null
@@ -141,6 +141,9 @@ class AiTaggingService(
     )
 
     companion object {
+        /** 单图读取字节上限（兜底罕见超大图）。 */
+        private const val MAX_IMAGE_BYTES = 32 * 1024 * 1024
+
         const val SYSTEM_PROMPT = """你是一个图片分析引擎，专门分析 QQ 聊天中的图片。请只返回 JSON，不要包含任何额外说明：
 
 {

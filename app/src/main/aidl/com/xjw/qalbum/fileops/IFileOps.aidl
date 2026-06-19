@@ -31,4 +31,10 @@ interface IFileOps {
     // shell 进程（4w 张时那是 45min 级别的开销）。一次事务的 paths 数由调用方
     // 分块控制在 binder 1MB 限制内。
     boolean[] deleteFiles(in String[] paths) = 4;
+
+    // 在特权进程内只读打开文件，把 fd 经 binder 传回客户端直读（ParcelFileDescriptor）。
+    // 分析期读整图走这里：每图只是一次 binder 往返 + fd 直读，替代「每图派生一个 cat
+    // 进程 / libsu 逐文件往返」的旧路径（20w 图小时级 → 分钟级）。
+    // 文件不可读 / 不存在返回 null；不受 binder 1MB 事务上限约束（只传 fd 句柄）。
+    @nullable ParcelFileDescriptor openRead(String path) = 5;
 }

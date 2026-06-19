@@ -1,5 +1,6 @@
 package com.xjw.qalbum.fileops
 
+import android.os.ParcelFileDescriptor
 import android.system.Os
 import android.system.OsConstants
 import java.io.File
@@ -39,6 +40,17 @@ internal object FileOpsImpl {
             headers.add(readHeader(path, n, buf))
         }
         return HeaderBatchCodec.pack(headers)
+    }
+
+    /**
+     * 只读打开文件并返回 [ParcelFileDescriptor]：客户端拿到的 fd 指向特权进程已
+     * 打开的文件（权限在 open 时校验），可跨进程直读、不走文本管道、不派生进程。
+     * 不可读 / 不存在返回 null（客户端按损坏处理）。
+     */
+    fun openRead(path: String): ParcelFileDescriptor? = try {
+        ParcelFileDescriptor.open(File(path), ParcelFileDescriptor.MODE_READ_ONLY)
+    } catch (_: Exception) {
+        null
     }
 
     /**

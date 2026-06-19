@@ -1,5 +1,6 @@
 package com.xjw.qalbum.fileops
 
+import android.os.ParcelFileDescriptor
 import kotlin.system.exitProcess
 
 /**
@@ -27,4 +28,7 @@ class FileOpsUserService : IFileOps.Stub() {
 
     override fun deleteFiles(paths: Array<String>): BooleanArray =
         FileOpsImpl.deleteFiles(paths)
+
+    override fun openRead(path: String): ParcelFileDescriptor? =
+        FileOpsImpl.openRead(path)
 }

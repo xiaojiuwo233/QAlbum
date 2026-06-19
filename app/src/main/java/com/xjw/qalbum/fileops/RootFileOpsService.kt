@@ -2,6 +2,7 @@ package com.xjw.qalbum.fileops
 
 import android.content.Intent
 import android.os.IBinder
+import android.os.ParcelFileDescriptor
 import com.topjohnwu.superuser.ipc.RootService
 
 /**
@@ -27,5 +28,8 @@ class RootFileOpsService : RootService() {
 
         override fun deleteFiles(paths: Array<String>): BooleanArray =
             FileOpsImpl.deleteFiles(paths)
+
+        override fun openRead(path: String): ParcelFileDescriptor? =
+            FileOpsImpl.openRead(path)
     }
 }

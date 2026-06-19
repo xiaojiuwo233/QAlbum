@@ -10,18 +10,32 @@ class PaddleOcrEngine(
     private val runner: PaddleOcrRunner,
 ) {
 
+    /** 便捷重载：自行读字节再识别（保留给非分析路径 / 测试用）。 */
     suspend fun recognize(provider: FileAccessProvider, path: String): OcrResult =
+        withContext(Dispatchers.IO) {
+            val bytes = try {
+                provider.readFile(path).use { it.readBytes() }
+            } catch (t: Throwable) {
+                Timber.w(t, "Paddle OCR read failed for $path")
+                return@withContext OcrResult.Failed(t.message ?: "读取失败")
+            }
+            recognize(bytes)
+        }
+
+    /**
+     * 直接对图片字节识别（分析管线走原生 fd 直读拿到字节后调用，避免引擎内再跨进程读一次）。
+     * 模型未就绪先于空字节判定，保证「模型没装」始终回 [OcrResult.Unavailable]。
+     */
+    suspend fun recognize(imageBytes: ByteArray): OcrResult =
         withContext(Dispatchers.IO) {
             val modelPaths = modelStore.modelPaths()
             if (modelPaths == null || modelStore.currentStatus() !is OcrModelStatus.Ready) {
                 return@withContext OcrResult.Unavailable
             }
+            if (imageBytes.isEmpty()) return@withContext OcrResult.Empty
 
             try {
-                val bytes = provider.readFile(path).use { it.readBytes() }
-                if (bytes.isEmpty()) return@withContext OcrResult.Empty
-
-                val result = runner.recognize(bytes, modelPaths)
+                val result = runner.recognize(imageBytes, modelPaths)
                 val full = result.text.trim()
                 if (full.isBlank()) return@withContext OcrResult.Empty
 
@@ -35,10 +49,10 @@ class PaddleOcrEngine(
                     hasOrderNo = SensitivePatterns.OrderNo.containsMatchIn(full),
                 )
             } catch (t: OcrEngineUnavailableException) {
-                Timber.i(t, "Paddle OCR unavailable for $path")
+                Timber.i(t, "Paddle OCR unavailable")
                 OcrResult.Unavailable
             } catch (t: Throwable) {
-                Timber.w(t, "Paddle OCR failed for $path")
+                Timber.w(t, "Paddle OCR failed")
                 OcrResult.Failed(t.message ?: "未知错误")
             }
         }
