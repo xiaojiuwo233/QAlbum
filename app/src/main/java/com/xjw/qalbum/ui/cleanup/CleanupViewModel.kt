@@ -212,6 +212,8 @@ class CleanupViewModel(
             val review = _reviewBatch.value ?: return@launch
             val selectedIds = _selectedReviewDeleteIds.value
             _busy.value = true
+            // 移入回收站逐图较慢，上报进度避免用户干等
+            _purgeProgress.value = PurgeProgress(0, selectedIds.size, "正在移入回收站…")
             try {
                 // 原因映射来自所有 tile（含重复组里推荐保留的最优图，便于用户选删时仍带原因）
                 val reasonByImageId = review.tiles.associate { it.image.id to it.reason }
@@ -219,12 +221,15 @@ class CleanupViewModel(
                     selectedIds.map { imageId ->
                         imageId to (reasonByImageId[imageId] ?: "重复")
                     }
-                )
+                ) { done, total ->
+                    _purgeProgress.value = PurgeProgress(done, total, "正在移入回收站…")
+                }
                 _reviewBatch.value = null
                 _selectedReviewDeleteIds.value = emptySet()
                 _lastBatch.value = null
                 onDone(moved)
             } finally {
+                _purgeProgress.value = null
                 _busy.value = false
             }
         }
@@ -282,8 +287,11 @@ class CleanupViewModel(
     }
 }
 
-/** 一键清理进度：[done] 已处理张数 / [total] 本次总张数 */
-data class PurgeProgress(val done: Int, val total: Int)
+/**
+ * 批处理进度：[done] 已处理张数 / [total] 本次总张数 / [label] 进度对话框标题。
+ * 一键清理（永久删除）与移入回收站共用，靠 [label] 区分文案。
+ */
+data class PurgeProgress(val done: Int, val total: Int, val label: String = "正在清理…")
 
 data class CleanupReviewBatch(
     val batch: CleanupBatch,

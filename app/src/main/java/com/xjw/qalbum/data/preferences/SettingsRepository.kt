@@ -10,6 +10,7 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.xjw.qalbum.domain.model.AccessMode
+import com.xjw.qalbum.domain.model.AnalysisConfig
 import com.xjw.qalbum.domain.model.AutoFavoriteConfig
 import com.xjw.qalbum.domain.model.CleanupConfig
 import com.xjw.qalbum.domain.model.GallerySort
@@ -117,13 +118,20 @@ class SettingsRepository(private val context: Context) {
         ds.edit { it[Keys.QUARANTINE_DAYS] = days }
     }
 
-    // ---- 分析（hash/质量/OCR/AI/向量）每次处理上限 + 排序方向 ----
+    // ---- 分析（hash/质量/OCR/AI/向量）每项开关 + 数量 + 排序方向 ----
 
-    /** 每次分析最多处理多少张「未完成」图片（各逐图阶段共用此上限） */
-    val analysisLimit: Flow<Int> = ds.data.map { it[Keys.ANALYSIS_LIMIT] ?: DEFAULT_ANALYSIS_LIMIT }
+    /**
+     * 每个分析阶段的开关与数量上限（hash 数量 / OCR、AI、向量 各自开关+数量）。
+     * 缺省或解析失败回退到 [AnalysisConfig.DEFAULT]。
+     */
+    val analysisConfig: Flow<AnalysisConfig> = ds.data.map { prefs ->
+        prefs[Keys.ANALYSIS_CONFIG]?.let { raw ->
+            runCatching { cleanupJson.decodeFromString<AnalysisConfig>(raw) }.getOrNull()
+        } ?: AnalysisConfig.DEFAULT
+    }
 
-    suspend fun setAnalysisLimit(limit: Int) {
-        ds.edit { it[Keys.ANALYSIS_LIMIT] = limit.coerceIn(MIN_ANALYSIS_LIMIT, MAX_ANALYSIS_LIMIT) }
+    suspend fun setAnalysisConfig(config: AnalysisConfig) {
+        ds.edit { it[Keys.ANALYSIS_CONFIG] = cleanupJson.encodeToString(config) }
     }
 
     /** 分析顺序：true=从早到晚（mtime 升序），false=从晚到早（降序） */
@@ -216,10 +224,6 @@ class SettingsRepository(private val context: Context) {
         const val DEFAULT_CHATPIC_PATH =
             "/storage/emulated/0/Android/data/com.tencent.mobileqq/Tencent/MobileQQ/chatpic"
 
-        const val DEFAULT_ANALYSIS_LIMIT = 500
-        const val MIN_ANALYSIS_LIMIT = 50
-        const val MAX_ANALYSIS_LIMIT = 20_000
-
         const val DEFAULT_REVIEW_LIMIT = 200
         const val MIN_REVIEW_LIMIT = 20
         const val MAX_REVIEW_LIMIT = 5_000
@@ -254,7 +258,7 @@ class SettingsRepository(private val context: Context) {
         val AI_MAX_TOKENS = intPreferencesKey("ai_max_tokens")
 
         val QUARANTINE_DAYS = intPreferencesKey("quarantine_days")
-        val ANALYSIS_LIMIT = intPreferencesKey("analysis_limit")
+        val ANALYSIS_CONFIG = stringPreferencesKey("analysis_config")
         val ANALYSIS_OLDEST_FIRST = booleanPreferencesKey("analysis_oldest_first")
         val REVIEW_LIMIT = intPreferencesKey("review_limit")
 

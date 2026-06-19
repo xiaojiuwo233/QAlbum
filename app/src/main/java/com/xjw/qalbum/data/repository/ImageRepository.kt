@@ -54,6 +54,25 @@ class ImageRepository(
         ).flow
     }
 
+    /** 某标签下活跃图片的 Paging 流（标签管理页用） */
+    fun imagesByTagPager(tagId: Long): Flow<PagingData<ImageEntity>> {
+        return Pager(
+            config = PagingConfig(
+                pageSize = 60,
+                prefetchDistance = 120,
+                initialLoadSize = 60,
+                enablePlaceholders = false,
+            ),
+            pagingSourceFactory = { imageDao.pagingImagesByTag(tagId) },
+        ).flow
+    }
+
+    suspend fun countImagesByTag(tagId: Long): Int = imageDao.countActiveImagesByTag(tagId)
+
+    /** keyset 分块取某标签下活跃图片 id（按 tag 全删时逐块处理，不一次性装载整组） */
+    suspend fun imageIdsByTagChunk(tagId: Long, afterId: Long, limit: Int): List<Long> =
+        imageDao.imageIdsByTagChunk(tagId, afterId, limit)
+
     suspend fun timelineSnapshot(): List<ImageEntity> = imageDao.listActiveTimeline()
     suspend fun favoriteTimelineSnapshot(): List<ImageEntity> = imageDao.listFavoriteTimeline()
 

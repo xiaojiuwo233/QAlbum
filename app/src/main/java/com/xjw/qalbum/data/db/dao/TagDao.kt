@@ -25,6 +25,30 @@ interface TagDao {
     @Query("SELECT * FROM tags WHERE name = :name LIMIT 1")
     suspend fun findByName(name: String): TagEntity?
 
+    /**
+     * 所有「AI 打的标签」（type in ai/risk）及其当前关联的活跃图片数，按数量降序。
+     * 标签管理页用：连 image_tags + images 过滤掉缩略图与非活跃图，只统计真正可见可删的图。
+     */
+    @Query("""
+        SELECT t.id AS id, t.name AS name, t.type AS type, COUNT(it.image_id) AS count
+        FROM tags t
+        INNER JOIN image_tags it ON it.tag_id = t.id
+        INNER JOIN images i ON i.id = it.image_id
+        WHERE t.type IN ('ai', 'risk')
+          AND i.status = 'active' AND i.source_type <> 'chatthumb'
+        GROUP BY t.id
+        HAVING count > 0
+        ORDER BY count DESC, t.name
+    """)
+    fun observeAiTagsWithCounts(): Flow<List<TagWithCount>>
+
+    data class TagWithCount(
+        val id: Long,
+        val name: String,
+        val type: String,
+        val count: Int,
+    )
+
     // ---- 图-标签关联 ----
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)

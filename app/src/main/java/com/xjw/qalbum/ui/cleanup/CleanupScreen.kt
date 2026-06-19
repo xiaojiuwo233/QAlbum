@@ -87,6 +87,7 @@ import org.koin.androidx.compose.koinViewModel
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.Label
 import androidx.compose.material.icons.outlined.BrokenImage
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Restore
@@ -121,6 +122,7 @@ import java.util.Locale
 @Composable
 fun CleanupScreen(
     contentPadding: PaddingValues,
+    onOpenTags: () -> Unit = {},
     viewModel: CleanupViewModel = koinViewModel(),
 ) {
     val analysisState by viewModel.analysisState.collectAsState()
@@ -187,7 +189,6 @@ fun CleanupScreen(
                 items = recycleBinItems,
                 thumbnailSummary = thumbnailTrashSummary,
                 busy = busy,
-                purgeProgress = purgeProgress,
                 onRestore = viewModel::restore,
                 onPurge = viewModel::purge,
                 onPurgeAll = {
@@ -219,9 +220,13 @@ fun CleanupScreen(
                 onGenerate = viewModel::generateBatch,
                 onOpenReview = { activePage = CleanupPage.Review.name },
                 onOpenRecycleBin = { activePage = CleanupPage.RecycleBin.name },
+                onOpenTags = onOpenTags,
             )
         }
     }
+
+    // 进度对话框提到顶层：移入回收站（审核页）/ 一键清理（回收站页）共用，覆盖任意子页
+    purgeProgress?.let { PurgeProgressDialog(it) }
 }
 
 /** 清理主页：分析卡片 + 清理策略 + 审核清理卡片（条件） + 回收站入口 */
@@ -243,11 +248,17 @@ private fun MainCleanupSection(
     onGenerate: () -> Unit,
     onOpenReview: () -> Unit,
     onOpenRecycleBin: () -> Unit,
+    onOpenTags: () -> Unit,
 ) {
     Scaffold(
         topBar = {
             CenterAlignedTopAppBar(
                 title = { Text("清理", style = MaterialTheme.typography.titleLarge) },
+                actions = {
+                    IconButton(onClick = onOpenTags) {
+                        Icon(Icons.AutoMirrored.Outlined.Label, contentDescription = "标签")
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface,
                 ),
@@ -984,7 +995,6 @@ private fun RecycleBinSection(
     items: List<QuarantineEntity>,
     thumbnailSummary: ImageDao.ThumbnailTrashSummary,
     busy: Boolean,
-    purgeProgress: PurgeProgress?,
     onRestore: (Long) -> Unit,
     onPurge: (Long) -> Unit,
     onPurgeAll: () -> Unit,
@@ -1120,8 +1130,6 @@ private fun RecycleBinSection(
             },
         )
     }
-
-    purgeProgress?.let { PurgeProgressDialog(it) }
 }
 
 /** 一键清理进度对话框：清理期间显示，完成后由调用方把进度置空自动消失，不可手动关闭 */
@@ -1135,7 +1143,7 @@ internal fun PurgeProgressDialog(progress: PurgeProgress) {
     AlertDialog(
         onDismissRequest = { },
         confirmButton = { },
-        title = { Text("正在清理…") },
+        title = { Text(progress.label) },
         text = {
             Column {
                 Text(

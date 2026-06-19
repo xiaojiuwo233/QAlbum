@@ -120,6 +120,7 @@ fun GalleryScreen(
     val columns by viewModel.galleryColumns.collectAsState()
     val sort by viewModel.gallerySort.collectAsState()
     val largeThreshold by viewModel.largeThresholdBytes.collectAsState()
+    val enabledPhases by viewModel.enabledPhases.collectAsState()
     var selectedIds by remember { mutableStateOf(setOf<Long>()) }
     var showDeleteConfirm by rememberSaveable { mutableStateOf(false) }
     var showPrefsSheet by rememberSaveable { mutableStateOf(false) }
@@ -193,6 +194,7 @@ fun GalleryScreen(
                         contentPadding = contentPadding,
                         selectionMode = selectedIds.isNotEmpty(),
                         largeThresholdBytes = largeThreshold,
+                        enabledPhases = enabledPhases,
                         onZoomColumns = { viewModel.setColumns(it) },
                         onImageClick = onImageClick,
                         onToggleSelection = toggleSelection,
@@ -259,6 +261,7 @@ fun FavoriteGalleryScreen(
     val items = viewModel.favoriteTimeline.collectAsLazyPagingItems()
     val favoriteCount by viewModel.favoriteCount.collectAsState(initial = 0)
     val largeThreshold by viewModel.largeThresholdBytes.collectAsState()
+    val enabledPhases by viewModel.enabledPhases.collectAsState()
     val gridState = rememberLazyGridState()
     val context = LocalContext.current
     var columns by rememberSaveable { mutableIntStateOf(4) }
@@ -325,6 +328,7 @@ fun FavoriteGalleryScreen(
                     contentPadding = contentPadding,
                     selectionMode = selectedIds.isNotEmpty(),
                     largeThresholdBytes = largeThreshold,
+                    enabledPhases = enabledPhases,
                     onZoomColumns = { columns = it.coerceIn(2, 6) },
                     onImageClick = onImageClick,
                     onToggleSelection = toggleSelection,
@@ -533,6 +537,7 @@ private fun TimelineGrid(
     contentPadding: PaddingValues,
     selectionMode: Boolean,
     largeThresholdBytes: Long,
+    enabledPhases: EnabledPhases,
     onZoomColumns: (Int) -> Unit,
     onImageClick: (Long) -> Unit,
     onToggleSelection: (Long) -> Unit,
@@ -648,6 +653,7 @@ private fun TimelineGrid(
                     selected = item.image.id in selectedIds,
                     selectionMode = selectionMode,
                     largeThresholdBytes = largeThresholdBytes,
+                    enabledPhases = enabledPhases,
                     onBounds = { photoBounds[item.image.id] = it },
                     onClick = {
                         if (selectionMode) onToggleSelection(item.image.id) else onImageClick(item.image.id)
@@ -691,6 +697,7 @@ private fun TimelinePhoto(
     selected: Boolean,
     selectionMode: Boolean,
     largeThresholdBytes: Long,
+    enabledPhases: EnabledPhases,
     onBounds: (Rect) -> Unit,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
@@ -757,6 +764,21 @@ private fun TimelinePhoto(
                     .clip(RoundedCornerShape(6.dp))
                     .background(Color.Black.copy(alpha = 0.45f))
                     .padding(horizontal = 5.dp, vertical = 1.dp),
+            )
+        }
+        // 「已启用的分析项」全部完成：左下角半透明小对勾角标（仅非选择态）
+        if (!selectionMode && !selected && isFullyAnalyzed(image, enabledPhases)) {
+            Icon(
+                Icons.Outlined.CheckCircle,
+                contentDescription = null,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(5.dp)
+                    .size(16.dp)
+                    .clip(CircleShape)
+                    .background(Color.Black.copy(alpha = 0.32f))
+                    .padding(1.dp),
+                tint = Color.White.copy(alpha = 0.82f),
             )
         }
         if (selectionMode || selected) {

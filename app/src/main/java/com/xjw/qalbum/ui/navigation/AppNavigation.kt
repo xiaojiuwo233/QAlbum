@@ -59,6 +59,7 @@ import com.xjw.qalbum.ui.settings.PersonalizationSettingsScreen
 import com.xjw.qalbum.ui.settings.ScanSettingsScreen
 import com.xjw.qalbum.ui.settings.SettingsCategory
 import com.xjw.qalbum.ui.settings.SettingsScreen
+import com.xjw.qalbum.ui.tags.TagsScreen
 import org.koin.compose.koinInject
 
 /**
@@ -204,7 +205,16 @@ fun AppNavigation() {
                     )
                 }
                 composable(NavDestination.Cleanup.route) {
-                    CleanupScreen(contentPadding = contentPadding)
+                    CleanupScreen(
+                        contentPadding = contentPadding,
+                        onOpenTags = { navController.navigate("tags") },
+                    )
+                }
+                composable("tags") {
+                    TagsScreen(
+                        contentPadding = contentPadding,
+                        onBack = { navController.popBackStack() },
+                    )
                 }
                 composable(NavDestination.Settings.route) {
                     SettingsScreen(

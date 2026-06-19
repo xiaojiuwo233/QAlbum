@@ -43,10 +43,19 @@ class CleanupController(
     suspend fun listCandidates(batchId: Long): List<CleanupCandidateEntity> =
         cleanupDao.getCandidates(batchId)
 
-    suspend fun moveToTrash(items: List<Pair<Long, String>>): Int {
+    /**
+     * 批量移入回收站（逐图 quarantine：读原图→生成缩略图→moveFile）。
+     * [onProgress]（done, total）每处理一张回调一次，供 UI 展示进度条，避免用户干等。
+     */
+    suspend fun moveToTrash(
+        items: List<Pair<Long, String>>,
+        onProgress: (done: Int, total: Int) -> Unit = { _, _ -> },
+    ): Int {
         var moved = 0
-        for ((imageId, reason) in items) {
+        val total = items.size
+        items.forEachIndexed { index, (imageId, reason) ->
             if (quarantineManager.quarantine(imageId, reason)) moved++
+            onProgress(index + 1, total)
         }
         return moved
     }

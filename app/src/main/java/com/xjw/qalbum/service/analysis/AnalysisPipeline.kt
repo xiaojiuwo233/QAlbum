@@ -70,16 +70,17 @@ class AnalysisPipeline(
         job = scope.launch {
             _state.value = AnalysisState.Running
             try {
-                // 本次分析的上限与排序（各逐图阶段共用）：每阶段只取「未完成」的前 limit 张
-                val limit = settings.analysisLimit.first()
+                // 每阶段各自的开关与数量上限；排序方向各阶段共用。每阶段只取「未完成」的前 limit 张，
+                // limit<=0 视为无限（分块跑完所有待办）。各 *_done 标记持久化，故天然「从上次增量继续」。
+                val config = settings.analysisConfig.first()
                 val oldestFirst = settings.analysisOldestFirst.first()
-                runHashAndQuality(limit, oldestFirst)
+                runHashAndQuality(config.hashLimit, oldestFirst)
                 runDuplicate()
-                runOcr(limit, oldestFirst)
-                // AI 阶段仅在用户启用并填好 endpoint 时执行；网络阶段失败不影响整体
+                if (config.ocrEnabled) runOcr(config.ocrLimit, oldestFirst)
+                // AI 标签 / 向量：各自开关 + 全局 AI 服务可用（endpoint 已配）才执行；失败不影响整体
                 if (isAiReady()) {
-                    runAiTag(limit, oldestFirst)
-                    runEmbedding(limit, oldestFirst)
+                    if (config.aiTagEnabled) runAiTag(config.aiLimit, oldestFirst)
+                    if (config.embeddingEnabled) runEmbedding(config.embeddingLimit, oldestFirst)
                 }
                 runScore()
                 _state.value = AnalysisState.Done
@@ -110,33 +111,36 @@ class AnalysisPipeline(
             return
         }
 
-        // 一次只取「未完成、按所选排序」的前 limit 张，处理完即止（下次分析再取下一批）
-        val batch = imageDao.pendingHash(limit, oldestFirst)
-        if (batch.isEmpty()) {
+        // 先取待办 id 列表（一次排序、仅 id），再分块装载实体处理：内存恒定、支持「无限」
+        val ids = imageDao.pendingHashIds(resolveLimit(limit), oldestFirst)
+        if (ids.isEmpty()) {
             _progress.value = AnalysisProgress(AnalysisPhase.HASH, 0, 0, msg = "完成")
             return
         }
-        val total = batch.size
+        val total = ids.size
         val processed = AtomicInteger(0)
-        coroutineScope {
-            val semaphore = Semaphore(CONCURRENCY)
-            batch.map { img ->
-                async(Dispatchers.IO) {
-                    semaphore.withPermit {
-                        val r = analyzeOne(provider, img.path)
-                        imageDao.saveHash(img.id, r.xxhash, r.phash)
-                        imageDao.saveQuality(img.id, r.width, r.height, r.blur, r.blank, r.corrupt)
-                        val done = processed.incrementAndGet()
-                        if (done % PROGRESS_STEP == 0 || done == total) {
-                            // StateFlow.value 写入线程安全，可在子协程直接更新
-                            _progress.value = AnalysisProgress(AnalysisPhase.HASH, done, total)
+        ids.chunked(HASH_CHUNK).forEach { chunkIds ->
+            val batch = imageDao.getByIds(chunkIds)
+            coroutineScope {
+                val semaphore = Semaphore(CONCURRENCY)
+                batch.map { img ->
+                    async(Dispatchers.IO) {
+                        semaphore.withPermit {
+                            val r = analyzeOne(provider, img.path)
+                            imageDao.saveHash(img.id, r.xxhash, r.phash)
+                            imageDao.saveQuality(img.id, r.width, r.height, r.blur, r.blank, r.corrupt)
+                            val done = processed.incrementAndGet()
+                            if (done % PROGRESS_STEP == 0 || done == total) {
+                                // StateFlow.value 写入线程安全，可在子协程直接更新
+                                _progress.value = AnalysisProgress(AnalysisPhase.HASH, done, total)
+                            }
                         }
                     }
-                }
-            }.awaitAll()
+                }.awaitAll()
+            }
         }
-        _progress.value = AnalysisProgress(AnalysisPhase.HASH, total, total, msg = "完成")
-        Timber.i("AnalysisPipeline.runHashAndQuality: analyzed $total images (limit=$limit)")
+        _progress.value = AnalysisProgress(AnalysisPhase.HASH, processed.get(), total, msg = "完成")
+        Timber.i("AnalysisPipeline.runHashAndQuality: analyzed ${processed.get()}/$total images (limit=$limit)")
     }
 
     /** 一次读取字节 → xxHash + pHash + 质量，避免对同一文件重复跨进程读取。 */
@@ -177,15 +181,15 @@ class AnalysisPipeline(
         val provider = accessManager.current()
         if (!provider.isAvailable()) return
 
-        val batch = imageDao.pendingOcr(limit, oldestFirst)
-        if (batch.isEmpty()) {
+        val ids = imageDao.pendingOcrIds(resolveLimit(limit), oldestFirst)
+        if (ids.isEmpty()) {
             _progress.value = AnalysisProgress(AnalysisPhase.OCR, 0, 0, msg = "完成")
             return
         }
-        val total = batch.size
+        val total = ids.size
         var processed = 0
-        run {
-            for (img in batch) {
+        ids.chunked(OCR_CHUNK).forEach { chunkIds ->
+            for (img in imageDao.getByIds(chunkIds)) {
                 val result = ocrEngine.recognize(provider, img.path)
                 val now = System.currentTimeMillis()
                 when (result) {
@@ -226,8 +230,8 @@ class AnalysisPipeline(
                 }
             }
         }
-        _progress.value = AnalysisProgress(AnalysisPhase.OCR, total, total, msg = "完成")
-        Timber.i("AnalysisPipeline.runOcr: OCR-ed $total images (limit=$limit)")
+        _progress.value = AnalysisProgress(AnalysisPhase.OCR, processed, total, msg = "完成")
+        Timber.i("AnalysisPipeline.runOcr: OCR-ed $processed/$total images (limit=$limit)")
     }
 
     private suspend fun isAiReady(): Boolean {
@@ -241,31 +245,34 @@ class AnalysisPipeline(
         val provider = accessManager.current()
         if (!provider.isAvailable()) return
 
-        val batch = imageDao.pendingAiTag(limit, oldestFirst)
-        if (batch.isEmpty()) {
+        val ids = imageDao.pendingAiTagIds(resolveLimit(limit), oldestFirst)
+        if (ids.isEmpty()) {
             _progress.value = AnalysisProgress(AnalysisPhase.AI_TAG, 0, 0, msg = "完成")
             return
         }
-        val total = batch.size
+        val total = ids.size
         // 按用户配置的并发数同时发起请求；本地推理服务多为串行队列，过高并发收益有限，由用户自行权衡
         val concurrency = settings.aiConcurrency.first().coerceAtLeast(1)
         val processed = AtomicInteger(0)
-        coroutineScope {
-            val semaphore = Semaphore(concurrency)
-            batch.map { img ->
-                async(Dispatchers.IO) {
-                    semaphore.withPermit {
-                        val result = aiTagging.tagImage(provider, img.id)
-                        if (result is AiTaggingService.Result.Success) {
-                            imageDao.update(img.copy(aiDone = true))
+        // 用固定 id 列表分块处理：失败图不标记完成、但本次运行内不再重复（下次分析再重试），避免对失败图死循环
+        ids.chunked(AI_CHUNK).forEach { chunkIds ->
+            coroutineScope {
+                val semaphore = Semaphore(concurrency)
+                imageDao.getByIds(chunkIds).map { img ->
+                    async(Dispatchers.IO) {
+                        semaphore.withPermit {
+                            val result = aiTagging.tagImage(provider, img.id)
+                            if (result is AiTaggingService.Result.Success) {
+                                imageDao.update(img.copy(aiDone = true))
+                            }
+                            val done = processed.incrementAndGet()
+                            _progress.value = AnalysisProgress(AnalysisPhase.AI_TAG, done, total)
                         }
-                        val done = processed.incrementAndGet()
-                        _progress.value = AnalysisProgress(AnalysisPhase.AI_TAG, done, total)
                     }
-                }
-            }.awaitAll()
+                }.awaitAll()
+            }
         }
-        _progress.value = AnalysisProgress(AnalysisPhase.AI_TAG, total, total, msg = "完成")
+        _progress.value = AnalysisProgress(AnalysisPhase.AI_TAG, processed.get(), total, msg = "完成")
         Timber.i("AnalysisPipeline.runAiTag: tagged ${processed.get()}/$total images (limit=$limit, concurrency=$concurrency)")
     }
 
@@ -273,28 +280,30 @@ class AnalysisPipeline(
         val provider = accessManager.current()
         if (!provider.isAvailable()) return
 
-        val batch = imageDao.pendingEmbedding(limit, oldestFirst)
-        if (batch.isEmpty()) {
+        val ids = imageDao.pendingEmbeddingIds(resolveLimit(limit), oldestFirst)
+        if (ids.isEmpty()) {
             _progress.value = AnalysisProgress(AnalysisPhase.EMBEDDING, 0, 0, msg = "完成")
             return
         }
-        val total = batch.size
+        val total = ids.size
         val concurrency = settings.aiConcurrency.first().coerceAtLeast(1)
         val processed = AtomicInteger(0)
         val embModel = settings.aiEmbeddingModel.first()
-        coroutineScope {
-            val semaphore = Semaphore(concurrency)
-            batch.map { img ->
-                async(Dispatchers.IO) {
-                    semaphore.withPermit {
-                        embedOne(img, embModel)
-                        val done = processed.incrementAndGet()
-                        _progress.value = AnalysisProgress(AnalysisPhase.EMBEDDING, done, total)
+        ids.chunked(EMBEDDING_CHUNK).forEach { chunkIds ->
+            coroutineScope {
+                val semaphore = Semaphore(concurrency)
+                imageDao.getByIds(chunkIds).map { img ->
+                    async(Dispatchers.IO) {
+                        semaphore.withPermit {
+                            embedOne(img, embModel)
+                            val done = processed.incrementAndGet()
+                            _progress.value = AnalysisProgress(AnalysisPhase.EMBEDDING, done, total)
+                        }
                     }
-                }
-            }.awaitAll()
+                }.awaitAll()
+            }
         }
-        _progress.value = AnalysisProgress(AnalysisPhase.EMBEDDING, total, total, msg = "完成")
+        _progress.value = AnalysisProgress(AnalysisPhase.EMBEDDING, processed.get(), total, msg = "完成")
         Timber.i("AnalysisPipeline.runEmbedding: embedded ${processed.get()}/$total images (limit=$limit, concurrency=$concurrency)")
     }
 
@@ -367,6 +376,9 @@ class AnalysisPipeline(
             (config.phone && ocr.hasPhone) ||
             (config.address && ocr.hasAddress)
 
+    /** 把用户数量上限解析为实际处理数：`<=0`（无限）→ Int.MAX_VALUE（SQLite LIMIT 视作不设上限） */
+    private fun resolveLimit(limit: Int): Int = if (limit <= 0) Int.MAX_VALUE else limit
+
     companion object {
         private const val SCORE_BATCH = 500
 
@@ -378,6 +390,13 @@ class AnalysisPipeline(
 
         /** 进度上报步长 */
         private const val PROGRESS_STEP = 16
+
+        // 各阶段每次装载进内存的实体块大小（id 列表分块 → getByIds）：bound 工作集内存，支持「无限」
+        // 均 < SQLite IN 变量上限；hash/ocr 解码重，取小块；ai/向量受网络与并发信号量约束。
+        private const val HASH_CHUNK = 256
+        private const val OCR_CHUNK = 200
+        private const val AI_CHUNK = 64
+        private const val EMBEDDING_CHUNK = 64
     }
 }
 

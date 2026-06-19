@@ -8,8 +8,10 @@ import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.db.dao.OcrDao
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.domain.model.AccessMode
+import com.xjw.qalbum.domain.model.AnalysisConfig
 import com.xjw.qalbum.domain.model.AutoFavoriteConfig
 import com.xjw.qalbum.domain.model.CleanupConfig
+import com.xjw.qalbum.domain.model.normalizeAnalysisLimit
 import com.xjw.qalbum.domain.model.CleanupPreset
 import com.xjw.qalbum.domain.model.ScanProgress
 import com.xjw.qalbum.service.indexer.ScanController
@@ -187,17 +189,25 @@ class SettingsViewModel(
     fun setBlankEnabled(enabled: Boolean) = updateCleanupConfig { it.copy(blankEnabled = enabled) }
     fun setCorruptEnabled(enabled: Boolean) = updateCleanupConfig { it.copy(corruptEnabled = enabled) }
 
-    // ---- 分析上限 / 排序 / 重置 ----
+    // ---- 分析每项开关/数量 / 排序 / 重置 ----
 
-    val analysisLimit: StateFlow<Int> = settings.analysisLimit
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsRepository.DEFAULT_ANALYSIS_LIMIT)
+    val analysisConfig: StateFlow<AnalysisConfig> = settings.analysisConfig
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AnalysisConfig.DEFAULT)
 
     val analysisOldestFirst: StateFlow<Boolean> = settings.analysisOldestFirst
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
 
-    fun setAnalysisLimit(limit: Int) {
-        persist { settings.setAnalysisLimit(limit) }
+    private fun updateAnalysisConfig(transform: (AnalysisConfig) -> AnalysisConfig) {
+        persist { settings.setAnalysisConfig(transform(settings.analysisConfig.first())) }
     }
+
+    fun setHashLimit(limit: Int) = updateAnalysisConfig { it.copy(hashLimit = normalizeAnalysisLimit(limit)) }
+    fun setOcrEnabled(enabled: Boolean) = updateAnalysisConfig { it.copy(ocrEnabled = enabled) }
+    fun setOcrLimit(limit: Int) = updateAnalysisConfig { it.copy(ocrLimit = normalizeAnalysisLimit(limit)) }
+    fun setAiTagEnabled(enabled: Boolean) = updateAnalysisConfig { it.copy(aiTagEnabled = enabled) }
+    fun setAiLimit(limit: Int) = updateAnalysisConfig { it.copy(aiLimit = normalizeAnalysisLimit(limit)) }
+    fun setEmbeddingEnabled(enabled: Boolean) = updateAnalysisConfig { it.copy(embeddingEnabled = enabled) }
+    fun setEmbeddingLimit(limit: Int) = updateAnalysisConfig { it.copy(embeddingLimit = normalizeAnalysisLimit(limit)) }
 
     fun setAnalysisOldestFirst(oldestFirst: Boolean) {
         persist { settings.setAnalysisOldestFirst(oldestFirst) }

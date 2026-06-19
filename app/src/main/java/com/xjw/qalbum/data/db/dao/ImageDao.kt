@@ -428,14 +428,18 @@ interface ImageDao {
 
     // ---- Phase 2：Hash / 质量 / 重复组 ----
 
-    /** 找出待计算 hash 的活跃图片（按 mtime 倒序，最近的优先） */
+    /**
+     * 待 hash（含质量）阶段的图片 **id**，按分析顺序排序、取前 [limit] 个（仅 id，轻量）。
+     * 管线先取 id 列表（一次排序），再用 [getByIds] 按块装载实体处理——内存恒定、不重排、
+     * 不会因失败图反复重查（与 [timelineIds] 的「只取 id」轻量范式一致）。
+     */
     @Query("""
-        SELECT * FROM images
+        SELECT id FROM images
         WHERE status = 'active' AND source_type <> 'chatthumb' AND hash_done = 0
         ORDER BY (CASE WHEN :oldestFirst THEN mtime ELSE -mtime END) ASC
         LIMIT :limit
     """)
-    suspend fun pendingHash(limit: Int, oldestFirst: Boolean): List<ImageEntity>
+    suspend fun pendingHashIds(limit: Int, oldestFirst: Boolean): List<Long>
 
     /** 待 hash（即待「hash+质量」合并分析）的总数，用于进度条总量 */
     @Query("""
@@ -583,36 +587,36 @@ interface ImageDao {
 
     // ---- Phase 3：OCR ----
 
-    /** 待 OCR 的图片（质量分析完成的优先） */
+    /** 待 OCR 的图片 **id**（排除损坏 / 过小图），按分析顺序取前 [limit] 个 */
     @Query("""
-        SELECT * FROM images
+        SELECT id FROM images
         WHERE status = 'active' AND source_type <> 'chatthumb' AND ocr_done = 0
           AND is_corrupt = 0
           AND width >= 64 AND height >= 64
         ORDER BY (CASE WHEN :oldestFirst THEN mtime ELSE -mtime END) ASC
         LIMIT :limit
     """)
-    suspend fun pendingOcr(limit: Int, oldestFirst: Boolean): List<ImageEntity>
+    suspend fun pendingOcrIds(limit: Int, oldestFirst: Boolean): List<Long>
 
-    /** 待 AI 打标签：已 hash、未 ai_done、未损坏的主图，按排序取前 limit 张 */
+    /** 待 AI 打标签的图片 **id**：已 hash、未 ai_done、未损坏，按分析顺序取前 [limit] 个 */
     @Query("""
-        SELECT * FROM images
+        SELECT id FROM images
         WHERE status = 'active' AND source_type <> 'chatthumb'
           AND hash_done = 1 AND ai_done = 0 AND is_corrupt = 0
         ORDER BY (CASE WHEN :oldestFirst THEN mtime ELSE -mtime END) ASC
         LIMIT :limit
     """)
-    suspend fun pendingAiTag(limit: Int, oldestFirst: Boolean): List<ImageEntity>
+    suspend fun pendingAiTagIds(limit: Int, oldestFirst: Boolean): List<Long>
 
-    /** 待生成向量：已 hash、未 embedding_done、未损坏的主图，按排序取前 limit 张 */
+    /** 待生成向量的图片 **id**：已 hash、未 embedding_done、未损坏，按分析顺序取前 [limit] 个 */
     @Query("""
-        SELECT * FROM images
+        SELECT id FROM images
         WHERE status = 'active' AND source_type <> 'chatthumb'
           AND hash_done = 1 AND embedding_done = 0 AND is_corrupt = 0
         ORDER BY (CASE WHEN :oldestFirst THEN mtime ELSE -mtime END) ASC
         LIMIT :limit
     """)
-    suspend fun pendingEmbedding(limit: Int, oldestFirst: Boolean): List<ImageEntity>
+    suspend fun pendingEmbeddingIds(limit: Int, oldestFirst: Boolean): List<Long>
 
     @Query("UPDATE images SET ocr_done = 1 WHERE id = :id")
     suspend fun markOcrDone(id: Long)
@@ -655,6 +659,39 @@ interface ImageDao {
         ORDER BY (CASE WHEN :oldestFirst THEN mtime ELSE -mtime END) ASC
     """)
     suspend fun cleanupCandidatePool(oldestFirst: Boolean): List<CleanupSignalRow>
+
+    // ---- 按标签筛选（标签管理页）----
+
+    /** 某标签下的活跃图片，分页（走 image_tags.tag_id 索引 + images 主键连接） */
+    @Query("""
+        SELECT i.* FROM images i
+        INNER JOIN image_tags it ON it.image_id = i.id
+        WHERE it.tag_id = :tagId AND i.status = 'active' AND i.source_type <> 'chatthumb'
+        ORDER BY i.mtime DESC, i.id DESC
+    """)
+    fun pagingImagesByTag(tagId: Long): PagingSource<Int, ImageEntity>
+
+    /** 某标签下活跃图片数（标签列表计数 / 删除前总量） */
+    @Query("""
+        SELECT COUNT(*) FROM images i
+        INNER JOIN image_tags it ON it.image_id = i.id
+        WHERE it.tag_id = :tagId AND i.status = 'active' AND i.source_type <> 'chatthumb'
+    """)
+    suspend fun countActiveImagesByTag(tagId: Long): Int
+
+    /**
+     * 某标签下活跃图片的 id，keyset 分块（id 升序，传上一块末尾 id 作 [afterId]）。
+     * 「删除该标签下全部图片」时按块取出逐块处理，绝不一次性把整组 id 装载进内存。
+     */
+    @Query("""
+        SELECT i.id FROM images i
+        INNER JOIN image_tags it ON it.image_id = i.id
+        WHERE it.tag_id = :tagId AND i.status = 'active' AND i.source_type <> 'chatthumb'
+          AND i.id > :afterId
+        ORDER BY i.id
+        LIMIT :limit
+    """)
+    suspend fun imageIdsByTagChunk(tagId: Long, afterId: Long, limit: Int): List<Long>
 }
 
 /** 清理判定所需的最小图片信号投影（由 [ImageDao.cleanupCandidatePool] 用列别名填充） */

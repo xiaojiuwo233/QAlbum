@@ -120,7 +120,7 @@ enum class SettingsCategory(
     val group: SettingsGroup,
 ) {
     SCAN("settings_scan", "扫描", "chatpic 路径与扫描触发", Icons.Outlined.Storage, SettingsGroup.DATA),
-    ANALYSIS("settings_analysis", "分析", "每次上限、顺序与重置标记", Icons.Outlined.Analytics, SettingsGroup.DATA),
+    ANALYSIS("settings_analysis", "分析", "每项开关 / 数量 / 顺序", Icons.Outlined.Analytics, SettingsGroup.DATA),
     CLEANUP("settings_cleanup", "清理规则", "各维度开关与门限", Icons.Outlined.CleaningServices, SettingsGroup.DATA),
     AI("settings_ai", "AI 配置", "Endpoint / Key / 模型", Icons.Outlined.AutoAwesome, SettingsGroup.DATA),
     PERSONALIZATION("settings_personalization", "个性化", "Material You 动态取色", Icons.Outlined.Palette, SettingsGroup.SYSTEM),
@@ -360,7 +360,7 @@ fun AnalysisSettingsScreen(
     sharedScope: SharedTransitionScope? = null,
     animatedScope: AnimatedVisibilityScope? = null,
 ) {
-    val limit by viewModel.analysisLimit.collectAsState()
+    val config by viewModel.analysisConfig.collectAsState()
     val oldestFirst by viewModel.analysisOldestFirst.collectAsState()
     val autoFavorite by viewModel.autoFavoriteConfig.collectAsState()
     var showResetDialog by remember { mutableStateOf(false) }
@@ -372,28 +372,62 @@ fun AnalysisSettingsScreen(
         sharedScope = sharedScope,
         animatedScope = animatedScope,
     ) { notify ->
-        SettingsSection(header = "每次分析上限") {
+        SettingsSection(header = "分析项目与每次数量") {
             SettingsBlurb(
-                "每次「开始分析」最多处理多少张未分析的图片。Hash/质量、OCR、AI 标签、向量等逐图阶段都遵守此上限，处理完即停，下次再继续。",
+                "每个阶段可单独开关与限量。数量留空或填 0 = 无限；每次「开始分析」处理完即停，下次从未完成处继续。",
             )
-            InstantSaveTextField(
-                value = limit.toString(),
-                label = "上限（${SettingsRepository.MIN_ANALYSIS_LIMIT}–${SettingsRepository.MAX_ANALYSIS_LIMIT}）",
-                keyboardType = KeyboardType.Number,
-                onSave = { input ->
-                    val value = input.filter { it.isDigit() }.toIntOrNull()
-                    if (value != null) {
-                        val clamped = value.coerceIn(SettingsRepository.MIN_ANALYSIS_LIMIT, SettingsRepository.MAX_ANALYSIS_LIMIT)
-                        viewModel.setAnalysisLimit(clamped)
-                        notify("已保存上限 $clamped")
-                    }
-                },
+
+            Text("哈希 / 质量", style = MaterialTheme.typography.titleSmall)
+            SettingsBlurb("所有图片的基础阶段，始终开启。")
+            PhaseLimitField(
+                label = "数量（留空 = 无限）",
+                limit = config.hashLimit,
+                onSave = { viewModel.setHashLimit(it); notify("已保存哈希数量") },
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = {
-                    viewModel.setAnalysisLimit(SettingsRepository.DEFAULT_ANALYSIS_LIMIT)
-                    notify("已恢复默认 ${SettingsRepository.DEFAULT_ANALYSIS_LIMIT}")
-                }) { Text("默认 ${SettingsRepository.DEFAULT_ANALYSIS_LIMIT}") }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+            SettingsSwitchRow(
+                title = "OCR 文字识别",
+                subtitle = "识别图中文字，支持文字搜索",
+                checked = config.ocrEnabled,
+                onCheckedChange = { viewModel.setOcrEnabled(it); notify(if (it) "已开启 OCR" else "已关闭 OCR") },
+            )
+            if (config.ocrEnabled) {
+                PhaseLimitField(
+                    label = "OCR 数量（留空 = 无限）",
+                    limit = config.ocrLimit,
+                    onSave = { viewModel.setOcrLimit(it); notify("已保存 OCR 数量") },
+                )
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+            SettingsSwitchRow(
+                title = "AI 标签",
+                subtitle = "调用 AI 给图片打标签（另需在「AI 配置」中启用服务）",
+                checked = config.aiTagEnabled,
+                onCheckedChange = { viewModel.setAiTagEnabled(it); notify(if (it) "已开启 AI 标签" else "已关闭 AI 标签") },
+            )
+            if (config.aiTagEnabled) {
+                PhaseLimitField(
+                    label = "AI 标签数量（留空 = 无限）",
+                    limit = config.aiLimit,
+                    onSave = { viewModel.setAiLimit(it); notify("已保存 AI 标签数量") },
+                )
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+            SettingsSwitchRow(
+                title = "向量（语义搜索）",
+                subtitle = "生成向量用于语义搜索（另需在「AI 配置」中启用服务）",
+                checked = config.embeddingEnabled,
+                onCheckedChange = { viewModel.setEmbeddingEnabled(it); notify(if (it) "已开启向量" else "已关闭向量") },
+            )
+            if (config.embeddingEnabled) {
+                PhaseLimitField(
+                    label = "向量数量（留空 = 无限）",
+                    limit = config.embeddingLimit,
+                    onSave = { viewModel.setEmbeddingLimit(it); notify("已保存向量数量") },
+                )
             }
         }
 
@@ -1055,6 +1089,22 @@ private fun InstantSaveTextField(
         }),
         visualTransformation = visualTransformation,
         trailingIcon = trailingIcon,
+    )
+}
+
+/** 分析阶段数量输入：留空 / 0 = 无限；其余为正整数上限。复用 [InstantSaveTextField] 的离开即落盘。 */
+@Composable
+private fun PhaseLimitField(
+    label: String,
+    limit: Int,
+    onSave: (Int) -> Unit,
+) {
+    InstantSaveTextField(
+        value = if (limit <= 0) "" else limit.toString(),
+        label = label,
+        placeholder = "无限",
+        keyboardType = KeyboardType.Number,
+        onSave = { input -> onSave(input.filter { it.isDigit() }.toIntOrNull() ?: 0) },
     )
 }
 

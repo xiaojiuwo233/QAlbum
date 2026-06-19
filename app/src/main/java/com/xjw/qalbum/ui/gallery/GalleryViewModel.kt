@@ -15,6 +15,7 @@ import com.xjw.qalbum.service.cleanup.QuarantineManager
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map as flowMap
@@ -51,6 +52,24 @@ class GalleryViewModel(
 
     val largeThresholdBytes: StateFlow<Long> = settings.galleryLargeThresholdBytes
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsRepository.DEFAULT_LARGE_THRESHOLD_BYTES)
+
+    /**
+     * 当前「会被分析」的阶段集合：受每项开关 + 全局 AI 服务可用性约束。
+     * 图库完成角标据此判断「已启用的项是否全部完成」。
+     */
+    val enabledPhases: StateFlow<EnabledPhases> =
+        combine(settings.analysisConfig, settings.aiEnabled, settings.aiEndpoint) { config, aiEnabled, endpoint ->
+            val aiReady = aiEnabled && endpoint.isNotBlank()
+            EnabledPhases(
+                ocr = config.ocrEnabled,
+                aiTag = config.aiTagEnabled && aiReady,
+                embedding = config.embeddingEnabled && aiReady,
+            )
+        }.stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5_000),
+            EnabledPhases(ocr = true, aiTag = false, embedding = false),
+        )
 
     fun setColumns(columns: Int) {
         viewModelScope.launch { settings.setGalleryColumns(columns) }
@@ -142,6 +161,23 @@ sealed class GalleryTimelineItem {
     data class Header(val key: String, val label: String) : GalleryTimelineItem()
     data class Photo(val image: ImageEntity) : GalleryTimelineItem()
 }
+
+/** 当前「会被分析」的阶段集合（hash 始终隐含开启，故不在此） */
+data class EnabledPhases(
+    val ocr: Boolean,
+    val aiTag: Boolean,
+    val embedding: Boolean,
+)
+
+/**
+ * 图片是否「已完成全部启用的分析项」：hash 必做；OCR / AI 标签 / 向量 哪项未启用就不要求。
+ * 用于图库左下角的完成角标（产品决策：已启用的项全完成才显示，避免关掉的功能永远拖累角标）。
+ */
+fun isFullyAnalyzed(image: ImageEntity, phases: EnabledPhases): Boolean =
+    image.hashDone &&
+        (!phases.ocr || image.ocrDone) &&
+        (!phases.aiTag || image.aiDone) &&
+        (!phases.embedding || image.embeddingDone)
 
 private fun Flow<PagingData<ImageEntity>>.withDateHeaders(
     bucketCounts: Flow<Map<Long, Int>>,

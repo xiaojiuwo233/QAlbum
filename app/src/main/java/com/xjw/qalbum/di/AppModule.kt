@@ -197,6 +197,13 @@ val appModule = module {
             settings = get(),
         )
     }
+    viewModel {
+        com.xjw.qalbum.ui.tags.TagsViewModel(
+            tagDao = get(),
+            imageRepository = get(),
+            cleanupController = get(),
+        )
+    }
 
     // ---- Worker ----
 

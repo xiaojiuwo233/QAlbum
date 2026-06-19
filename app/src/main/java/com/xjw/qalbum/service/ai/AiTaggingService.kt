@@ -50,15 +50,11 @@ class AiTaggingService(
 
         val parsed = parseResponse(resp.content) ?: return Result.Failed("解析 AI 响应失败")
 
-        // 写入标签 + 关联
+        // 写入标签 + 关联（标签在「标签管理页」可见可批量清理）。
+        // 不再因 risk 标签自动收藏：自动收藏改由「设置 → 分析 → 自动收藏」显式控制。
         for (tagName in parsed.contentTags + parsed.riskTags) {
             val tag = ensureTag(name = tagName, type = if (tagName in parsed.riskTags) "risk" else "ai")
             tagDao.linkTag(ImageTagEntity(imageId = imageId, tagId = tag.id, source = "ai"))
-        }
-
-        // 含敏感信息的图片自动加入收藏
-        if (parsed.riskTags.isNotEmpty()) {
-            imageDao.setFavorite(imageId, true)
         }
 
         return Result.Success(parsed)
