@@ -16,6 +16,7 @@ import com.xjw.qalbum.service.analysis.AnalysisProgress
 import com.xjw.qalbum.service.analysis.AnalysisState
 import com.xjw.qalbum.service.cleanup.CleanupBatch
 import com.xjw.qalbum.service.cleanup.CleanupController
+import com.xjw.qalbum.service.cleanup.CleanupRules
 import com.xjw.qalbum.service.cleanup.ThumbnailTrashManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -261,35 +262,8 @@ class CleanupViewModel(
             .associateBy { it.id }
         val candidateIds = candidates.map { it.imageId }.toSet()
 
-        val tiles = mutableListOf<ReviewTile>()
-        val seenDuplicateGroups = mutableSetOf<Long>()
-
-        candidates.forEach { candidate ->
-            val image = candidateImages[candidate.imageId] ?: return@forEach
-            val groupId = image.duplicateGroupId
-            if (candidate.reason == "重复" && groupId != null) {
-                // 同组只展开一次：列出整组所有活跃图（含推荐保留的最优一张），
-                // 让用户自由对比并独立勾选——可勾两张、也可都不勾
-                if (seenDuplicateGroups.add(groupId)) {
-                    val groupImages = imageRepository.getByDuplicateGroup(groupId)
-                        .filter { it.status == "active" }
-                    groupImages.forEach { img ->
-                        tiles += ReviewTile(
-                            image = img,
-                            reason = "重复",
-                            duplicateGroupId = groupId,
-                            recommendedDelete = img.id in candidateIds,
-                        )
-                    }
-                }
-            } else {
-                tiles += ReviewTile(
-                    image = image,
-                    reason = candidate.reason,
-                    duplicateGroupId = null,
-                    recommendedDelete = true,
-                )
-            }
+        val tiles = buildReviewTiles(candidates, candidateImages, candidateIds) { groupId ->
+            imageRepository.getByDuplicateGroup(groupId)
         }
 
         _reviewBatch.value = CleanupReviewBatch(
@@ -327,3 +301,60 @@ data class ReviewTile(
     val duplicateGroupId: Long?,
     val recommendedDelete: Boolean,
 )
+
+/**
+ * 由候选清单构建审核格子列表。**全程按 image.id 去重**：一张图可能既是某重复组成员、
+ * 又因模糊/低分等维度独立成为候选；若两条路径各加一格，审核网格 LazyGrid 的 key
+ * （`"tile-${image.id}"`）就会重复 → `IllegalArgumentException: Key already used` 崩溃。
+ *
+ * 两趟保证「重复」维度优先：
+ * - Pass 1 展开所有重复组（同组整组展示，便于对比），组内图先占位；
+ * - Pass 2 其余维度候选，已出现过的图跳过。
+ *
+ * 纯函数（[groupImages] 注入组内图查询），便于单测覆盖去重不变量。
+ */
+internal suspend fun buildReviewTiles(
+    candidates: List<CleanupCandidateEntity>,
+    candidateImages: Map<Long, ImageEntity>,
+    candidateIds: Set<Long>,
+    groupImages: suspend (groupId: Long) -> List<ImageEntity>,
+): List<ReviewTile> {
+    val tiles = mutableListOf<ReviewTile>()
+    val seenDuplicateGroups = mutableSetOf<Long>()
+    val seenImageIds = mutableSetOf<Long>()
+
+    // Pass 1：展开重复组（含推荐保留的最优一张），让用户自由对比、独立勾选
+    candidates.forEach { candidate ->
+        val image = candidateImages[candidate.imageId] ?: return@forEach
+        val groupId = image.duplicateGroupId
+        if (candidate.reason == CleanupRules.REASON_DUPLICATE && groupId != null && seenDuplicateGroups.add(groupId)) {
+            groupImages(groupId)
+                .filter { it.status == "active" }
+                .forEach { img ->
+                    if (seenImageIds.add(img.id)) {
+                        tiles += ReviewTile(
+                            image = img,
+                            reason = CleanupRules.REASON_DUPLICATE,
+                            duplicateGroupId = groupId,
+                            recommendedDelete = img.id in candidateIds,
+                        )
+                    }
+                }
+        }
+    }
+
+    // Pass 2：其余维度候选；已在某重复组里出现过的图跳过，避免同一张图重复成格
+    candidates.forEach { candidate ->
+        val image = candidateImages[candidate.imageId] ?: return@forEach
+        val isGroupedDuplicate = candidate.reason == CleanupRules.REASON_DUPLICATE && image.duplicateGroupId != null
+        if (!isGroupedDuplicate && seenImageIds.add(candidate.imageId)) {
+            tiles += ReviewTile(
+                image = image,
+                reason = candidate.reason,
+                duplicateGroupId = null,
+                recommendedDelete = true,
+            )
+        }
+    }
+    return tiles
+}
