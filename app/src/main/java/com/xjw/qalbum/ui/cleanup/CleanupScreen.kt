@@ -128,7 +128,7 @@ fun CleanupScreen(
     val analysisState by viewModel.analysisState.collectAsState()
     val analysisProgress by viewModel.analysisProgress.collectAsState()
     val analysisOverview by viewModel.analysisOverview.collectAsState()
-    val includeOcrPending by viewModel.includeOcrPending.collectAsState()
+    val fullyAnalyzed by viewModel.fullyAnalyzedCount.collectAsState()
     val cleanupConfig by viewModel.cleanupConfig.collectAsState()
     val busy by viewModel.busy.collectAsState()
     val lastBatch by viewModel.lastBatch.collectAsState()
@@ -209,7 +209,7 @@ fun CleanupScreen(
                 analysisState = analysisState,
                 analysisProgress = analysisProgress,
                 analysisOverview = analysisOverview,
-                includeOcrPending = includeOcrPending,
+                fullyAnalyzed = fullyAnalyzed,
                 cleanupConfig = cleanupConfig,
                 busy = busy,
                 lastBatch = lastBatch,
@@ -238,7 +238,7 @@ private fun MainCleanupSection(
     analysisState: AnalysisState,
     analysisProgress: com.xjw.qalbum.service.analysis.AnalysisProgress?,
     analysisOverview: ImageDao.AnalysisProgressRow,
-    includeOcrPending: Boolean,
+    fullyAnalyzed: Int,
     cleanupConfig: CleanupConfig,
     busy: Boolean,
     lastBatch: CleanupBatch?,
@@ -281,8 +281,9 @@ private fun MainCleanupSection(
             AnalysisCard(
                 state = analysisState,
                 progress = analysisProgress,
-                overview = analysisOverview,
-                includeOcrPending = includeOcrPending,
+                total = analysisOverview.totalImages,
+                analyzed = fullyAnalyzed,
+                hashedAny = analysisOverview.hashDone > 0,
                 onStart = onStartAnalysis,
                 onCancel = onCancelAnalysis,
             )
@@ -346,33 +347,22 @@ private fun ThumbnailEntryCard(
 /** 分析卡片主按钮的语义状态（抽出便于单测） */
 internal enum class AnalysisAction { START, CONTINUE, ALL_DONE, CANCEL, NO_IMAGES }
 
-/** 已完成「基础分析」(哈希/质量 + OCR) 的图片数 = 总数 − 待基础分析数 */
-internal fun analyzedCount(
-    overview: ImageDao.AnalysisProgressRow,
-    includeOcrPending: Boolean = true,
-): Int {
-    val pending = if (includeOcrPending) {
-        overview.pendingBase
-    } else {
-        (overview.totalImages - overview.hashDone).coerceAtLeast(0)
-    }
-    return (overview.totalImages - pending).coerceAtLeast(0)
-}
-
 /**
  * 主按钮三态判定：
- * 运行中→取消；无图→禁用；基础全完成→已全部分析；分析过→继续；否则→开始。
- * 「是否分析过」以 hashDone>0 判断（hash 是所有图的必经第一阶段）。
+ * 运行中→取消；无图→禁用；已分析达到总数→已全部分析；hash 过→继续；否则→开始。
+ * [analyzed] = 完成全部「当前需要」阶段的图片数（与图库完成角标同口径）；
+ * [hashedAny] = 是否至少 hash 过一张（区分「开始」与「继续」）。
  */
 internal fun analysisAction(
     state: AnalysisState,
-    overview: ImageDao.AnalysisProgressRow,
-    includeOcrPending: Boolean = true,
+    total: Int,
+    analyzed: Int,
+    hashedAny: Boolean,
 ): AnalysisAction = when {
     state == AnalysisState.Running -> AnalysisAction.CANCEL
-    overview.totalImages == 0 -> AnalysisAction.NO_IMAGES
-    analyzedCount(overview, includeOcrPending) >= overview.totalImages -> AnalysisAction.ALL_DONE
-    overview.hashDone > 0 -> AnalysisAction.CONTINUE
+    total == 0 -> AnalysisAction.NO_IMAGES
+    analyzed >= total -> AnalysisAction.ALL_DONE
+    hashedAny -> AnalysisAction.CONTINUE
     else -> AnalysisAction.START
 }
 
@@ -380,15 +370,14 @@ internal fun analysisAction(
 private fun AnalysisCard(
     state: AnalysisState,
     progress: com.xjw.qalbum.service.analysis.AnalysisProgress?,
-    overview: ImageDao.AnalysisProgressRow,
-    includeOcrPending: Boolean,
+    total: Int,
+    analyzed: Int,
+    hashedAny: Boolean,
     onStart: () -> Unit,
     onCancel: () -> Unit,
 ) {
-    val total = overview.totalImages
-    val analyzed = analyzedCount(overview, includeOcrPending)
     val fraction = if (total > 0) analyzed.toFloat() / total else 0f
-    val action = analysisAction(state, overview, includeOcrPending)
+    val action = analysisAction(state, total, analyzed, hashedAny)
 
     Card(
         modifier = Modifier.fillMaxWidth(),

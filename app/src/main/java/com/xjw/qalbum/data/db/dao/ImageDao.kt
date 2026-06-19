@@ -404,6 +404,26 @@ interface ImageDao {
         val pendingBase: Int,
     )
 
+    /**
+     * 「已分析」= 已完成全部**当前需要**的分析阶段的图片数（与图库左下角完成角标同口径）。
+     * 入参为各阶段是否「需要」（由调用方按设置开关 + AI 服务可用性算好）。
+     * 对损坏 / 过小图宽容：这些图本就被对应阶段跳过（见 pendingOcr/AiTag/Embedding 的筛选），
+     * 视作该阶段「无需再做」，否则进度永远到不了 100%、按钮也永远点不亮「已全部分析」。
+     */
+    @Query("""
+        SELECT COUNT(*) FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb'
+          AND hash_done = 1
+          AND (:ocrRequired = 0 OR ocr_done = 1 OR is_corrupt = 1 OR width < 64 OR height < 64)
+          AND (:aiRequired = 0 OR ai_done = 1 OR is_corrupt = 1)
+          AND (:embRequired = 0 OR embedding_done = 1 OR is_corrupt = 1)
+    """)
+    fun observeFullyAnalyzedCount(
+        ocrRequired: Boolean,
+        aiRequired: Boolean,
+        embRequired: Boolean,
+    ): Flow<Int>
+
     @Query("""
         SELECT
             IFNULL(SUM(CASE WHEN is_corrupt = 1 THEN 1 ELSE 0 END), 0) AS corrupt,

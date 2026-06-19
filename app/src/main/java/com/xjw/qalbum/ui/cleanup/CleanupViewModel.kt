@@ -17,14 +17,13 @@ import com.xjw.qalbum.service.analysis.AnalysisState
 import com.xjw.qalbum.service.cleanup.CleanupBatch
 import com.xjw.qalbum.service.cleanup.CleanupController
 import com.xjw.qalbum.service.cleanup.ThumbnailTrashManager
-import com.xjw.qalbum.service.ocr.OcrModelStore
-import com.xjw.qalbum.service.ocr.OcrModelStatus
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -34,19 +33,12 @@ class CleanupViewModel(
     private val thumbnailTrashManager: ThumbnailTrashManager,
     private val imageRepository: ImageRepository,
     private val settings: SettingsRepository,
-    private val ocrModelStore: OcrModelStore,
 ) : ViewModel() {
 
     val analysisState: StateFlow<AnalysisState> = analysisPipeline.state
     val analysisProgress: StateFlow<AnalysisProgress?> = analysisPipeline.progress
 
-    private val _ocrModelReady = MutableStateFlow(ocrModelStore.currentStatus() is OcrModelStatus.Ready)
-    val ocrModelReady: StateFlow<Boolean> = _ocrModelReady.asStateFlow()
-    val includeOcrPending: StateFlow<Boolean> = combine(settings.analysisConfig, _ocrModelReady) { config, ready ->
-        config.ocrEnabled && ready
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
-
-    /** 全局分析完成度（DB 聚合）：驱动「已分析 X/Y」总进度条与按钮三态 */
+    /** 全局分析完成度（DB 聚合）：提供总数与 hash 完成数，驱动总进度条分母与按钮三态 */
     val analysisOverview: StateFlow<ImageDao.AnalysisProgressRow> =
         imageRepository.observeAnalysisProgress()
             .stateIn(
@@ -54,6 +46,19 @@ class CleanupViewModel(
                 SharingStarted.WhileSubscribed(5_000),
                 ImageDao.AnalysisProgressRow(0, 0, 0, 0, 0, 0),
             )
+
+    /**
+     * 「已分析 X/Y」里的 X：完成全部**当前需要**阶段的图片数（与图库左下角完成角标同口径）。
+     * 需要的阶段 = OCR(开关) + AI 标签 / 向量(开关且 AI 服务可用)。只跑了 hash 时，
+     * 若 OCR/AI/向量任一开启，这些图尚未「全完成」，X 会接近 0，而不再把「hash 完成数」当成已分析。
+     */
+    val fullyAnalyzedCount: StateFlow<Int> =
+        combine(settings.analysisConfig, settings.aiEnabled, settings.aiEndpoint) { config, aiEnabled, endpoint ->
+            val aiReady = aiEnabled && endpoint.isNotBlank()
+            Triple(config.ocrEnabled, config.aiTagEnabled && aiReady, config.embeddingEnabled && aiReady)
+        }.flatMapLatest { (ocr, ai, emb) ->
+            imageRepository.observeFullyAnalyzedCount(ocr, ai, emb)
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
 
     val recentBatches: StateFlow<List<CleanupBatchEntity>> = cleanupController.observeRecentBatches()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -97,10 +102,7 @@ class CleanupViewModel(
         viewModelScope.launch { settings.setCleanupConfig(preset.config) }
     }
 
-    fun startAnalysis() {
-        _ocrModelReady.value = ocrModelStore.currentStatus() is OcrModelStatus.Ready
-        analysisPipeline.start()
-    }
+    fun startAnalysis() = analysisPipeline.start()
     fun cancelAnalysis() = analysisPipeline.cancel()
 
     fun generateBatch() {

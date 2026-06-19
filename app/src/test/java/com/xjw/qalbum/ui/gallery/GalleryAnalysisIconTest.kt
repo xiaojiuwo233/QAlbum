@@ -53,4 +53,20 @@ class GalleryAnalysisIconTest {
         assertTrue(isFullyAnalyzed(img(true, false, false, false), phases))
         assertFalse(isFullyAnalyzed(img(false, false, false, false), phases))
     }
+
+    @Test
+    fun corruptImageExcusedFromOptionalPhases() {
+        // 损坏图被 OCR/AI/向量阶段跳过，故 hash 完成即视为「已分析」（能拿到角标、计入进度）
+        val phases = EnabledPhases(ocr = true, aiTag = true, embedding = true)
+        val corrupt = img(hash = true, ocr = false, ai = false, emb = false).copy(isCorrupt = true)
+        assertTrue(isFullyAnalyzed(corrupt, phases))
+    }
+
+    @Test
+    fun tinyImageExcusedFromOcr() {
+        // 过小图被 OCR 跳过：仅开 OCR 时，hash 完成即算已分析
+        val phases = EnabledPhases(ocr = true, aiTag = false, embedding = false)
+        val tiny = img(hash = true, ocr = false, ai = false, emb = false).copy(width = 32, height = 32)
+        assertTrue(isFullyAnalyzed(tiny, phases))
+    }
 }

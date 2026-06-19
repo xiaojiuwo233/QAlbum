@@ -130,6 +130,10 @@ class ImageRepository(
     fun observeCleanedStats(): Flow<ImageDao.CleanedStatsRow> = imageDao.observeCleanedStats()
     fun observeSourceBreakdown(): Flow<List<ImageDao.SourceBreakdownRow>> = imageDao.observeSourceBreakdown()
     fun observeAnalysisProgress(): Flow<ImageDao.AnalysisProgressRow> = imageDao.observeAnalysisProgress()
+
+    /** 「已分析」= 完成全部当前需要阶段的图片数（与图库完成角标同口径） */
+    fun observeFullyAnalyzedCount(ocrRequired: Boolean, aiRequired: Boolean, embRequired: Boolean): Flow<Int> =
+        imageDao.observeFullyAnalyzedCount(ocrRequired, aiRequired, embRequired)
     fun observeImageHealth(): Flow<ImageDao.ImageHealthRow> = imageDao.observeImageHealth()
     fun observeFavoriteCount(): Flow<Int> = imageDao.observeFavoriteCount()
     fun observeThumbnailTrashSummary(): Flow<ImageDao.ThumbnailTrashSummary> =

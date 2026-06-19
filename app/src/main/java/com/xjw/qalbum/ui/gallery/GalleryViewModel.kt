@@ -170,14 +170,16 @@ data class EnabledPhases(
 )
 
 /**
- * 图片是否「已完成全部启用的分析项」：hash 必做；OCR / AI 标签 / 向量 哪项未启用就不要求。
- * 用于图库左下角的完成角标（产品决策：已启用的项全完成才显示，避免关掉的功能永远拖累角标）。
+ * 图片是否「已完成全部需要的分析项」：hash 必做；OCR / AI 标签 / 向量 哪项未启用就不要求。
+ * 对损坏 / 过小图宽容（这些图本就被对应阶段跳过，见 pendingOcr/AiTag/Embedding 筛选），
+ * 否则它们永远拿不到角标、也会拖累清理页「已分析」进度到不了 100%。
+ * 与 `ImageDao.observeFullyAnalyzedCount` 的 SQL 判定保持完全一致。
  */
 fun isFullyAnalyzed(image: ImageEntity, phases: EnabledPhases): Boolean =
     image.hashDone &&
-        (!phases.ocr || image.ocrDone) &&
-        (!phases.aiTag || image.aiDone) &&
-        (!phases.embedding || image.embeddingDone)
+        (!phases.ocr || image.ocrDone || image.isCorrupt || image.width < 64 || image.height < 64) &&
+        (!phases.aiTag || image.aiDone || image.isCorrupt) &&
+        (!phases.embedding || image.embeddingDone || image.isCorrupt)
 
 private fun Flow<PagingData<ImageEntity>>.withDateHeaders(
     bucketCounts: Flow<Map<Long, Int>>,

@@ -201,7 +201,6 @@ val appModule = module {
             thumbnailTrashManager = get(),
             imageRepository = get(),
             settings = get(),
-            ocrModelStore = get(),
         )
     }
     viewModel {

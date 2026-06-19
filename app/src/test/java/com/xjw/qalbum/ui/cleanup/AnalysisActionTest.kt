@@ -1,31 +1,21 @@
 package com.xjw.qalbum.ui.cleanup
 
-import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.service.analysis.AnalysisState
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
 /**
- * 校验「分析图片」卡片主按钮三态判定与「已分析」计数。
- * 这两个纯函数是本次改动里唯一带分支的非 UI 逻辑。
+ * 校验「分析图片」卡片主按钮三态判定 [analysisAction]。
+ * [analyzed] = 完成全部「当前需要」阶段的图片数（与图库完成角标同口径），
+ * 与「hash 完成数」解耦：只跑了 hash、但 OCR/AI/向量开着时，analyzed 接近 0 而按钮仍是「继续」。
  */
 class AnalysisActionTest {
-
-    private fun row(total: Int, hashDone: Int = 0, pendingBase: Int = total) =
-        ImageDao.AnalysisProgressRow(
-            totalImages = total,
-            hashDone = hashDone,
-            ocrDone = 0,
-            aiDone = 0,
-            embeddingDone = 0,
-            pendingBase = pendingBase,
-        )
 
     @Test
     fun noImagesDisablesButton() {
         assertEquals(
             AnalysisAction.NO_IMAGES,
-            analysisAction(AnalysisState.Idle, row(total = 0, pendingBase = 0)),
+            analysisAction(AnalysisState.Idle, total = 0, analyzed = 0, hashedAny = false),
         )
     }
 
@@ -33,7 +23,16 @@ class AnalysisActionTest {
     fun neverAnalyzedShowsStart() {
         assertEquals(
             AnalysisAction.START,
-            analysisAction(AnalysisState.Idle, row(total = 100, hashDone = 0, pendingBase = 100)),
+            analysisAction(AnalysisState.Idle, total = 100, analyzed = 0, hashedAny = false),
+        )
+    }
+
+    @Test
+    fun hashedButNothingFullyAnalyzedShowsContinue() {
+        // 只跑了 hash、OCR/AI/向量开着：analyzed=0（没有图四项全完成）但 hashedAny=true → 继续分析
+        assertEquals(
+            AnalysisAction.CONTINUE,
+            analysisAction(AnalysisState.Idle, total = 100, analyzed = 0, hashedAny = true),
         )
     }
 
@@ -41,24 +40,15 @@ class AnalysisActionTest {
     fun partiallyAnalyzedShowsContinue() {
         assertEquals(
             AnalysisAction.CONTINUE,
-            analysisAction(AnalysisState.Idle, row(total = 100, hashDone = 30, pendingBase = 70)),
+            analysisAction(AnalysisState.Idle, total = 100, analyzed = 30, hashedAny = true),
         )
     }
 
     @Test
-    fun doneButStillPendingShowsContinue() {
-        // 上一批 Done，但全库仍有待基础分析的图 → 继续分析
-        assertEquals(
-            AnalysisAction.CONTINUE,
-            analysisAction(AnalysisState.Done, row(total = 100, hashDone = 50, pendingBase = 50)),
-        )
-    }
-
-    @Test
-    fun allBaseDoneShowsAllDone() {
+    fun allAnalyzedShowsAllDone() {
         assertEquals(
             AnalysisAction.ALL_DONE,
-            analysisAction(AnalysisState.Idle, row(total = 100, hashDone = 100, pendingBase = 0)),
+            analysisAction(AnalysisState.Idle, total = 100, analyzed = 100, hashedAny = true),
         )
     }
 
@@ -66,38 +56,11 @@ class AnalysisActionTest {
     fun runningOverridesEverything() {
         assertEquals(
             AnalysisAction.CANCEL,
-            analysisAction(AnalysisState.Running, row(total = 100, hashDone = 100, pendingBase = 0)),
+            analysisAction(AnalysisState.Running, total = 100, analyzed = 100, hashedAny = true),
         )
         assertEquals(
             AnalysisAction.CANCEL,
-            analysisAction(AnalysisState.Running, row(total = 100, hashDone = 0, pendingBase = 100)),
-        )
-    }
-
-    @Test
-    fun analyzedCountIsTotalMinusPending() {
-        assertEquals(70, analyzedCount(row(total = 100, pendingBase = 30)))
-    }
-
-    @Test
-    fun analyzedCountNeverNegative() {
-        assertEquals(0, analyzedCount(row(total = 10, pendingBase = 20)))
-    }
-
-    @Test
-    fun analyzedCountCanIgnoreOcrPendingWhenOcrUnavailable() {
-        val overview = row(total = 100, hashDone = 100, pendingBase = 40)
-
-        assertEquals(100, analyzedCount(overview, includeOcrPending = false))
-    }
-
-    @Test
-    fun actionTreatsHashCompleteAsDoneWhenOcrUnavailable() {
-        val overview = row(total = 100, hashDone = 100, pendingBase = 40)
-
-        assertEquals(
-            AnalysisAction.ALL_DONE,
-            analysisAction(AnalysisState.Idle, overview, includeOcrPending = false),
+            analysisAction(AnalysisState.Running, total = 100, analyzed = 0, hashedAny = false),
         )
     }
 }
