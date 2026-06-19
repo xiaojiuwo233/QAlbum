@@ -13,6 +13,7 @@ import com.xjw.qalbum.domain.model.CleanupConfig
 import com.xjw.qalbum.domain.model.CleanupPreset
 import com.xjw.qalbum.domain.model.ScanProgress
 import com.xjw.qalbum.service.indexer.ScanController
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -35,7 +36,20 @@ class SettingsViewModel(
     private val imageDao: ImageDao,
     private val ocrDao: OcrDao,
     private val embeddingDao: EmbeddingDao,
+    private val appScope: CoroutineScope,
 ) : ViewModel() {
+
+    /**
+     * 设置落盘统一走 App 级 [appScope]，而非 [viewModelScope]。
+     *
+     * 二级设置页输入后，用户常直接点返回 / 系统返回离开页面，此时由 InstantSaveTextField
+     * 的 onDispose 兜底触发保存；但该页对应的 NavBackStackEntry 正随这次返回销毁，
+     * viewModelScope 会被一并取消，落在其上的 DataStore 写入会被丢弃（输入退出后仍是旧值）。
+     * 用独立于页面生命周期的 appScope 写入，确保离开即落盘。
+     */
+    private fun persist(block: suspend () -> Unit) {
+        appScope.launch { block() }
+    }
 
     val uiState: StateFlow<SettingsUiState> = combine(
         settings.accessMode,
@@ -81,25 +95,23 @@ class SettingsViewModel(
     val scanProgress: StateFlow<ScanProgress?> = scanController.progress
 
     fun setAccessMode(mode: AccessMode) {
-        viewModelScope.launch {
-            settings.setAccessMode(mode)
-            checkAccess()
-        }
+        persist { settings.setAccessMode(mode) }
+        checkAccess()
     }
 
     fun setChatpicPath(path: String) {
-        viewModelScope.launch { settings.setChatpicPath(path) }
+        persist { settings.setChatpicPath(path) }
     }
 
     fun setDynamicColor(enabled: Boolean) {
-        viewModelScope.launch { settings.setDynamicColorEnabled(enabled) }
+        persist { settings.setDynamicColorEnabled(enabled) }
     }
 
     val detailSharedTransition: StateFlow<Boolean> = settings.detailSharedTransition
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     fun setDetailSharedTransition(enabled: Boolean) {
-        viewModelScope.launch { settings.setDetailSharedTransition(enabled) }
+        persist { settings.setDetailSharedTransition(enabled) }
     }
 
     fun checkAccess() {
@@ -118,19 +130,19 @@ class SettingsViewModel(
     // ---- AI 配置 ----
 
     fun setAiEnabled(enabled: Boolean) {
-        viewModelScope.launch { settings.setAiEnabled(enabled) }
+        persist { settings.setAiEnabled(enabled) }
     }
     fun setAiEndpoint(endpoint: String) {
-        viewModelScope.launch { settings.setAiEndpoint(endpoint.trim()) }
+        persist { settings.setAiEndpoint(endpoint.trim()) }
     }
     fun setAiApiKey(key: String) {
-        viewModelScope.launch { settings.setAiApiKey(key.trim()) }
+        persist { settings.setAiApiKey(key.trim()) }
     }
     fun setAiModel(model: String) {
-        viewModelScope.launch { settings.setAiModel(model.trim()) }
+        persist { settings.setAiModel(model.trim()) }
     }
     fun setAiEmbeddingModel(model: String) {
-        viewModelScope.launch { settings.setAiEmbeddingModel(model.trim()) }
+        persist { settings.setAiEmbeddingModel(model.trim()) }
     }
 
     val aiDisableThinking: StateFlow<Boolean> = settings.aiDisableThinking
@@ -143,13 +155,13 @@ class SettingsViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsRepository.DEFAULT_AI_MAX_TOKENS)
 
     fun setAiDisableThinking(enabled: Boolean) {
-        viewModelScope.launch { settings.setAiDisableThinking(enabled) }
+        persist { settings.setAiDisableThinking(enabled) }
     }
     fun setAiConcurrency(value: Int) {
-        viewModelScope.launch { settings.setAiConcurrency(value) }
+        persist { settings.setAiConcurrency(value) }
     }
     fun setAiMaxTokens(value: Int) {
-        viewModelScope.launch { settings.setAiMaxTokens(value) }
+        persist { settings.setAiMaxTokens(value) }
     }
 
     // ---- 清理规则配置 ----
@@ -158,7 +170,7 @@ class SettingsViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CleanupConfig.DEFAULT)
 
     private fun updateCleanupConfig(transform: (CleanupConfig) -> CleanupConfig) {
-        viewModelScope.launch {
+        persist {
             settings.setCleanupConfig(transform(settings.cleanupConfig.first()))
         }
     }
@@ -184,11 +196,11 @@ class SettingsViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
 
     fun setAnalysisLimit(limit: Int) {
-        viewModelScope.launch { settings.setAnalysisLimit(limit) }
+        persist { settings.setAnalysisLimit(limit) }
     }
 
     fun setAnalysisOldestFirst(oldestFirst: Boolean) {
-        viewModelScope.launch { settings.setAnalysisOldestFirst(oldestFirst) }
+        persist { settings.setAnalysisOldestFirst(oldestFirst) }
     }
 
     // ---- 每次审核数量 ----
@@ -197,7 +209,7 @@ class SettingsViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsRepository.DEFAULT_REVIEW_LIMIT)
 
     fun setReviewLimit(limit: Int) {
-        viewModelScope.launch { settings.setReviewLimit(limit) }
+        persist { settings.setReviewLimit(limit) }
     }
 
     // ---- 自动收藏配置（分析阶段，默认关闭，规则可自定义）----
@@ -206,7 +218,7 @@ class SettingsViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AutoFavoriteConfig.DEFAULT)
 
     private fun updateAutoFavoriteConfig(transform: (AutoFavoriteConfig) -> AutoFavoriteConfig) {
-        viewModelScope.launch {
+        persist {
             settings.setAutoFavoriteConfig(transform(settings.autoFavoriteConfig.first()))
         }
     }

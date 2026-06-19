@@ -28,6 +28,9 @@ import com.xjw.qalbum.ui.imageloading.buildImageLoader
 import com.xjw.qalbum.ui.settings.SettingsViewModel
 import com.xjw.qalbum.worker.AnalysisWorker
 import com.xjw.qalbum.worker.IncrementalScanWorker
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import org.koin.androidx.workmanager.dsl.worker
@@ -57,6 +60,10 @@ val appModule = module {
 
     single { SettingsRepository(get()) }
     single { ImageRepository(imageDao = get(), ocrDao = get()) }
+
+    // 应用级协程作用域：用于必须脱离 UI / 页面生命周期完成的写入（如设置落盘）。
+    // 与 AnalysisPipeline / ScanController 各自持有的 IO 作用域同范式，随进程存活。
+    single { CoroutineScope(SupervisorJob() + Dispatchers.IO) }
 
     // ---- 文件访问 ----
 
@@ -147,6 +154,7 @@ val appModule = module {
             imageDao = get(),
             ocrDao = get(),
             embeddingDao = get(),
+            appScope = get(),
         )
     }
     viewModel {
