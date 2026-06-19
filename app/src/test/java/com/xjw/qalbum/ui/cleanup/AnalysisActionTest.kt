@@ -83,4 +83,21 @@ class AnalysisActionTest {
     fun analyzedCountNeverNegative() {
         assertEquals(0, analyzedCount(row(total = 10, pendingBase = 20)))
     }
+
+    @Test
+    fun analyzedCountCanIgnoreOcrPendingWhenOcrUnavailable() {
+        val overview = row(total = 100, hashDone = 100, pendingBase = 40)
+
+        assertEquals(100, analyzedCount(overview, includeOcrPending = false))
+    }
+
+    @Test
+    fun actionTreatsHashCompleteAsDoneWhenOcrUnavailable() {
+        val overview = row(total = 100, hashDone = 100, pendingBase = 40)
+
+        assertEquals(
+            AnalysisAction.ALL_DONE,
+            analysisAction(AnalysisState.Idle, overview, includeOcrPending = false),
+        )
+    }
 }

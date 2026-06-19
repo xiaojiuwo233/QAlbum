@@ -15,6 +15,9 @@ import com.xjw.qalbum.domain.model.normalizeAnalysisLimit
 import com.xjw.qalbum.domain.model.CleanupPreset
 import com.xjw.qalbum.domain.model.ScanProgress
 import com.xjw.qalbum.service.indexer.ScanController
+import com.xjw.qalbum.service.ocr.OcrModelDownloadService
+import com.xjw.qalbum.service.ocr.OcrModelDownloadState
+import com.xjw.qalbum.service.ocr.OcrModelStatus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -38,6 +41,7 @@ class SettingsViewModel(
     private val imageDao: ImageDao,
     private val ocrDao: OcrDao,
     private val embeddingDao: EmbeddingDao,
+    private val ocrModelDownload: OcrModelDownloadService,
     private val appScope: CoroutineScope,
 ) : ViewModel() {
 
@@ -211,6 +215,24 @@ class SettingsViewModel(
 
     fun setAnalysisOldestFirst(oldestFirst: Boolean) {
         persist { settings.setAnalysisOldestFirst(oldestFirst) }
+    }
+
+    val ocrModelDownloadState: StateFlow<OcrModelDownloadState> = ocrModelDownload.downloadState
+
+    private val _ocrModelStatus = MutableStateFlow<OcrModelStatus>(ocrModelDownload.refreshStatus())
+    val ocrModelStatus: StateFlow<OcrModelStatus> = _ocrModelStatus.asStateFlow()
+
+    fun refreshOcrModelStatus() {
+        _ocrModelStatus.value = ocrModelDownload.refreshStatus()
+    }
+
+    fun downloadOcrModel() {
+        ocrModelDownload.startDownload()
+    }
+
+    fun deleteOcrModel() {
+        ocrModelDownload.clearModel()
+        refreshOcrModelStatus()
     }
 
     // ---- 每次审核数量 ----

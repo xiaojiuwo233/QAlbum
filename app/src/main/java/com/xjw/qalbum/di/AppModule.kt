@@ -21,7 +21,13 @@ import com.xjw.qalbum.fileops.FileOpsClient
 import com.xjw.qalbum.service.indexer.ScanController
 import com.xjw.qalbum.service.indexer.ScanPipeline
 import com.xjw.qalbum.service.indexer.transport.ScanTransportFactory
-import com.xjw.qalbum.service.ocr.LocalOcrEngine
+import com.xjw.qalbum.service.ocr.FileOcrModelStore
+import com.xjw.qalbum.service.ocr.OcrModelDownloadService
+import com.xjw.qalbum.service.ocr.OcrModelStore
+import com.xjw.qalbum.service.ocr.AndroidPaddleOcrFactory
+import com.xjw.qalbum.service.ocr.PaddleOcrEngine
+import com.xjw.qalbum.service.ocr.PaddleOnnxOcrRunner
+import com.xjw.qalbum.service.ocr.PaddleOcrRunner
 import com.xjw.qalbum.ui.dashboard.DashboardViewModel
 import com.xjw.qalbum.ui.gallery.GalleryViewModel
 import com.xjw.qalbum.ui.imageloading.buildImageLoader
@@ -88,7 +94,12 @@ val appModule = module {
     // ---- 分析 / 清理 / OCR / AI 服务 ----
 
     single { DuplicateDetector(imageDao = get()) }
-    single { LocalOcrEngine() }
+    single { FileOcrModelStore(context = get()) }
+    single<OcrModelStore> { get<FileOcrModelStore>() }
+    single { OcrModelDownloadService(modelStore = get(), okHttpClient = get(), appScope = get()) }
+    single { AndroidPaddleOcrFactory(context = get()) }
+    single<PaddleOcrRunner> { PaddleOnnxOcrRunner(factory = get<AndroidPaddleOcrFactory>()) }
+    single { PaddleOcrEngine(modelStore = get(), runner = get()) }
     single { OpenAiCompatClient(settings = get(), okHttpClient = get()) }
     single { SemanticIndex(dao = get()) }
     single { AiTaggingService(aiClient = get(), imageDao = get(), tagDao = get()) }
@@ -106,6 +117,7 @@ val appModule = module {
             imageDao = get(),
             ocrDao = get(),
             duplicateDetector = get(),
+            ocrModelStore = get(),
             ocrEngine = get(),
             settings = get(),
             aiClient = get(),
@@ -154,6 +166,7 @@ val appModule = module {
             imageDao = get(),
             ocrDao = get(),
             embeddingDao = get(),
+            ocrModelDownload = get(),
             appScope = get(),
         )
     }
@@ -188,6 +201,7 @@ val appModule = module {
             thumbnailTrashManager = get(),
             imageRepository = get(),
             settings = get(),
+            ocrModelStore = get(),
         )
     }
     viewModel {

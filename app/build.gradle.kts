@@ -165,10 +165,8 @@ dependencies {
     implementation(libs.coil.gif)
     implementation(libs.coil.network.okhttp)
 
-    // --- ML Kit （Phase 3 OCR 使用，先引入但不强制初始化）---
-    implementation(libs.mlkit.text.recognition.chinese)
-    implementation(libs.mlkit.image.labeling)
-    implementation(libs.mlkit.barcode.scanning)
+    // --- OCR ---
+    implementation(project(":ppocr-sdk"))
 
     // --- Shizuku（必选权限模式）---
     implementation(libs.shizuku.api)
@@ -185,7 +183,7 @@ dependencies {
     implementation(libs.okhttp.logging)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.android)
-    // ML Kit Task 转 Kotlin suspend 的桥接（Task.await()）
+    // Google Play Services Task 转 Kotlin suspend 的桥接（保留给后续集成点）
     implementation(libs.kotlinx.coroutines.play.services)
 
     // --- 哈希 ---

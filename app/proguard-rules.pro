@@ -36,9 +36,9 @@
 # 服务类，且 AIDL Stub 的 binder 协议依赖完整类结构，必须整体保留。
 -keep class com.xjw.qalbum.fileops.** { *; }
 
-# --- ML Kit ---
--keep class com.google.mlkit.** { *; }
--keep class com.google.android.gms.** { *; }
+# --- PaddleOCR / ONNX Runtime ---
+-keep class com.paddle.ocr.** { *; }
+-keep class ai.onnxruntime.** { *; }
 
 # --- OkHttp ---
 -dontwarn okhttp3.**

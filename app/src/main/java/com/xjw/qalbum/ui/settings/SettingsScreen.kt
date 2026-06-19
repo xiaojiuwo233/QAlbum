@@ -96,6 +96,8 @@ import com.xjw.qalbum.domain.model.AccessMode
 import com.xjw.qalbum.domain.model.CleanupConfig
 import com.xjw.qalbum.domain.model.CleanupPreset
 import com.xjw.qalbum.service.ai.AiPrivacyGuard
+import com.xjw.qalbum.service.ocr.OcrModelDownloadState
+import com.xjw.qalbum.service.ocr.OcrModelStatus
 import com.xjw.qalbum.ui.anim.pressScale
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -363,7 +365,15 @@ fun AnalysisSettingsScreen(
     val config by viewModel.analysisConfig.collectAsState()
     val oldestFirst by viewModel.analysisOldestFirst.collectAsState()
     val autoFavorite by viewModel.autoFavoriteConfig.collectAsState()
+    val ocrModelStatus by viewModel.ocrModelStatus.collectAsState()
+    val ocrDownload by viewModel.ocrModelDownloadState.collectAsState()
     var showResetDialog by remember { mutableStateOf(false) }
+
+    LaunchedEffect(ocrDownload) {
+        if (ocrDownload is OcrModelDownloadState.Done) {
+            viewModel.refreshOcrModelStatus()
+        }
+    }
 
     SettingsDetailScaffold(
         title = SettingsCategory.ANALYSIS.title,
@@ -397,6 +407,22 @@ fun AnalysisSettingsScreen(
                     label = "OCR 数量（留空 = 无限）",
                     limit = config.ocrLimit,
                     onSave = { viewModel.setOcrLimit(it); notify("已保存 OCR 数量") },
+                )
+                OcrModelRow(
+                    status = ocrModelStatus,
+                    downloadState = ocrDownload,
+                    onDownload = {
+                        viewModel.downloadOcrModel()
+                        notify("开始下载 OCR 模型")
+                    },
+                    onDelete = {
+                        viewModel.deleteOcrModel()
+                        notify("已删除 OCR 模型")
+                    },
+                    onRefresh = {
+                        viewModel.refreshOcrModelStatus()
+                        notify("已刷新 OCR 模型状态")
+                    },
                 )
             }
 
@@ -1106,6 +1132,56 @@ private fun PhaseLimitField(
         keyboardType = KeyboardType.Number,
         onSave = { input -> onSave(input.filter { it.isDigit() }.toIntOrNull() ?: 0) },
     )
+}
+
+@Composable
+private fun OcrModelRow(
+    status: OcrModelStatus,
+    downloadState: OcrModelDownloadState,
+    onDownload: () -> Unit,
+    onDelete: () -> Unit,
+    onRefresh: () -> Unit,
+) {
+    val downloading = downloadState is OcrModelDownloadState.Downloading
+    val title = when (status) {
+        OcrModelStatus.NotInstalled -> "OCR 模型未安装"
+        is OcrModelStatus.Ready -> "OCR 模型已安装"
+        is OcrModelStatus.Failed -> "OCR 模型异常"
+    }
+    val subtitle = when {
+        downloading -> {
+            val s = downloadState as OcrModelDownloadState.Downloading
+            "${s.message} ${(s.progress * 100).toInt()}%"
+        }
+        downloadState is OcrModelDownloadState.Failed -> downloadState.reason
+        status is OcrModelStatus.Ready -> "${status.manifest.displayName} ${status.manifest.version}"
+        status is OcrModelStatus.Failed -> status.reason
+        else -> "从 Paddle 官方模型源下载 PP-OCRv6 ONNX 模型；未安装时 OCR 阶段会跳过。"
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+        Column {
+            Text(title, style = MaterialTheme.typography.titleSmall)
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (status is OcrModelStatus.Failed || downloadState is OcrModelDownloadState.Failed) {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+            )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (status is OcrModelStatus.Ready) {
+                OutlinedButton(onClick = onDelete, enabled = !downloading) { Text("删除模型") }
+                OutlinedButton(onClick = onRefresh, enabled = !downloading) { Text("刷新") }
+            } else {
+                Button(onClick = onDownload, enabled = !downloading) { Text(if (downloading) "下载中" else "下载模型") }
+                OutlinedButton(onClick = onRefresh, enabled = !downloading) { Text("刷新") }
+            }
+        }
+    }
 }
 
 @Composable

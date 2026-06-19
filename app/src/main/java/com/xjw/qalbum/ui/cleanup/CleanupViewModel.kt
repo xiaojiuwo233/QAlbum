@@ -17,10 +17,13 @@ import com.xjw.qalbum.service.analysis.AnalysisState
 import com.xjw.qalbum.service.cleanup.CleanupBatch
 import com.xjw.qalbum.service.cleanup.CleanupController
 import com.xjw.qalbum.service.cleanup.ThumbnailTrashManager
+import com.xjw.qalbum.service.ocr.OcrModelStore
+import com.xjw.qalbum.service.ocr.OcrModelStatus
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -31,10 +34,17 @@ class CleanupViewModel(
     private val thumbnailTrashManager: ThumbnailTrashManager,
     private val imageRepository: ImageRepository,
     private val settings: SettingsRepository,
+    private val ocrModelStore: OcrModelStore,
 ) : ViewModel() {
 
     val analysisState: StateFlow<AnalysisState> = analysisPipeline.state
     val analysisProgress: StateFlow<AnalysisProgress?> = analysisPipeline.progress
+
+    private val _ocrModelReady = MutableStateFlow(ocrModelStore.currentStatus() is OcrModelStatus.Ready)
+    val ocrModelReady: StateFlow<Boolean> = _ocrModelReady.asStateFlow()
+    val includeOcrPending: StateFlow<Boolean> = combine(settings.analysisConfig, _ocrModelReady) { config, ready ->
+        config.ocrEnabled && ready
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     /** 全局分析完成度（DB 聚合）：驱动「已分析 X/Y」总进度条与按钮三态 */
     val analysisOverview: StateFlow<ImageDao.AnalysisProgressRow> =
@@ -87,7 +97,10 @@ class CleanupViewModel(
         viewModelScope.launch { settings.setCleanupConfig(preset.config) }
     }
 
-    fun startAnalysis() = analysisPipeline.start()
+    fun startAnalysis() {
+        _ocrModelReady.value = ocrModelStore.currentStatus() is OcrModelStatus.Ready
+        analysisPipeline.start()
+    }
     fun cancelAnalysis() = analysisPipeline.cancel()
 
     fun generateBatch() {

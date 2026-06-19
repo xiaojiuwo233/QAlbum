@@ -25,3 +25,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "QAlbum"
 include(":app")
+include(":ppocr-sdk")

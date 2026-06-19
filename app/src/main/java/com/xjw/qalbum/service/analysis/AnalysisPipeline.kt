@@ -10,8 +10,10 @@ import com.xjw.qalbum.domain.model.AutoFavoriteConfig
 import com.xjw.qalbum.service.ai.AiTaggingService
 import com.xjw.qalbum.service.ai.AiTaggingShared
 import com.xjw.qalbum.service.ai.SemanticIndex
-import com.xjw.qalbum.service.ocr.LocalOcrEngine
 import com.xjw.qalbum.service.ocr.OcrResult
+import com.xjw.qalbum.service.ocr.OcrModelStatus
+import com.xjw.qalbum.service.ocr.OcrModelStore
+import com.xjw.qalbum.service.ocr.PaddleOcrEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -45,7 +47,8 @@ class AnalysisPipeline(
     private val imageDao: ImageDao,
     private val ocrDao: OcrDao,
     private val duplicateDetector: DuplicateDetector,
-    private val ocrEngine: LocalOcrEngine,
+    private val ocrModelStore: OcrModelStore,
+    private val ocrEngine: PaddleOcrEngine,
     private val settings: SettingsRepository,
     private val aiClient: OpenAiCompatClient,
     private val aiTagging: AiTaggingService,
@@ -178,6 +181,11 @@ class AnalysisPipeline(
     }
 
     private suspend fun runOcr(limit: Int, oldestFirst: Boolean) {
+        if (ocrModelStore.currentStatus() !is OcrModelStatus.Ready) {
+            _progress.value = AnalysisProgress(AnalysisPhase.OCR, 0, 0, msg = "未安装 OCR 模型")
+            Timber.i("AnalysisPipeline.runOcr: skipped because OCR model is not installed")
+            return
+        }
         val provider = accessManager.current()
         if (!provider.isAvailable()) return
 
@@ -221,6 +229,11 @@ class AnalysisPipeline(
                     }
                     is OcrResult.Failed -> {
                         Timber.w("OCR failed for ${img.path}: ${result.reason}")
+                    }
+                    OcrResult.Unavailable -> {
+                        Timber.i("OCR skipped: model is not installed")
+                        _progress.value = AnalysisProgress(AnalysisPhase.OCR, processed, total, msg = "未安装 OCR 模型")
+                        return
                     }
                 }
                 imageDao.markOcrDone(img.id)

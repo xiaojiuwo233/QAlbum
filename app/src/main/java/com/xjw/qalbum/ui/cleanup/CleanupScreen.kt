@@ -128,6 +128,7 @@ fun CleanupScreen(
     val analysisState by viewModel.analysisState.collectAsState()
     val analysisProgress by viewModel.analysisProgress.collectAsState()
     val analysisOverview by viewModel.analysisOverview.collectAsState()
+    val includeOcrPending by viewModel.includeOcrPending.collectAsState()
     val cleanupConfig by viewModel.cleanupConfig.collectAsState()
     val busy by viewModel.busy.collectAsState()
     val lastBatch by viewModel.lastBatch.collectAsState()
@@ -208,6 +209,7 @@ fun CleanupScreen(
                 analysisState = analysisState,
                 analysisProgress = analysisProgress,
                 analysisOverview = analysisOverview,
+                includeOcrPending = includeOcrPending,
                 cleanupConfig = cleanupConfig,
                 busy = busy,
                 lastBatch = lastBatch,
@@ -236,6 +238,7 @@ private fun MainCleanupSection(
     analysisState: AnalysisState,
     analysisProgress: com.xjw.qalbum.service.analysis.AnalysisProgress?,
     analysisOverview: ImageDao.AnalysisProgressRow,
+    includeOcrPending: Boolean,
     cleanupConfig: CleanupConfig,
     busy: Boolean,
     lastBatch: CleanupBatch?,
@@ -279,6 +282,7 @@ private fun MainCleanupSection(
                 state = analysisState,
                 progress = analysisProgress,
                 overview = analysisOverview,
+                includeOcrPending = includeOcrPending,
                 onStart = onStartAnalysis,
                 onCancel = onCancelAnalysis,
             )
@@ -343,8 +347,17 @@ private fun ThumbnailEntryCard(
 internal enum class AnalysisAction { START, CONTINUE, ALL_DONE, CANCEL, NO_IMAGES }
 
 /** 已完成「基础分析」(哈希/质量 + OCR) 的图片数 = 总数 − 待基础分析数 */
-internal fun analyzedCount(overview: ImageDao.AnalysisProgressRow): Int =
-    (overview.totalImages - overview.pendingBase).coerceAtLeast(0)
+internal fun analyzedCount(
+    overview: ImageDao.AnalysisProgressRow,
+    includeOcrPending: Boolean = true,
+): Int {
+    val pending = if (includeOcrPending) {
+        overview.pendingBase
+    } else {
+        (overview.totalImages - overview.hashDone).coerceAtLeast(0)
+    }
+    return (overview.totalImages - pending).coerceAtLeast(0)
+}
 
 /**
  * 主按钮三态判定：
@@ -354,10 +367,11 @@ internal fun analyzedCount(overview: ImageDao.AnalysisProgressRow): Int =
 internal fun analysisAction(
     state: AnalysisState,
     overview: ImageDao.AnalysisProgressRow,
+    includeOcrPending: Boolean = true,
 ): AnalysisAction = when {
     state == AnalysisState.Running -> AnalysisAction.CANCEL
     overview.totalImages == 0 -> AnalysisAction.NO_IMAGES
-    overview.pendingBase == 0 -> AnalysisAction.ALL_DONE
+    analyzedCount(overview, includeOcrPending) >= overview.totalImages -> AnalysisAction.ALL_DONE
     overview.hashDone > 0 -> AnalysisAction.CONTINUE
     else -> AnalysisAction.START
 }
@@ -367,13 +381,14 @@ private fun AnalysisCard(
     state: AnalysisState,
     progress: com.xjw.qalbum.service.analysis.AnalysisProgress?,
     overview: ImageDao.AnalysisProgressRow,
+    includeOcrPending: Boolean,
     onStart: () -> Unit,
     onCancel: () -> Unit,
 ) {
     val total = overview.totalImages
-    val analyzed = analyzedCount(overview)
+    val analyzed = analyzedCount(overview, includeOcrPending)
     val fraction = if (total > 0) analyzed.toFloat() / total else 0f
-    val action = analysisAction(state, overview)
+    val action = analysisAction(state, overview, includeOcrPending)
 
     Card(
         modifier = Modifier.fillMaxWidth(),
