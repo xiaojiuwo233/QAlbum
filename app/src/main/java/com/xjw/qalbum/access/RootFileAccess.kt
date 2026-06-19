@@ -92,6 +92,25 @@ class RootFileAccess : FileAccessProvider {
         SuFile(path).delete()
     }
 
+    override suspend fun deleteFiles(paths: List<String>): BooleanArray = withContext(Dispatchers.IO) {
+        if (paths.isEmpty()) return@withContext BooleanArray(0)
+        val result = BooleanArray(paths.size)
+        var base = 0
+        for (chunk in paths.chunked(SHELL_DELETE_CHUNK)) {
+            // 整批一条命令走 libsu 常驻 shell：一次 rm 再逐个回报，避免每文件一次往返
+            val res = runCatching { Shell.cmd(buildBatchDeleteScript(chunk)).exec() }.getOrNull()
+            val lines = res?.out?.map { it.trim() }?.filter { it.isNotEmpty() } ?: emptyList()
+            if (lines.size != chunk.size) {
+                Timber.w("Root deleteFiles: expected ${chunk.size} results, got ${lines.size}")
+            }
+            for (i in chunk.indices) {
+                result[base + i] = lines.getOrNull(i) == "1"
+            }
+            base += chunk.size
+        }
+        result
+    }
+
     override suspend fun moveFile(src: String, dst: String): Boolean = withContext(Dispatchers.IO) {
         SuFile(src).renameTo(SuFile(dst))
     }

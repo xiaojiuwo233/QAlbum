@@ -89,6 +89,26 @@ class ShizukuFileAccess : FileAccessProvider {
         return runShellExit("rm -f '${path.escape()}'") == 0
     }
 
+    override suspend fun deleteFiles(paths: List<String>): BooleanArray {
+        if (paths.isEmpty()) return BooleanArray(0)
+        if (!isAvailable()) return BooleanArray(paths.size) // 全部失败
+        val result = BooleanArray(paths.size)
+        var base = 0
+        for (chunk in paths.chunked(SHELL_DELETE_CHUNK)) {
+            // 整批一次起进程：内部一次 rm 再逐个回报，避免每文件一次 newProcess
+            val out = runShell(buildBatchDeleteScript(chunk))
+            val lines = out.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList()
+            if (lines.size != chunk.size) {
+                Timber.w("Shizuku deleteFiles: expected ${chunk.size} results, got ${lines.size}")
+            }
+            for (i in chunk.indices) {
+                result[base + i] = lines.getOrNull(i) == "1"
+            }
+            base += chunk.size
+        }
+        return result
+    }
+
     override suspend fun moveFile(src: String, dst: String): Boolean {
         if (!isAvailable()) return false
         return runShellExit("mv '${src.escape()}' '${dst.escape()}'") == 0

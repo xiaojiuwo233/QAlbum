@@ -41,6 +41,23 @@ internal object FileOpsImpl {
         return HeaderBatchCodec.pack(headers)
     }
 
+    /**
+     * 批量删除：进程内原生 unlink，每个路径一个布尔结果（顺序对应）。
+     * 「本就不存在」按成功处理——与历史 shell `rm -f` 的语义一致（缺失文件返回 0）。
+     */
+    fun deleteFiles(paths: Array<String>): BooleanArray {
+        val res = BooleanArray(paths.size)
+        for (i in paths.indices) {
+            res[i] = try {
+                val f = File(paths[i])
+                !f.exists() || f.delete()
+            } catch (_: Exception) {
+                false
+            }
+        }
+        return res
+    }
+
     // ---- 内部实现 ----
 
     private fun listEntries(dir: String, offset: Int, limit: Int, dirsOnly: Boolean): Array<String> {

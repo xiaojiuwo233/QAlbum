@@ -153,8 +153,16 @@ class CleanupViewModel(
         }
     }
 
-    fun purgeThumbnail(imageId: Long) {
-        viewModelScope.launch { thumbnailTrashManager.purge(imageId) }
+    fun purgeThumbnails(imageIds: Set<Long>, onDone: (Int) -> Unit = {}) {
+        if (imageIds.isEmpty()) return
+        viewModelScope.launch {
+            _busy.value = true
+            try {
+                onDone(thumbnailTrashManager.purge(imageIds.toList()))
+            } finally {
+                _busy.value = false
+            }
+        }
     }
 
     fun purgeAllThumbnails(onDone: (Int) -> Unit = {}) {

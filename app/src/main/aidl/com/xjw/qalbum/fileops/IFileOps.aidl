@@ -25,4 +25,10 @@ interface IFileOps {
     // 批量读取每个文件的前 n 字节。返回 HeaderBatchCodec 打包格式：
     // 每项 = 4 字节大端长度（-1 表示不可读）+ 实际字节。
     byte[] readHeaders(in String[] paths, int n) = 3;
+
+    // 批量删除：在特权进程内对每个路径做原生 unlink，返回与 paths 等长、
+    // 顺序对应的成功标志（已删或本就不存在=true）。清理走这里，避免逐文件起
+    // shell 进程（4w 张时那是 45min 级别的开销）。一次事务的 paths 数由调用方
+    // 分块控制在 binder 1MB 限制内。
+    boolean[] deleteFiles(in String[] paths) = 4;
 }

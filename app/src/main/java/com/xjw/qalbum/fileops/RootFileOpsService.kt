@@ -24,5 +24,8 @@ class RootFileOpsService : RootService() {
 
         override fun readHeaders(paths: Array<String>, n: Int): ByteArray =
             FileOpsImpl.readHeaders(paths, n)
+
+        override fun deleteFiles(paths: Array<String>): BooleanArray =
+            FileOpsImpl.deleteFiles(paths)
     }
 }

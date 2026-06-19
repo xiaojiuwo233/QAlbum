@@ -201,6 +201,13 @@ interface ImageDao {
     """)
     suspend fun listThumbnailTrash(): List<ImageEntity>
 
+    /** 在给定 id 集合里筛出仍处于缩略图回收站的行（多选删除用）；调用方需分块传入 */
+    @Query("""
+        SELECT * FROM images
+        WHERE source_type = 'chatthumb' AND status = 'thumbnail_trash' AND id IN (:ids)
+    """)
+    suspend fun getThumbnailTrashByIds(ids: List<Long>): List<ImageEntity>
+
     data class ThumbnailTrashSummary(
         val count: Int,
         val bytes: Long,

@@ -134,7 +134,7 @@ private fun ThumbnailTrashScreen(
                     busy = busy,
                     onClose = clearSelection,
                     onDelete = {
-                        selectedIds.forEach { viewModel.purgeThumbnail(it) }
+                        viewModel.purgeThumbnails(selectedIds)
                         clearSelection()
                     },
                 )
