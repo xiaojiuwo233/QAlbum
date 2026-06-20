@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -44,9 +45,11 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.unit.IntOffset
 import com.xjw.qalbum.ui.anim.sharedAxisXEnter
@@ -87,6 +90,13 @@ fun CleanupScreen(
 ) {
     var page by remember { mutableStateOf(CleanupPage.Main) }
     var groupId by remember { mutableLongStateOf(0L) }
+    // 审核网格的滚动 / 筛选 / 排序 / 列数都提升到这里：进重复组详情再返回时不被 AnimatedContent 销毁而丢失。
+    // 筛选 / 排序用批次 id 作 key：同批次内增删图片保持，仅换新批次才回到默认。
+    val reviewGridState = rememberLazyGridState()
+    val reviewBatchId = viewModel.reviewBatch.collectAsState().value?.batch?.id
+    var reviewCategory by rememberSaveable(reviewBatchId) { mutableStateOf<String?>(null) }
+    var reviewSort by rememberSaveable(reviewBatchId) { mutableStateOf(ReviewSort.DATE_DESC) }
+    var reviewColumns by rememberSaveable { mutableIntStateOf(3) }
     val slideSpec = MaterialTheme.motionScheme.defaultSpatialSpec<IntOffset>()
     val fadeSpec = MaterialTheme.motionScheme.defaultEffectsSpec<Float>()
 
@@ -119,6 +129,13 @@ fun CleanupScreen(
             CleanupPage.Review -> CleanupReviewScreen(
                 contentPadding = contentPadding,
                 viewModel = viewModel,
+                gridState = reviewGridState,
+                category = reviewCategory,
+                sort = reviewSort,
+                columns = reviewColumns,
+                onCategoryChange = { reviewCategory = it },
+                onSortChange = { reviewSort = it },
+                onColumnsChange = { reviewColumns = it },
                 onBack = { page = CleanupPage.Main },
                 onOpenGroup = { gid -> groupId = gid; page = CleanupPage.Group },
             )

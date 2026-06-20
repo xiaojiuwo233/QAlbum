@@ -248,6 +248,20 @@ class SettingsViewModel(
         persist { settings.setReviewLimit(limit) }
     }
 
+    val cleanupAllDuplicates: StateFlow<Boolean> = settings.cleanupAllDuplicates
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    fun setCleanupAllDuplicates(enabled: Boolean) {
+        persist { settings.setCleanupAllDuplicates(enabled) }
+    }
+
+    val maxDuplicateGroupSize: StateFlow<Int> = settings.maxDuplicateGroupSize
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsRepository.DEFAULT_MAX_DUP_GROUP_SIZE)
+
+    fun setMaxDuplicateGroupSize(value: Int) {
+        persist { settings.setMaxDuplicateGroupSize(value) }
+    }
+
     // ---- 自动收藏配置（分析阶段，默认关闭，规则可自定义）----
 
     val autoFavoriteConfig: StateFlow<AutoFavoriteConfig> = settings.autoFavoriteConfig

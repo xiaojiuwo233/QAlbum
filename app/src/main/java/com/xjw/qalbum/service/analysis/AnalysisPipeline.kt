@@ -208,7 +208,7 @@ class AnalysisPipeline(
     private suspend fun runDuplicate() {
         _progress.value = AnalysisProgress(AnalysisPhase.DUPLICATE, 0, 0, msg = "聚类中…")
         imageDao.clearDuplicateAssignments()
-        duplicateDetector.recluster()
+        duplicateDetector.recluster(settings.maxDuplicateGroupSize.first())
         _progress.value = AnalysisProgress(AnalysisPhase.DUPLICATE, 1, 1, msg = "完成")
     }
 

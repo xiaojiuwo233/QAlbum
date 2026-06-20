@@ -552,6 +552,8 @@ fun CleanupSettingsScreen(
 ) {
     val config by viewModel.cleanupConfig.collectAsState()
     val reviewLimit by viewModel.reviewLimit.collectAsState()
+    val allDuplicates by viewModel.cleanupAllDuplicates.collectAsState()
+    val maxDupGroupSize by viewModel.maxDuplicateGroupSize.collectAsState()
     val activePreset = CleanupPreset.match(config)
 
     SettingsDetailScaffold(
@@ -587,6 +589,15 @@ fun CleanupSettingsScreen(
                     notify("已恢复默认 ${SettingsRepository.DEFAULT_REVIEW_LIMIT}")
                 }) { Text("默认 ${SettingsRepository.DEFAULT_REVIEW_LIMIT}") }
             }
+            SettingsSwitchRow(
+                title = "审核全部重复图片",
+                subtitle = "开启后把所有重复图一次性纳入审核（不受上面数量限制），适合一次清完大量重复；其它维度仍按数量",
+                checked = allDuplicates,
+                onCheckedChange = {
+                    viewModel.setCleanupAllDuplicates(it)
+                    notify(if (it) "已开启：审核纳入全部重复" else "已关闭")
+                },
+            )
         }
 
         SettingsSection(header = "快捷预设") {
@@ -610,7 +621,14 @@ fun CleanupSettingsScreen(
                 subtitle = "同组保留最优一张，其余建议清理",
                 enabled = config.duplicateEnabled,
                 onEnabledChange = viewModel::setDuplicateEnabled,
-            )
+            ) {
+                ThresholdSlider(
+                    value = maxDupGroupSize.toFloat(),
+                    valueRange = SettingsRepository.MIN_MAX_DUP_GROUP_SIZE.toFloat()..SettingsRepository.MAX_MAX_DUP_GROUP_SIZE.toFloat(),
+                    onChange = { viewModel.setMaxDuplicateGroupSize(it.toInt()) },
+                    format = { "视觉重复组最多 ${it.toInt()} 张，超出视为误聚丢弃（改后需重新查重）" },
+                )
+            }
             CleanupDimensionRow(
                 title = "表情包",
                 subtitle = "近似正方形的小图 / 动图，默认勾选清理",

@@ -25,8 +25,9 @@ class CleanupController(
         label: String,
         maxItems: Int = 200,
         oldestFirst: Boolean = true,
+        allDuplicates: Boolean = false,
     ): CleanupBatch =
-        recommender.generateBatch(config, label, maxItems, oldestFirst)
+        recommender.generateBatch(config, label, maxItems, oldestFirst, allDuplicates)
 
     suspend fun applyBatch(batchId: Long): Int {
         val candidates = cleanupDao.getCandidates(batchId)

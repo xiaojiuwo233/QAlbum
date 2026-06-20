@@ -135,7 +135,8 @@ class CleanupViewModel(
                 // 审核数量与顺序：遵守设置中的「每次审核数量」（项数）与分析顺序（早到晚/晚到早）
                 val maxItems = settings.reviewLimit.first()
                 val oldestFirst = settings.analysisOldestFirst.first()
-                val batch = cleanupController.generateBatch(config, label, maxItems, oldestFirst)
+                val allDuplicates = settings.cleanupAllDuplicates.first()
+                val batch = cleanupController.generateBatch(config, label, maxItems, oldestFirst, allDuplicates)
                 _lastBatch.value = batch
                 loadReviewBatch(batch)
                 onReady()
@@ -293,6 +294,30 @@ class CleanupViewModel(
                 tagDao.linkTag(ImageTagEntity(imageId = imageId, tagId = tag.id, source = "user"))
             }
             removeFromReview(imageId)
+        }
+    }
+
+    /** 审核页：批量保留选中的图（user_keep=true + 「用户保留」标签），并从审核列表移出 */
+    fun keepSelected(onDone: (Int) -> Unit = {}) {
+        viewModelScope.launch {
+            val ids = _selectedReviewDeleteIds.value
+            if (ids.isEmpty()) return@launch
+            _busy.value = true
+            try {
+                tagDao.insertTag(TagEntity(name = TAG_USER_KEEP, type = "user"))
+                val tag = tagDao.findByName(TAG_USER_KEEP)
+                ids.forEach { id ->
+                    imageRepository.setUserKeep(id, true)
+                    tag?.let { tagDao.linkTag(ImageTagEntity(imageId = id, tagId = it.id, source = "user")) }
+                }
+                _reviewBatch.value = _reviewBatch.value?.let { rb ->
+                    rb.copy(items = rb.items.mapNotNull { pruneReviewItem(it, ids) })
+                }
+                _selectedReviewDeleteIds.value = emptySet()
+                onDone(ids.size)
+            } finally {
+                _busy.value = false
+            }
         }
     }
 

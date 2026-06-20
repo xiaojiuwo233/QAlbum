@@ -16,7 +16,7 @@ import timber.log.Timber
  */
 class DuplicateDetector(private val imageDao: ImageDao) {
 
-    suspend fun recluster() {
+    suspend fun recluster(maxVisualGroupSize: Int = DuplicateClusterer.DEFAULT_MAX_VISUAL_GROUP) {
         val rows = imageDao.dedupProjection()
         if (rows.isEmpty()) {
             Timber.i("DuplicateDetector.recluster: nothing to cluster")
@@ -33,7 +33,7 @@ class DuplicateDetector(private val imageDao: ImageDao) {
             )
         }
         val startGroupId = imageDao.maxDuplicateGroupId() + 1
-        val assignments = DuplicateClusterer.cluster(items, startGroupId)
+        val assignments = DuplicateClusterer.cluster(items, startGroupId, maxVisualGroupSize = maxVisualGroupSize)
         imageDao.assignDuplicates(
             assignments.map { DuplicateAssignment(it.id, it.groupId, it.isBest) }
         )

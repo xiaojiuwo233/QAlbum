@@ -150,6 +150,22 @@ class SettingsRepository(private val context: Context) {
         ds.edit { it[Keys.REVIEW_LIMIT] = limit.coerceIn(MIN_REVIEW_LIMIT, MAX_REVIEW_LIMIT) }
     }
 
+    /** 审核时是否把所有重复图一次性纳入（不受「每次审核数量」限制），避免重复图分多批清不完 */
+    val cleanupAllDuplicates: Flow<Boolean> = ds.data.map { it[Keys.CLEANUP_ALL_DUPLICATES] ?: false }
+
+    suspend fun setCleanupAllDuplicates(enabled: Boolean) {
+        ds.edit { it[Keys.CLEANUP_ALL_DUPLICATES] = enabled }
+    }
+
+    /** 视觉重复组成员数上限：超过此数的视觉相似组视为误聚整组丢弃（精确 xxHash 重复不受限）。改后需重新查重。 */
+    val maxDuplicateGroupSize: Flow<Int> = ds.data.map {
+        (it[Keys.MAX_DUP_GROUP_SIZE] ?: DEFAULT_MAX_DUP_GROUP_SIZE).coerceIn(MIN_MAX_DUP_GROUP_SIZE, MAX_MAX_DUP_GROUP_SIZE)
+    }
+
+    suspend fun setMaxDuplicateGroupSize(value: Int) {
+        ds.edit { it[Keys.MAX_DUP_GROUP_SIZE] = value.coerceIn(MIN_MAX_DUP_GROUP_SIZE, MAX_MAX_DUP_GROUP_SIZE) }
+    }
+
     // ---- 图库页偏好（列数 / 排序 / 大图标记阈值） ----
 
     /** 图库每行图片数；与捏合缩放共用，范围 [MIN_GALLERY_COLUMNS, MAX_GALLERY_COLUMNS] */
@@ -228,6 +244,10 @@ class SettingsRepository(private val context: Context) {
         const val MIN_REVIEW_LIMIT = 20
         const val MAX_REVIEW_LIMIT = 5_000
 
+        const val DEFAULT_MAX_DUP_GROUP_SIZE = 20
+        const val MIN_MAX_DUP_GROUP_SIZE = 2
+        const val MAX_MAX_DUP_GROUP_SIZE = 500
+
         const val DEFAULT_AI_CONCURRENCY = 2
         const val MIN_AI_CONCURRENCY = 1
         const val MAX_AI_CONCURRENCY = 16
@@ -261,6 +281,8 @@ class SettingsRepository(private val context: Context) {
         val ANALYSIS_CONFIG = stringPreferencesKey("analysis_config")
         val ANALYSIS_OLDEST_FIRST = booleanPreferencesKey("analysis_oldest_first")
         val REVIEW_LIMIT = intPreferencesKey("review_limit")
+        val CLEANUP_ALL_DUPLICATES = booleanPreferencesKey("cleanup_all_duplicates")
+        val MAX_DUP_GROUP_SIZE = intPreferencesKey("max_dup_group_size")
 
         val GALLERY_COLUMNS = intPreferencesKey("gallery_columns")
         val GALLERY_SORT = stringPreferencesKey("gallery_sort")

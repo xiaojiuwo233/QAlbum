@@ -9,6 +9,7 @@ import androidx.compose.material.icons.outlined.Bookmark
 import androidx.compose.material.icons.outlined.Favorite
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.Share
+import androidx.compose.material.icons.outlined.SwapVert
 import androidx.compose.ui.graphics.vector.ImageVector
 import com.xjw.qalbum.service.cleanup.ExternalViewTarget
 import androidx.compose.foundation.background
@@ -31,6 +32,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
@@ -40,6 +42,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.RadioButtonUnchecked
@@ -87,9 +90,16 @@ import com.xjw.qalbum.ui.imageloading.ImageEntityModel
 
 /** 审核网格页（折叠重复组）：全屏、隐藏底部导航栏。 */
 @Composable
-fun CleanupReviewScreen(
+internal fun CleanupReviewScreen(
     contentPadding: PaddingValues,
     viewModel: CleanupViewModel,
+    gridState: LazyGridState,
+    category: String?,
+    sort: ReviewSort,
+    columns: Int,
+    onCategoryChange: (String?) -> Unit,
+    onSortChange: (ReviewSort) -> Unit,
+    onColumnsChange: (Int) -> Unit,
     onBack: () -> Unit,
     onOpenGroup: (Long) -> Unit,
 ) {
@@ -100,18 +110,18 @@ fun CleanupReviewScreen(
     val purgeProgress by viewModel.purgeProgress.collectAsState()
 
     val items = review?.items.orEmpty()
-    var category by rememberSaveable(items.size) { mutableStateOf<String?>(null) }
-    var columns by rememberSaveable { mutableIntStateOf(3) }
     var menuOpen by remember { mutableStateOf(false) }
     var showConfirm by remember { mutableStateOf(false) }
+    var showKeepConfirm by remember { mutableStateOf(false) }
     var previewId by remember { mutableStateOf<Long?>(null) }
 
     val countByReason = remember(items) {
         items.groupingBy { itemReason(it) }.eachCount()
     }
-    val visibleItems = remember(items, category) {
+    val filteredItems = remember(items, category) {
         if (category == null) items else items.filter { itemReason(it) == category }
     }
+    val visibleItems = remember(filteredItems, sort) { sortReviewItems(filteredItems, sort) }
     val selectedBytes = review?.selectedBytes(selectedIds) ?: 0L
 
     Scaffold(
@@ -122,9 +132,11 @@ fun CleanupReviewScreen(
                 totalItems = items.size,
                 category = category,
                 countByReason = countByReason,
+                sort = sort,
                 menuOpen = menuOpen,
                 onBack = onBack,
-                onSelectCategory = { category = it },
+                onSelectCategory = onCategoryChange,
+                onSelectSort = onSortChange,
                 onMenuOpenChange = { menuOpen = it },
                 onSelectAllVisible = { viewModel.selectReviewIds(deletableIds(visibleItems)) },
                 onClear = viewModel::clearReviewSelection,
@@ -138,6 +150,7 @@ fun CleanupReviewScreen(
                     selectedBytes = selectedBytes,
                     busy = busy,
                     onApply = { showConfirm = true },
+                    onKeep = { showKeepConfirm = true },
                 )
             }
         },
@@ -154,11 +167,12 @@ fun CleanupReviewScreen(
         }
 
         LazyVerticalGrid(
+            state = gridState,
             columns = GridCells.Fixed(columns),
             modifier = Modifier
                 .fillMaxSize()
                 .padding(top = topPadding.calculateTopPadding())
-                .reviewPinchColumns(columns) { columns = it },
+                .reviewPinchColumns(columns) { onColumnsChange(it) },
             contentPadding = PaddingValues(
                 start = 10.dp,
                 end = 10.dp,
@@ -182,6 +196,7 @@ fun CleanupReviewScreen(
                         item = item,
                         selectedCount = item.members.count { it.id in selectedIds },
                         onOpen = { onOpenGroup(item.groupId) },
+                        onLongPress = { viewModel.selectReviewIds(item.members.map { m -> m.id }) },
                     )
                 }
             }
@@ -226,6 +241,23 @@ fun CleanupReviewScreen(
         )
     }
 
+    if (showKeepConfirm) {
+        AlertDialog(
+            onDismissRequest = { showKeepConfirm = false },
+            title = { Text("保留这些图片？") },
+            text = { Text("将把选中的 ${selectedIds.size} 张标记为「保留」，之后不再出现在审核中。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showKeepConfirm = false
+                    viewModel.keepSelected { count ->
+                        Toast.makeText(context, "已保留 $count 张", Toast.LENGTH_SHORT).show()
+                    }
+                }) { Text("保留") }
+            },
+            dismissButton = { TextButton(onClick = { showKeepConfirm = false }) { Text("取消") } },
+        )
+    }
+
     purgeProgress?.let { PurgeProgressDialog(it) }
 }
 
@@ -236,9 +268,11 @@ private fun ReviewTopBar(
     totalItems: Int,
     category: String?,
     countByReason: Map<String, Int>,
+    sort: ReviewSort,
     menuOpen: Boolean,
     onBack: () -> Unit,
     onSelectCategory: (String?) -> Unit,
+    onSelectSort: (ReviewSort) -> Unit,
     onMenuOpenChange: (Boolean) -> Unit,
     onSelectAllVisible: () -> Unit,
     onClear: () -> Unit,
@@ -265,6 +299,7 @@ private fun ReviewTopBar(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                ReviewSortButton(sort = sort, onSelectSort = onSelectSort)
                 Box {
                     IconButton(onClick = { onMenuOpenChange(true) }) {
                         Icon(Icons.Outlined.MoreVert, contentDescription = "更多")
@@ -308,22 +343,54 @@ private fun ReviewTopBar(
 }
 
 @Composable
+private fun ReviewSortButton(sort: ReviewSort, onSelectSort: (ReviewSort) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { open = true }) {
+            Icon(Icons.Outlined.SwapVert, contentDescription = "排序")
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            ReviewSort.entries.forEach { s ->
+                DropdownMenuItem(
+                    text = { Text(s.label) },
+                    onClick = { onSelectSort(s); open = false },
+                    trailingIcon = if (s == sort) {
+                        { Icon(Icons.Outlined.Check, contentDescription = null) }
+                    } else {
+                        null
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun ReviewBottomBar(
     selectedCount: Int,
     selectedBytes: Long,
     busy: Boolean,
     onApply: () -> Unit,
+    onKeep: () -> Unit,
 ) {
     Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 3.dp, shadowElevation = 8.dp) {
         Row(
-            modifier = Modifier.fillMaxWidth().navigationBarsPadding().padding(16.dp),
+            modifier = Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 12.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(
-                "已选 $selectedCount 张 · ${formatBytes(selectedBytes)}",
+                "已选 $selectedCount · ${formatBytes(selectedBytes)}",
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
+            OutlinedButton(onClick = onKeep, enabled = selectedCount > 0 && !busy) {
+                Icon(Icons.Outlined.Bookmark, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.size(6.dp))
+                Text("保留")
+            }
             FilledTonalButton(onClick = onApply, enabled = selectedCount > 0 && !busy) {
                 Icon(Icons.Outlined.Delete, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.size(6.dp))
@@ -370,6 +437,7 @@ private fun GroupTile(
     item: ReviewItem.Group,
     selectedCount: Int,
     onOpen: () -> Unit,
+    onLongPress: () -> Unit,
 ) {
     val context = LocalContext.current
     val keeper = item.members.firstOrNull { it.id == item.keeperId } ?: item.members.first()
@@ -379,7 +447,7 @@ private fun GroupTile(
             .aspectRatio(1f)
             .clip(RoundedCornerShape(10.dp))
             .background(MaterialTheme.colorScheme.surfaceContainerHighest)
-            .clickable(onClick = onOpen),
+            .combinedClickable(onClick = onOpen, onLongClick = onLongPress),
     ) {
         AsyncImage(
             model = ImageRequest.Builder(context).data(ImageEntityModel(keeper)).crossfade(true).build(),
@@ -568,10 +636,12 @@ private fun GroupMemberTile(
         if (selected) {
             Box(Modifier.matchParentSize().background(MaterialTheme.colorScheme.error.copy(alpha = 0.22f)))
         }
+        // 建议标签放右上（醒目），勾选圈移到左上，尺寸信息留左下，三者互不重叠
         TileBadge(
             text = if (isKeeper) "建议保留" else "建议删除",
-            modifier = Modifier.align(Alignment.BottomStart),
+            modifier = Modifier.align(Alignment.TopEnd),
         )
+        SelectionCircle(selected = selected, modifier = Modifier.align(Alignment.TopStart))
         Text(
             imageMeta(image),
             style = MaterialTheme.typography.labelSmall,
@@ -579,13 +649,12 @@ private fun GroupMemberTile(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier
-                .align(Alignment.BottomEnd)
+                .align(Alignment.BottomStart)
                 .padding(5.dp)
                 .clip(RoundedCornerShape(999.dp))
                 .background(Color.Black.copy(alpha = 0.55f))
                 .padding(horizontal = 8.dp, vertical = 3.dp),
         )
-        SelectionCircle(selected = selected, modifier = Modifier.align(Alignment.TopEnd))
     }
 }
 
@@ -728,6 +797,38 @@ internal fun shareChooser(target: ExternalViewTarget): Intent =
         },
         "分享图片",
     )
+
+/** 审核网格排序方式（类似图库页）。 */
+internal enum class ReviewSort(val label: String) {
+    DATE_DESC("时间（新→旧）"),
+    DATE_ASC("时间（旧→新）"),
+    SIZE_DESC("大小（大→小）"),
+    COUNT_DESC("数量（多→少）"),
+}
+
+private fun sortReviewItems(items: List<ReviewItem>, sort: ReviewSort): List<ReviewItem> = when (sort) {
+    ReviewSort.DATE_DESC -> items.sortedByDescending { itemMtime(it) }
+    ReviewSort.DATE_ASC -> items.sortedBy { itemMtime(it) }
+    ReviewSort.SIZE_DESC -> items.sortedByDescending { itemSize(it) }
+    ReviewSort.COUNT_DESC -> items.sortedByDescending { itemCount(it) }
+}
+
+/** 审核项「数量」：单图按 1、重复组按成员数 —— 用于「数量多→少」排序，优先清理大重复组。 */
+private fun itemCount(item: ReviewItem): Int = when (item) {
+    is ReviewItem.Single -> 1
+    is ReviewItem.Group -> item.members.size
+}
+
+private fun itemMtime(item: ReviewItem): Long = when (item) {
+    is ReviewItem.Single -> item.image.mtime
+    is ReviewItem.Group -> (item.members.firstOrNull { it.id == item.keeperId } ?: item.members.first()).mtime
+}
+
+/** 单图按自身大小、重复组按组内总大小（更能反映清理收益）排序。 */
+private fun itemSize(item: ReviewItem): Long = when (item) {
+    is ReviewItem.Single -> item.image.size
+    is ReviewItem.Group -> item.members.sumOf { it.size }
+}
 
 /** 审核项归属的筛选分类名：单图用维度，重复组统一为「重复」。 */
 private fun itemReason(item: ReviewItem): String = when (item) {

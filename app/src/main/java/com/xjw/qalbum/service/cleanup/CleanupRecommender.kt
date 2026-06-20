@@ -43,7 +43,11 @@ class CleanupRecommender(
         label: String,
         maxItems: Int = DEFAULT_MAX_ITEMS,
         oldestFirst: Boolean = true,
+        allDuplicates: Boolean = false,
     ): CleanupBatch {
+        if (allDuplicates && config.duplicateEnabled) {
+            return generateAllDuplicatesBatch(config, label, maxItems, oldestFirst)
+        }
         val poolLimit = (maxItems.toLong() * POOL_FACTOR)
             .coerceIn(maxItems.toLong(), POOL_HARD_CAP)
             .toInt()
@@ -146,6 +150,117 @@ class CleanupRecommender(
         cleanupDao.insertCandidates(candidateEntities)
         Timber.i("CleanupRecommender: batch $batchId, ${items.size} items / ${candidateEntities.size} candidates ($label)")
 
+        return CleanupBatch(batchId, report, items)
+    }
+
+    /**
+     * 「审核全部重复」：所有重复组一次性纳入（不受 [maxItems] 限制），避免同种重复图分多批、清完又冒出来；
+     * 其它维度（低分/模糊/表情包等）仍按 [maxItems] 限量。
+     */
+    private suspend fun generateAllDuplicatesBatch(
+        config: CleanupConfig,
+        label: String,
+        maxItems: Int,
+        oldestFirst: Boolean,
+    ): CleanupBatch {
+        // 1) 所有重复组（全量，保持组首次出现顺序）
+        val dupRows = imageDao.allDuplicateRows(oldestFirst)
+        val seenGroups = LinkedHashSet<Long>()
+        val dupGroupSize = HashMap<Long, Long>()
+        dupRows.forEach {
+            seenGroups.add(it.duplicateGroupId)
+            dupGroupSize[it.duplicateGroupId] = (dupGroupSize[it.duplicateGroupId] ?: 0L) + it.size
+        }
+        val dupItems = seenGroups.map { ReviewBatchItem.Group(it) }
+
+        // 2) 其它维度（排除重复组成员），限量 maxItems
+        val poolLimit = (maxItems.toLong() * POOL_FACTOR).coerceIn(maxItems.toLong(), POOL_HARD_CAP).toInt()
+        val pool = imageDao.cleanupCandidatePool(
+            corruptEnabled = config.corruptEnabled,
+            blankEnabled = config.blankEnabled,
+            duplicateEnabled = false, // 重复已在上面全量处理，这里只取其它维度
+            lowResEnabled = config.lowResolutionEnabled,
+            lowResMaxPixels = config.lowResolutionMaxPixels,
+            blurEnabled = config.blurEnabled,
+            blurMaxScore = config.blurMaxScore,
+            tinyEnabled = config.tinyFileEnabled,
+            tinyMaxBytes = config.tinyFileMaxBytes,
+            emojiEnabled = config.emojiEnabled,
+            emojiSquareRatio = config.emojiSquareRatio,
+            emojiMaxSide = config.emojiMaxSide,
+            emojiMinSide = config.emojiMinSide,
+            oldestFirst = oldestFirst,
+            poolLimit = poolLimit,
+        )
+        val otherClassified = pool
+            .filter { it.duplicateGroupId == null } // 属重复组的图归重复处理，避免一图两处
+            .mapNotNull { row -> CleanupRules.classify(row, config)?.let { reason -> row to reason } }
+        val otherSizeById = pool.associate { it.id to it.size }
+        val otherItems = ReviewAggregator.aggregate(
+            otherClassified.map { (row, reason) -> ReviewAggregator.Candidate(row.id, null, reason) },
+            maxItems,
+        )
+
+        val items = dupItems + otherItems
+
+        val reasonCount = LinkedHashMap<String, Int>()
+        val reasonSize = HashMap<String, Long>()
+        var totalSize = 0L
+        fun tally(reason: String, size: Long) {
+            reasonCount[reason] = (reasonCount[reason] ?: 0) + 1
+            reasonSize[reason] = (reasonSize[reason] ?: 0L) + size
+            totalSize += size
+        }
+        dupItems.forEach { tally(CleanupRules.REASON_DUPLICATE, dupGroupSize[it.groupId] ?: 0L) }
+        otherItems.forEach { item ->
+            if (item is ReviewBatchItem.Single) tally(item.reason, otherSizeById[item.imageId] ?: 0L)
+        }
+        val report = RiskReport(
+            totalCount = items.size,
+            totalSize = totalSize,
+            byReason = reasonCount.mapValues { (r, c) -> ReasonGroup(c, reasonSize[r] ?: 0L) },
+        )
+
+        val batchId = cleanupDao.createBatch(
+            CleanupBatchEntity(
+                strategy = label,
+                totalCount = items.size,
+                totalSize = totalSize,
+                status = "pending",
+                createdAt = System.currentTimeMillis(),
+            )
+        )
+        // 落库候选（历史）：每个重复组留一个代表（避免几万条），其它维度单图各一条
+        val candidateEntities = buildList {
+            val groupSeed = HashMap<Long, Long>()
+            dupRows.forEach { row -> groupSeed.getOrPut(row.duplicateGroupId) { row.id } }
+            groupSeed.values.forEach { id ->
+                add(
+                    CleanupCandidateEntity(
+                        batchId = batchId,
+                        imageId = id,
+                        reason = CleanupRules.REASON_DUPLICATE,
+                        riskLevel = "safe",
+                        score = 0f,
+                    )
+                )
+            }
+            otherItems.forEach { item ->
+                if (item is ReviewBatchItem.Single) {
+                    add(
+                        CleanupCandidateEntity(
+                            batchId = batchId,
+                            imageId = item.imageId,
+                            reason = item.reason,
+                            riskLevel = if (isRisky(item.reason)) "high" else "safe",
+                            score = 0f,
+                        )
+                    )
+                }
+            }
+        }
+        cleanupDao.insertCandidates(candidateEntities)
+        Timber.i("CleanupRecommender: allDuplicates batch $batchId, ${dupItems.size} dup groups + ${otherItems.size} others ($label)")
         return CleanupBatch(batchId, report, items)
     }
 

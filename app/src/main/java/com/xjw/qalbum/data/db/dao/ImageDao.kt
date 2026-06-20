@@ -582,6 +582,17 @@ interface ImageDao {
         items.forEach { assignDuplicate(it.id, it.groupId, it.isBest) }
     }
 
+    /** 所有 active 重复图（属于某重复组）；「审核全部重复」一次性纳入用，窄投影、无 LIMIT。 */
+    @Query("""
+        SELECT id, duplicate_group_id AS duplicateGroupId, size
+        FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb'
+          AND is_protected = 0 AND (user_keep IS NULL OR user_keep = 0)
+          AND duplicate_group_id IS NOT NULL
+        ORDER BY (CASE WHEN :oldestFirst THEN mtime ELSE -mtime END) ASC
+    """)
+    suspend fun allDuplicateRows(oldestFirst: Boolean): List<DuplicateGroupRow>
+
     @Query("UPDATE images SET delete_score = :score WHERE id = :id")
     suspend fun updateDeleteScore(id: Long, score: Float)
 
@@ -844,3 +855,6 @@ data class DedupRow(
 
 /** 一条重复分配结果（由 [DuplicateClusterer] 产出，[ImageDao.assignDuplicates] 批量写回） */
 data class DuplicateAssignment(val id: Long, val groupId: Long, val isBest: Boolean)
+
+/** 重复图最小投影（「审核全部重复」按组聚合用） */
+data class DuplicateGroupRow(val id: Long, val duplicateGroupId: Long, val size: Long)
