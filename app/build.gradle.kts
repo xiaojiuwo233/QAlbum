@@ -20,6 +20,33 @@ fun signingProp(key: String, env: String): String? =
 val releaseStorePath = signingProp("storeFile", "KEYSTORE_FILE")
 val hasReleaseSigning = releaseStorePath != null && rootProject.file(releaseStorePath).exists()
 
+// ===== 版本号：基于 git =====
+// versionName = <baseVersionName>.<短hash>（如 0.2.0.a1b2c3d）；versionCode = 提交总数。
+// 项目开启了 configuration cache，用 providers.exec 取 git 信息（缓存友好）；
+// 并读取 .git/HEAD 与 reflog 作为配置输入，使每次提交后缓存失效、hash/count 重新计算
+// （否则命中旧缓存会导致 hash 不刷新）。git worktree/submodule 下 .git 为文件、
+// 此锚点会失效，属可接受退化；CI 全新 checkout 不受影响。
+val baseVersionName = "0.2.0"
+
+@Suppress("UNUSED_VARIABLE")
+val gitStateKey = listOf(".git/HEAD", ".git/logs/HEAD").joinToString("|") {
+    providers.fileContents(rootProject.layout.projectDirectory.file(it)).asText.orNull.orEmpty()
+}
+
+fun gitText(vararg args: String): String? = try {
+    val out = providers.exec {
+        workingDir = rootDir
+        isIgnoreExitValue = true
+        commandLine("git", *args)
+    }
+    if (out.result.get().exitValue == 0) out.standardOutput.asText.get().trim().ifBlank { null } else null
+} catch (_: Exception) {
+    null // git 不在 PATH 或非 git 仓库：回退默认值
+}
+
+val gitShortHash: String = gitText("rev-parse", "HEAD")?.take(7) ?: "nogit"
+val gitCommitCount: Int = gitText("rev-list", "--count", "HEAD")?.toIntOrNull() ?: 1
+
 android {
     namespace = "com.xjw.qalbum"
     compileSdk = libs.versions.compileSdk.get().toInt()
@@ -28,8 +55,8 @@ android {
         applicationId = "com.xjw.qalbum"
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = gitCommitCount
+        versionName = "$baseVersionName.$gitShortHash"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true

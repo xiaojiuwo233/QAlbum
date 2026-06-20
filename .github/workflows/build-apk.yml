@@ -27,8 +27,12 @@ jobs:
 
     steps:
       # 1. 拉取源码
+      # fetch-depth: 0 拉取完整历史；否则默认浅克隆只有 1 个提交，
+      # versionCode = git 提交总数会退化成 1
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # 2. 配置 JDK 17（项目 compileOptions / kotlinOptions 均为 17）
       - name: Set up JDK 17
