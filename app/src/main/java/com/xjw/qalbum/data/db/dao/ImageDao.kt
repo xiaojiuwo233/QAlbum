@@ -717,9 +717,38 @@ interface ImageDao {
         FROM images
         WHERE status = 'active' AND source_type <> 'chatthumb'
           AND is_protected = 0 AND (user_keep IS NULL OR user_keep = 0)
+          AND (
+                (:corruptEnabled AND is_corrupt = 1)
+             OR (:blankEnabled AND is_blank = 1)
+             OR (:duplicateEnabled AND duplicate_group_id IS NOT NULL)
+             OR (:lowResEnabled AND width > 0 AND height > 0 AND width * height < :lowResMaxPixels)
+             OR (:blurEnabled AND blur_score IS NOT NULL AND blur_score < :blurMaxScore)
+             OR (:tinyEnabled AND size >= 1 AND size < :tinyMaxBytes)
+             OR (:emojiEnabled AND width > 0 AND height > 0
+                              AND CAST(MIN(width, height) AS REAL) / MAX(width, height) >= :emojiSquareRatio
+                              AND MAX(width, height) <= :emojiMaxSide
+                              AND MIN(width, height) >= :emojiMinSide)
+          )
         ORDER BY (CASE WHEN :oldestFirst THEN mtime ELSE -mtime END) ASC
+        LIMIT :poolLimit
     """)
-    suspend fun cleanupCandidatePool(oldestFirst: Boolean): List<CleanupSignalRow>
+    suspend fun cleanupCandidatePool(
+        corruptEnabled: Boolean,
+        blankEnabled: Boolean,
+        duplicateEnabled: Boolean,
+        lowResEnabled: Boolean,
+        lowResMaxPixels: Long,
+        blurEnabled: Boolean,
+        blurMaxScore: Float,
+        tinyEnabled: Boolean,
+        tinyMaxBytes: Long,
+        emojiEnabled: Boolean,
+        emojiSquareRatio: Float,
+        emojiMaxSide: Int,
+        emojiMinSide: Int,
+        oldestFirst: Boolean,
+        poolLimit: Int,
+    ): List<CleanupSignalRow>
 
     // ---- 按标签筛选（标签管理页）----
 

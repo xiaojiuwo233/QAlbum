@@ -28,6 +28,10 @@ data class CleanupConfig(
     val tinyFileMaxBytes: Long = DEFAULT_TINY_FILE_MAX_BYTES,
     val blankEnabled: Boolean = true,
     val corruptEnabled: Boolean = true,
+    val emojiEnabled: Boolean = true,
+    val emojiSquareRatio: Float = DEFAULT_EMOJI_SQUARE_RATIO,
+    val emojiMaxSide: Int = DEFAULT_EMOJI_MAX_SIDE,
+    val emojiMinSide: Int = DEFAULT_EMOJI_MIN_SIDE,
 ) {
     companion object {
         // 默认门限（同时也是「平衡」档采用的门限）
@@ -48,6 +52,18 @@ data class CleanupConfig(
         const val MIN_TINY_FILE_MAX_BYTES = 4_096L          // 4 KB
         const val MAX_TINY_FILE_MAX_BYTES = 307_200L        // 300 KB
 
+        // 表情包门限：近似正方形（短边/长边 ≥ ratio）+ 长边上限 + 短边下限。
+        // 覆盖样本 240² / 515×524 / 570×540 / 640² / 716²；挡住 1080² 等正方形照片。
+        const val DEFAULT_EMOJI_SQUARE_RATIO = 0.90f
+        const val DEFAULT_EMOJI_MAX_SIDE = 768
+        const val DEFAULT_EMOJI_MIN_SIDE = 64
+        const val MIN_EMOJI_SQUARE_RATIO = 0.70f
+        const val MAX_EMOJI_SQUARE_RATIO = 0.99f
+        const val MIN_EMOJI_MAX_SIDE = 256
+        const val MAX_EMOJI_MAX_SIDE = 1024
+        const val MIN_EMOJI_MIN_SIDE = 16
+        const val MAX_EMOJI_MIN_SIDE = 256
+
         /** 保守：只清理高置信度类别（重复 / 损坏 / 空白），不碰低分辨率 / 模糊 / 极小文件 */
         val CONSERVATIVE = CleanupConfig(
             duplicateEnabled = true,
@@ -59,12 +75,14 @@ data class CleanupConfig(
             tinyFileMaxBytes = DEFAULT_TINY_FILE_MAX_BYTES,
             blankEnabled = true,
             corruptEnabled = true,
+            emojiEnabled = false,
         )
 
-        /** 平衡（默认）：在保守基础上加入低分辨率 + 模糊，覆盖大多数明显多余的图 */
+        /** 平衡（默认）：在保守基础上加入低分辨率 + 模糊 + 表情包，覆盖大多数明显多余的图 */
         val BALANCED = CONSERVATIVE.copy(
             lowResolutionEnabled = true,
             blurEnabled = true,
+            emojiEnabled = true,
         )
 
         /** 激进：全维度开启，门限放宽，需仔细审核 */
@@ -78,6 +96,7 @@ data class CleanupConfig(
             tinyFileMaxBytes = AGGRESSIVE_TINY_FILE_MAX_BYTES,
             blankEnabled = true,
             corruptEnabled = true,
+            emojiEnabled = true,
         )
 
         /** 首次使用时的默认配置 = 平衡 */

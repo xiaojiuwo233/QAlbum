@@ -556,9 +556,10 @@ private fun PipelineRing(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Text(
-            text = "$done/$total",
+            text = "${compactCount(done)}/${compactCount(total)}",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+            maxLines = 1,
         )
     }
 }
@@ -795,7 +796,18 @@ private fun formatCount(n: Int): String = when {
     else -> n.toString()
 }
 
+/**
+ * 流水线进度文本（done/total 并排）专用的紧凑计数：尽量窄，避免在 72.dp 环宽内换行。
+ * 100万+ 用整数万（如 200万）、1万~100万 用一位小数万（如 20.7万）、1万以下原样。
+ */
+private fun compactCount(n: Int): String = when {
+    n >= 1_000_000 -> "${n / 10_000}万"
+    n >= 10_000 -> "%.1f万".format(n / 10_000f)
+    else -> n.toString()
+}
+
 private fun statusText(running: Boolean, progress: ScanProgress?): String = when (progress) {
+    is ScanProgress.Cancelled -> "已取消"
     is ScanProgress.Failed -> "失败：${progress.reason}"
     is ScanProgress.Done -> "完成，新增/更新 ${progress.total} 张"
     is ScanProgress.Indexing -> "正在扫描目录 ${progress.processed}/${progress.total}"

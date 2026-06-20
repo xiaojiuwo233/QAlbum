@@ -1,0 +1,628 @@
+package com.xjw.qalbum.ui.cleanup
+
+import android.widget.Toast
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.MoreVert
+import androidx.compose.material.icons.outlined.RadioButtonUnchecked
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import coil3.compose.AsyncImage
+import coil3.request.ImageRequest
+import coil3.request.crossfade
+import com.xjw.qalbum.data.db.entity.ImageEntity
+import com.xjw.qalbum.service.cleanup.CleanupRules
+import com.xjw.qalbum.ui.imageloading.ImageEntityModel
+
+/** 审核网格页（折叠重复组）：全屏、隐藏底部导航栏。 */
+@Composable
+fun CleanupReviewScreen(
+    contentPadding: PaddingValues,
+    viewModel: CleanupViewModel,
+    onBack: () -> Unit,
+    onOpenGroup: (Long) -> Unit,
+) {
+    val context = LocalContext.current
+    val review by viewModel.reviewBatch.collectAsState()
+    val selectedIds by viewModel.selectedReviewDeleteIds.collectAsState()
+    val busy by viewModel.busy.collectAsState()
+    val purgeProgress by viewModel.purgeProgress.collectAsState()
+
+    val items = review?.items.orEmpty()
+    var category by rememberSaveable(items.size) { mutableStateOf<String?>(null) }
+    var columns by rememberSaveable { mutableIntStateOf(3) }
+    var menuOpen by remember { mutableStateOf(false) }
+    var showConfirm by remember { mutableStateOf(false) }
+    var preview by remember { mutableStateOf<ImageEntity?>(null) }
+
+    val countByReason = remember(items) {
+        items.groupingBy { itemReason(it) }.eachCount()
+    }
+    val visibleItems = remember(items, category) {
+        if (category == null) items else items.filter { itemReason(it) == category }
+    }
+    val selectedBytes = review?.selectedBytes(selectedIds) ?: 0L
+
+    Scaffold(
+        topBar = {
+            ReviewTopBar(
+                selectedCount = selectedIds.size,
+                selectedBytes = selectedBytes,
+                totalItems = items.size,
+                category = category,
+                countByReason = countByReason,
+                menuOpen = menuOpen,
+                onBack = onBack,
+                onSelectCategory = { category = it },
+                onMenuOpenChange = { menuOpen = it },
+                onSelectAllVisible = { viewModel.selectReviewIds(deletableIds(visibleItems)) },
+                onClear = viewModel::clearReviewSelection,
+                onRestoreSuggested = viewModel::restoreSuggestedSelection,
+            )
+        },
+        bottomBar = {
+            if (selectedIds.isNotEmpty()) {
+                ReviewBottomBar(
+                    selectedCount = selectedIds.size,
+                    selectedBytes = selectedBytes,
+                    busy = busy,
+                    onApply = { showConfirm = true },
+                )
+            }
+        },
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+    ) { topPadding ->
+        if (items.isEmpty()) {
+            Box(
+                modifier = Modifier.fillMaxSize().padding(top = topPadding.calculateTopPadding()),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("没有需要审核的清理项", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            return@Scaffold
+        }
+
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(columns),
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(top = topPadding.calculateTopPadding())
+                .reviewPinchColumns(columns) { columns = it },
+            contentPadding = PaddingValues(
+                start = 10.dp,
+                end = 10.dp,
+                top = 10.dp,
+                bottom = contentPadding.calculateBottomPadding() + 16.dp,
+            ),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            items(visibleItems, key = { it.itemKey }) { item ->
+                when (item) {
+                    is ReviewItem.Single -> SingleTile(
+                        item = item,
+                        selected = item.image.id in selectedIds,
+                        onToggle = { viewModel.setReviewItemSelected(item.image.id, item.image.id !in selectedIds) },
+                        onLongPress = { preview = item.image },
+                    )
+
+                    is ReviewItem.Group -> GroupTile(
+                        item = item,
+                        selectedCount = item.members.count { it.id in selectedIds },
+                        onOpen = { onOpenGroup(item.groupId) },
+                    )
+                }
+            }
+        }
+    }
+
+    preview?.let { image ->
+        ReviewPreviewDialog(image = image, onClose = { preview = null })
+    }
+
+    if (showConfirm) {
+        AlertDialog(
+            onDismissRequest = { showConfirm = false },
+            title = { Text("移入回收站？") },
+            text = {
+                Text(
+                    "本次将清理 ${selectedIds.size} 张，共 ${formatBytes(selectedBytes)}。移入回收站后仍可恢复。",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showConfirm = false
+                    viewModel.applyReviewSelection { count ->
+                        Toast.makeText(context, "已移入回收站 $count 张", Toast.LENGTH_SHORT).show()
+                        onBack()
+                    }
+                }) { Text("移入回收站") }
+            },
+            dismissButton = { TextButton(onClick = { showConfirm = false }) { Text("取消") } },
+        )
+    }
+
+    purgeProgress?.let { PurgeProgressDialog(it) }
+}
+
+@Composable
+private fun ReviewTopBar(
+    selectedCount: Int,
+    selectedBytes: Long,
+    totalItems: Int,
+    category: String?,
+    countByReason: Map<String, Int>,
+    menuOpen: Boolean,
+    onBack: () -> Unit,
+    onSelectCategory: (String?) -> Unit,
+    onMenuOpenChange: (Boolean) -> Unit,
+    onSelectAllVisible: () -> Unit,
+    onClear: () -> Unit,
+    onRestoreSuggested: () -> Unit,
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 2.dp,
+        shadowElevation = 2.dp,
+    ) {
+        Column(modifier = Modifier.statusBarsPadding()) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(start = 4.dp, top = 6.dp, end = 4.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
+                }
+                Column(modifier = Modifier.weight(1f).padding(start = 4.dp)) {
+                    Text("审核清理", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        if (selectedCount > 0) "已选 $selectedCount 张 · ${formatBytes(selectedBytes)}" else "点图勾选，重复组点开挑选",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Box {
+                    IconButton(onClick = { onMenuOpenChange(true) }) {
+                        Icon(Icons.Outlined.MoreVert, contentDescription = "更多")
+                    }
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { onMenuOpenChange(false) }) {
+                        DropdownMenuItem(
+                            text = { Text(if (category == null) "全选" else "全选「$category」") },
+                            onClick = { onSelectAllVisible(); onMenuOpenChange(false) },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("恢复建议预选") },
+                            onClick = { onRestoreSuggested(); onMenuOpenChange(false) },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("全不选") },
+                            onClick = { onClear(); onMenuOpenChange(false) },
+                        )
+                    }
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 12.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                FilterChip(
+                    selected = category == null,
+                    onClick = { onSelectCategory(null) },
+                    label = { Text("全部 $totalItems") },
+                )
+                countByReason.entries.sortedByDescending { it.value }.forEach { (reason, count) ->
+                    FilterChip(
+                        selected = category == reason,
+                        onClick = { onSelectCategory(reason) },
+                        label = { Text("$reason $count") },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReviewBottomBar(
+    selectedCount: Int,
+    selectedBytes: Long,
+    busy: Boolean,
+    onApply: () -> Unit,
+) {
+    Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 3.dp, shadowElevation = 8.dp) {
+        Row(
+            modifier = Modifier.fillMaxWidth().navigationBarsPadding().padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                "已选 $selectedCount 张 · ${formatBytes(selectedBytes)}",
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f),
+            )
+            FilledTonalButton(onClick = onApply, enabled = selectedCount > 0 && !busy) {
+                Icon(Icons.Outlined.Delete, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.size(6.dp))
+                Text("移入回收站")
+            }
+        }
+    }
+}
+
+/** 单图审核格：点击切换勾选、长按全屏预览。 */
+@Composable
+private fun SingleTile(
+    item: ReviewItem.Single,
+    selected: Boolean,
+    onToggle: () -> Unit,
+    onLongPress: () -> Unit,
+) {
+    val context = LocalContext.current
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .aspectRatio(1f)
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+            .combinedClickable(onClick = onToggle, onLongClick = onLongPress),
+    ) {
+        AsyncImage(
+            model = ImageRequest.Builder(context).data(ImageEntityModel(item.image)).crossfade(true).build(),
+            contentDescription = item.image.filename,
+            contentScale = ContentScale.Fit,
+            modifier = Modifier.fillMaxSize(),
+        )
+        if (selected) {
+            Box(Modifier.matchParentSize().background(MaterialTheme.colorScheme.error.copy(alpha = 0.20f)))
+        }
+        TileBadge(text = item.reason, modifier = Modifier.align(Alignment.BottomStart))
+        SelectionCircle(selected = selected, modifier = Modifier.align(Alignment.TopEnd))
+    }
+}
+
+/** 重复组折叠格：代表图（保留图）+ 「重复×N」+「已选 M」角标，点击进入组详情。 */
+@Composable
+private fun GroupTile(
+    item: ReviewItem.Group,
+    selectedCount: Int,
+    onOpen: () -> Unit,
+) {
+    val context = LocalContext.current
+    val keeper = item.members.firstOrNull { it.id == item.keeperId } ?: item.members.first()
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .aspectRatio(1f)
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+            .clickable(onClick = onOpen),
+    ) {
+        AsyncImage(
+            model = ImageRequest.Builder(context).data(ImageEntityModel(keeper)).crossfade(true).build(),
+            contentDescription = "重复组 ${item.groupId}",
+            contentScale = ContentScale.Fit,
+            modifier = Modifier.fillMaxSize(),
+        )
+        TileBadge(text = "重复 ×${item.members.size}", modifier = Modifier.align(Alignment.BottomStart))
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(5.dp)
+                .clip(RoundedCornerShape(999.dp))
+                .background(
+                    if (selectedCount > 0) MaterialTheme.colorScheme.error else Color.Black.copy(alpha = 0.45f),
+                )
+                .padding(horizontal = 8.dp, vertical = 3.dp),
+        ) {
+            Text(
+                if (selectedCount > 0) "已选 $selectedCount" else "点开挑选",
+                style = MaterialTheme.typography.labelSmall,
+                color = Color.White,
+            )
+        }
+    }
+}
+
+@Composable
+private fun TileBadge(text: String, modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .padding(5.dp)
+            .clip(RoundedCornerShape(999.dp))
+            .background(Color.Black.copy(alpha = 0.55f))
+            .padding(horizontal = 8.dp, vertical = 3.dp),
+    ) {
+        Text(text, style = MaterialTheme.typography.labelSmall, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+@Composable
+private fun SelectionCircle(selected: Boolean, modifier: Modifier = Modifier) {
+    Icon(
+        if (selected) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
+        contentDescription = null,
+        modifier = modifier
+            .padding(5.dp)
+            .size(22.dp)
+            .clip(CircleShape)
+            .background(if (selected) MaterialTheme.colorScheme.error else Color.Black.copy(alpha = 0.36f)),
+        tint = Color.White,
+    )
+}
+
+/** 重复组详情页：组内大图对比、逐张勾选，支持「全部删除 / 仅保留 1 张 / 全部保留」。 */
+@Composable
+fun CleanupReviewGroupScreen(
+    groupId: Long,
+    viewModel: CleanupViewModel,
+    onBack: () -> Unit,
+) {
+    val review by viewModel.reviewBatch.collectAsState()
+    val selectedIds by viewModel.selectedReviewDeleteIds.collectAsState()
+    val group = review?.items?.filterIsInstance<ReviewItem.Group>()?.firstOrNull { it.groupId == groupId }
+    var preview by remember { mutableStateOf<ImageEntity?>(null) }
+
+    if (group == null) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("重复组已处理", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        return
+    }
+
+    val memberIds = group.members.map { it.id }
+    val nonKeeperIds = memberIds.filter { it != group.keeperId }
+    val selectedInGroup = group.members.count { it.id in selectedIds }
+
+    Scaffold(
+        topBar = {
+            Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 2.dp, shadowElevation = 2.dp) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().statusBarsPadding().padding(start = 4.dp, top = 6.dp, end = 12.dp, bottom = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
+                    }
+                    Column(modifier = Modifier.weight(1f).padding(start = 4.dp)) {
+                        Text("重复组", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "共 ${group.members.size} 张 · 已选 $selectedInGroup · 高亮为建议保留",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        },
+        bottomBar = {
+            Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 3.dp, shadowElevation = 8.dp) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 12.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    OutlinedButton(onClick = { viewModel.deselectReviewIds(memberIds) }, modifier = Modifier.weight(1f)) {
+                        Text("全部保留")
+                    }
+                    OutlinedButton(onClick = { viewModel.selectReviewIds(nonKeeperIds) }, modifier = Modifier.weight(1f)) {
+                        Text("仅留 1 张")
+                    }
+                    FilledTonalButton(onClick = { viewModel.selectReviewIds(memberIds) }, modifier = Modifier.weight(1f)) {
+                        Text("全部删除")
+                    }
+                }
+            }
+        },
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+    ) { topPadding ->
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(2),
+            modifier = Modifier.fillMaxSize().padding(top = topPadding.calculateTopPadding()),
+            contentPadding = PaddingValues(10.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            items(group.members, key = { it.id }) { member ->
+                GroupMemberTile(
+                    image = member,
+                    isKeeper = member.id == group.keeperId,
+                    selected = member.id in selectedIds,
+                    onToggle = { viewModel.setReviewItemSelected(member.id, member.id !in selectedIds) },
+                    onLongPress = { preview = member },
+                )
+            }
+        }
+    }
+
+    preview?.let { image ->
+        ReviewPreviewDialog(image = image, onClose = { preview = null })
+    }
+}
+
+@Composable
+private fun GroupMemberTile(
+    image: ImageEntity,
+    isKeeper: Boolean,
+    selected: Boolean,
+    onToggle: () -> Unit,
+    onLongPress: () -> Unit,
+) {
+    val context = LocalContext.current
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .aspectRatio(1f)
+            .clip(RoundedCornerShape(12.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+            .combinedClickable(onClick = onToggle, onLongClick = onLongPress),
+    ) {
+        AsyncImage(
+            model = ImageRequest.Builder(context).data(ImageEntityModel(image)).crossfade(true).build(),
+            contentDescription = image.filename,
+            contentScale = ContentScale.Fit,
+            modifier = Modifier.fillMaxSize(),
+        )
+        if (selected) {
+            Box(Modifier.matchParentSize().background(MaterialTheme.colorScheme.error.copy(alpha = 0.22f)))
+        }
+        TileBadge(
+            text = if (isKeeper) "建议保留" else "建议删除",
+            modifier = Modifier.align(Alignment.BottomStart),
+        )
+        Text(
+            imageMeta(image),
+            style = MaterialTheme.typography.labelSmall,
+            color = Color.White,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(5.dp)
+                .clip(RoundedCornerShape(999.dp))
+                .background(Color.Black.copy(alpha = 0.55f))
+                .padding(horizontal = 8.dp, vertical = 3.dp),
+        )
+        SelectionCircle(selected = selected, modifier = Modifier.align(Alignment.TopEnd))
+    }
+}
+
+/** 长按全屏预览：完整展示（Fit），点任意处关闭 */
+@Composable
+internal fun ReviewPreviewDialog(image: ImageEntity, onClose: () -> Unit) {
+    val context = LocalContext.current
+    Dialog(
+        onDismissRequest = onClose,
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
+    ) {
+        Box(modifier = Modifier.fillMaxSize().background(Color.Black).clickable(onClick = onClose)) {
+            AsyncImage(
+                model = ImageRequest.Builder(context).data(ImageEntityModel(image)).crossfade(true).build(),
+                contentDescription = image.filename,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize(),
+            )
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.72f), Color.Transparent)))
+                    .statusBarsPadding()
+                    .padding(start = 4.dp, top = 6.dp, end = 12.dp, bottom = 28.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = onClose) {
+                    Icon(Icons.Outlined.Close, contentDescription = "关闭", tint = Color.White)
+                }
+                Column(modifier = Modifier.weight(1f).padding(start = 4.dp)) {
+                    Text(
+                        image.filename.ifBlank { "图片" },
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(imageMeta(image), style = MaterialTheme.typography.bodySmall, color = Color.White.copy(alpha = 0.72f))
+                }
+            }
+        }
+    }
+}
+
+/** 审核项归属的筛选分类名：单图用维度，重复组统一为「重复」。 */
+private fun itemReason(item: ReviewItem): String = when (item) {
+    is ReviewItem.Single -> item.reason
+    is ReviewItem.Group -> CleanupRules.REASON_DUPLICATE
+}
+
+/** 当前可见项里「可删除」的图片 id：单图本身 + 重复组内非保留图。 */
+private fun deletableIds(items: List<ReviewItem>): List<Long> = items.flatMap { item ->
+    when (item) {
+        is ReviewItem.Single -> listOf(item.image.id)
+        is ReviewItem.Group -> item.members.map { it.id }.filter { it != item.keeperId }
+    }
+}
+
+/** 审核网格双指捏合调列数（与图库一致）：放大减列、缩小加列，范围 2–6 列 */
+private fun Modifier.reviewPinchColumns(columns: Int, onColumns: (Int) -> Unit): Modifier =
+    this.pointerInput(columns) {
+        awaitEachGesture {
+            var startDistance = 0f
+            var changed = false
+            while (true) {
+                val event = awaitPointerEvent(PointerEventPass.Initial)
+                val pressed = event.changes.filter { it.pressed }
+                if (pressed.size < 2) break
+                val distance = (pressed[0].position - pressed[1].position).getDistance()
+                if (startDistance == 0f) startDistance = distance
+                val ratio = if (startDistance == 0f) 1f else distance / startDistance
+                if (!changed) {
+                    when {
+                        ratio > 1.16f -> { onColumns((columns - 1).coerceIn(2, 6)); changed = true }
+                        ratio < 0.86f -> { onColumns((columns + 1).coerceIn(2, 6)); changed = true }
+                    }
+                }
+            }
+        }
+    }

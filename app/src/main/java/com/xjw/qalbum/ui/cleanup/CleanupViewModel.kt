@@ -4,7 +4,6 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.db.entity.CleanupBatchEntity
-import com.xjw.qalbum.data.db.entity.CleanupCandidateEntity
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.db.entity.QuarantineEntity
 import com.xjw.qalbum.data.preferences.SettingsRepository
@@ -17,6 +16,8 @@ import com.xjw.qalbum.service.analysis.AnalysisState
 import com.xjw.qalbum.service.cleanup.CleanupBatch
 import com.xjw.qalbum.service.cleanup.CleanupController
 import com.xjw.qalbum.service.cleanup.CleanupRules
+import com.xjw.qalbum.service.cleanup.DuplicateReviewPolicy
+import com.xjw.qalbum.service.cleanup.ReviewBatchItem
 import com.xjw.qalbum.service.cleanup.ThumbnailTrashManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -50,8 +51,6 @@ class CleanupViewModel(
 
     /**
      * 「已分析 X/Y」里的 X：完成全部**当前需要**阶段的图片数（与图库左下角完成角标同口径）。
-     * 需要的阶段 = OCR(开关) + AI 标签 / 向量(开关且 AI 服务可用)。只跑了 hash 时，
-     * 若 OCR/AI/向量任一开启，这些图尚未「全完成」，X 会接近 0，而不再把「hash 完成数」当成已分析。
      */
     val fullyAnalyzedCount: StateFlow<Int> =
         combine(settings.analysisConfig, settings.aiEnabled, settings.aiEndpoint) { config, aiEnabled, endpoint ->
@@ -106,30 +105,19 @@ class CleanupViewModel(
     fun startAnalysis() = analysisPipeline.start()
     fun cancelAnalysis() = analysisPipeline.cancel()
 
-    fun generateBatch() {
+    fun generateBatch(onReady: () -> Unit = {}) {
         viewModelScope.launch {
             _busy.value = true
             try {
                 val config = cleanupConfig.value
                 val label = CleanupPreset.match(config)?.displayName ?: "自定义"
-                // 审核数量与顺序：遵守设置中的「每次审核数量」与分析顺序（早到晚/晚到早）
-                val maxCount = settings.reviewLimit.first()
+                // 审核数量与顺序：遵守设置中的「每次审核数量」（项数）与分析顺序（早到晚/晚到早）
+                val maxItems = settings.reviewLimit.first()
                 val oldestFirst = settings.analysisOldestFirst.first()
-                val batch = cleanupController.generateBatch(config, label, maxCount, oldestFirst)
+                val batch = cleanupController.generateBatch(config, label, maxItems, oldestFirst)
                 _lastBatch.value = batch
                 loadReviewBatch(batch)
-            } finally {
-                _busy.value = false
-            }
-        }
-    }
-
-    fun applyBatch(batchId: Long, onDone: (Int) -> Unit) {
-        viewModelScope.launch {
-            _busy.value = true
-            try {
-                val moved = cleanupController.applyBatch(batchId)
-                onDone(moved)
+                onReady()
             } finally {
                 _busy.value = false
             }
@@ -205,17 +193,17 @@ class CleanupViewModel(
         }
     }
 
-    /** 全选：把给定（当前可见）图片全部加入选择 */
+    /** 把给定图片加入选择（重复组详情的「全部删除 / 仅留 1 张」、按分类全选共用） */
     fun selectReviewIds(ids: Collection<Long>) {
         _selectedReviewDeleteIds.value = _selectedReviewDeleteIds.value + ids
     }
 
-    /** 全不选：从选择中移除给定（当前可见）图片 */
+    /** 从选择中移除给定图片（重复组详情的「全部保留」、按分类全不选共用） */
     fun deselectReviewIds(ids: Collection<Long>) {
         _selectedReviewDeleteIds.value = _selectedReviewDeleteIds.value - ids.toSet()
     }
 
-    /** 反选：给定范围内已选的取消、未选的选中（范围外的选择保持不变） */
+    /** 反选：给定范围内已选的取消、未选的选中（范围外保持不变） */
     fun invertReviewIds(ids: Collection<Long>) {
         val current = _selectedReviewDeleteIds.value
         val idSet = ids.toSet()
@@ -223,20 +211,28 @@ class CleanupViewModel(
         _selectedReviewDeleteIds.value = (current - idSet) + toAdd
     }
 
+    /** 全不选：清空所有勾选（直接回应「一进去自动勾一大堆」的诉求） */
+    fun clearReviewSelection() {
+        _selectedReviewDeleteIds.value = emptySet()
+    }
+
+    /** 恢复系统建议的默认预选（高把握维度 + 重复劣质副本） */
+    fun restoreSuggestedSelection() {
+        val review = _reviewBatch.value ?: return
+        _selectedReviewDeleteIds.value = suggestedSelection(review.items)
+    }
+
     fun applyReviewSelection(onDone: (Int) -> Unit = {}) {
         viewModelScope.launch {
             val review = _reviewBatch.value ?: return@launch
             val selectedIds = _selectedReviewDeleteIds.value
+            if (selectedIds.isEmpty()) return@launch
             _busy.value = true
-            // 移入回收站逐图较慢，上报进度避免用户干等
             _purgeProgress.value = PurgeProgress(0, selectedIds.size, "正在移入回收站…")
             try {
-                // 原因映射来自所有 tile（含重复组里推荐保留的最优图，便于用户选删时仍带原因）
-                val reasonByImageId = review.tiles.associate { it.image.id to it.reason }
+                val reasonByImageId = reasonByImageId(review.items)
                 val moved = cleanupController.moveToTrash(
-                    selectedIds.map { imageId ->
-                        imageId to (reasonByImageId[imageId] ?: "重复")
-                    }
+                    selectedIds.map { imageId -> imageId to (reasonByImageId[imageId] ?: CleanupRules.REASON_DUPLICATE) }
                 ) { done, total ->
                     _purgeProgress.value = PurgeProgress(done, total, "正在移入回收站…")
                 }
@@ -257,104 +253,125 @@ class CleanupViewModel(
     }
 
     private suspend fun loadReviewBatch(batch: CleanupBatch) {
-        val candidates = cleanupController.listCandidates(batch.id).ifEmpty { batch.candidates }
-        val candidateImages = imageRepository.getByIds(candidates.map { it.imageId })
-            .associateBy { it.id }
-        val candidateIds = candidates.map { it.imageId }.toSet()
+        val singleIds = batch.items.filterIsInstance<ReviewBatchItem.Single>().map { it.imageId }
+        val singleImages = imageRepository.getByIds(singleIds).associateBy { it.id }
 
-        val tiles = buildReviewTiles(candidates, candidateImages, candidateIds) { groupId ->
-            imageRepository.getByDuplicateGroup(groupId)
+        val groupMembers = HashMap<Long, List<ImageEntity>>()
+        batch.items.filterIsInstance<ReviewBatchItem.Group>().forEach { g ->
+            groupMembers[g.groupId] =
+                imageRepository.getByDuplicateGroup(g.groupId).filter { it.status == "active" }
         }
 
-        _reviewBatch.value = CleanupReviewBatch(
-            batch = batch,
-            candidates = candidates,
-            tiles = tiles,
-        )
-        // 默认勾选所有「建议删除」项（非最优重复 + 全部无用项），与原行为一致
-        _selectedReviewDeleteIds.value = tiles.filter { it.recommendedDelete }.map { it.image.id }.toSet()
+        val items = buildReviewItems(batch.items, singleImages) { gid -> groupMembers[gid].orEmpty() }
+        _reviewBatch.value = CleanupReviewBatch(batch, items)
+        _selectedReviewDeleteIds.value = suggestedSelection(items)
     }
 }
 
 /**
  * 批处理进度：[done] 已处理张数 / [total] 本次总张数 / [label] 进度对话框标题。
- * 一键清理（永久删除）与移入回收站共用，靠 [label] 区分文案。
  */
 data class PurgeProgress(val done: Int, val total: Int, val label: String = "正在清理…")
 
 data class CleanupReviewBatch(
     val batch: CleanupBatch,
-    val candidates: List<CleanupCandidateEntity>,
-    val tiles: List<ReviewTile>,
-)
-
-/**
- * 审核页里的一个图片格子。
- *
- * - [reason]：命中的清理维度（重复 / 低分辨率 / 极小文件 / 模糊 / 空白纯色 / 损坏）
- * - [duplicateGroupId]：非空表示属于某个重复组（同组图片相邻展示）
- * - [recommendedDelete]：系统是否建议删除（默认预选）；重复组里最优的一张为 false（建议保留）
- */
-data class ReviewTile(
-    val image: ImageEntity,
-    val reason: String,
-    val duplicateGroupId: Long?,
-    val recommendedDelete: Boolean,
-)
-
-/**
- * 由候选清单构建审核格子列表。**全程按 image.id 去重**：一张图可能既是某重复组成员、
- * 又因模糊/低分等维度独立成为候选；若两条路径各加一格，审核网格 LazyGrid 的 key
- * （`"tile-${image.id}"`）就会重复 → `IllegalArgumentException: Key already used` 崩溃。
- *
- * 两趟保证「重复」维度优先：
- * - Pass 1 展开所有重复组（同组整组展示，便于对比），组内图先占位；
- * - Pass 2 其余维度候选，已出现过的图跳过。
- *
- * 纯函数（[groupImages] 注入组内图查询），便于单测覆盖去重不变量。
- */
-internal suspend fun buildReviewTiles(
-    candidates: List<CleanupCandidateEntity>,
-    candidateImages: Map<Long, ImageEntity>,
-    candidateIds: Set<Long>,
-    groupImages: suspend (groupId: Long) -> List<ImageEntity>,
-): List<ReviewTile> {
-    val tiles = mutableListOf<ReviewTile>()
-    val seenDuplicateGroups = mutableSetOf<Long>()
-    val seenImageIds = mutableSetOf<Long>()
-
-    // Pass 1：展开重复组（含推荐保留的最优一张），让用户自由对比、独立勾选
-    candidates.forEach { candidate ->
-        val image = candidateImages[candidate.imageId] ?: return@forEach
-        val groupId = image.duplicateGroupId
-        if (candidate.reason == CleanupRules.REASON_DUPLICATE && groupId != null && seenDuplicateGroups.add(groupId)) {
-            groupImages(groupId)
-                .filter { it.status == "active" }
-                .forEach { img ->
-                    if (seenImageIds.add(img.id)) {
-                        tiles += ReviewTile(
-                            image = img,
-                            reason = CleanupRules.REASON_DUPLICATE,
-                            duplicateGroupId = groupId,
-                            recommendedDelete = img.id in candidateIds,
-                        )
-                    }
-                }
+    val items: List<ReviewItem>,
+) {
+    /** 给定已选 id 集合的字节总和（顶栏展示用） */
+    fun selectedBytes(selectedIds: Set<Long>): Long {
+        val sizeById = HashMap<Long, Long>()
+        items.forEach { item ->
+            when (item) {
+                is ReviewItem.Single -> sizeById[item.image.id] = item.image.size
+                is ReviewItem.Group -> item.members.forEach { sizeById[it.id] = it.size }
+            }
         }
+        return selectedIds.sumOf { sizeById[it] ?: 0L }
+    }
+}
+
+/**
+ * 审核项的 UI 模型。重复组折叠为 [Group]（点开看组内对比），其余各图一项 [Single]。
+ */
+sealed interface ReviewItem {
+    val itemKey: String
+
+    data class Single(
+        val image: ImageEntity,
+        val reason: String,
+        /** 是否进入默认预选（高把握维度：损坏 / 空白 / 表情包） */
+        val defaultSelected: Boolean,
+    ) : ReviewItem {
+        override val itemKey: String get() = "single-${image.id}"
     }
 
-    // Pass 2：其余维度候选；已在某重复组里出现过的图跳过，避免同一张图重复成格
-    candidates.forEach { candidate ->
-        val image = candidateImages[candidate.imageId] ?: return@forEach
-        val isGroupedDuplicate = candidate.reason == CleanupRules.REASON_DUPLICATE && image.duplicateGroupId != null
-        if (!isGroupedDuplicate && seenImageIds.add(candidate.imageId)) {
-            tiles += ReviewTile(
-                image = image,
-                reason = candidate.reason,
-                duplicateGroupId = null,
-                recommendedDelete = true,
+    data class Group(
+        val groupId: Long,
+        val keeperId: Long,
+        val members: List<ImageEntity>,
+        /** 默认预选删除的劣质副本（精确副本 / chatimg / 更低分辨率 / 更模糊） */
+        val defaultDeleteIds: Set<Long>,
+    ) : ReviewItem {
+        override val itemKey: String get() = "group-$groupId"
+    }
+}
+
+/** 高把握维度：进审核页即默认勾选；低分辨率 / 模糊 / 极小文件不在此列（仅打建议标签） */
+internal val HIGH_CONFIDENCE_REASONS: Set<String> =
+    setOf(CleanupRules.REASON_CORRUPT, CleanupRules.REASON_BLANK, CleanupRules.REASON_EMOJI)
+
+/**
+ * 由批次审核项构建 UI 审核项（纯函数，便于单测）。
+ *
+ * - [ReviewBatchItem.Single] → [ReviewItem.Single]，默认预选与否取决于是否高把握维度。
+ * - [ReviewBatchItem.Group] → 用 [DuplicateReviewPolicy.decide] 重算保留图与劣质副本；
+ *   组内无 active 成员或决策为空时丢弃该组。
+ */
+internal fun buildReviewItems(
+    batchItems: List<ReviewBatchItem>,
+    singleImages: Map<Long, ImageEntity>,
+    groupMembers: (groupId: Long) -> List<ImageEntity>,
+): List<ReviewItem> = batchItems.mapNotNull { item ->
+    when (item) {
+        is ReviewBatchItem.Single -> {
+            val img = singleImages[item.imageId] ?: return@mapNotNull null
+            ReviewItem.Single(
+                image = img,
+                reason = item.reason,
+                defaultSelected = item.reason in HIGH_CONFIDENCE_REASONS,
+            )
+        }
+
+        is ReviewBatchItem.Group -> {
+            val members = groupMembers(item.groupId)
+            val decision = DuplicateReviewPolicy.decide(members) ?: return@mapNotNull null
+            if (members.isEmpty()) return@mapNotNull null
+            ReviewItem.Group(
+                groupId = item.groupId,
+                keeperId = decision.keepId,
+                members = members,
+                defaultDeleteIds = decision.deleteIds,
             )
         }
     }
-    return tiles
+}
+
+/** 进审核页时的默认勾选集合：高把握单图 + 各重复组的劣质副本。 */
+internal fun suggestedSelection(items: List<ReviewItem>): Set<Long> = buildSet {
+    items.forEach { item ->
+        when (item) {
+            is ReviewItem.Single -> if (item.defaultSelected) add(item.image.id)
+            is ReviewItem.Group -> addAll(item.defaultDeleteIds)
+        }
+    }
+}
+
+/** 移入回收站时的「原因」映射：单图用其维度，组内图统一记为「重复」。 */
+internal fun reasonByImageId(items: List<ReviewItem>): Map<Long, String> = buildMap {
+    items.forEach { item ->
+        when (item) {
+            is ReviewItem.Single -> put(item.image.id, item.reason)
+            is ReviewItem.Group -> item.members.forEach { put(it.id, CleanupRules.REASON_DUPLICATE) }
+        }
+    }
 }

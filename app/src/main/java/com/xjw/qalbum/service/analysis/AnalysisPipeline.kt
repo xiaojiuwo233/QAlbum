@@ -19,6 +19,7 @@ import com.xjw.qalbum.service.ocr.OcrResult
 import com.xjw.qalbum.service.ocr.OcrModelStatus
 import com.xjw.qalbum.service.ocr.OcrModelStore
 import com.xjw.qalbum.service.ocr.PaddleOcrEngine
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -96,6 +97,9 @@ class AnalysisPipeline(
                 }
                 runScore()
                 _state.value = AnalysisState.Done
+            } catch (ce: CancellationException) {
+                // 用户主动取消：交还协程框架，状态由 cancel() 置回 Idle，不展示为失败
+                throw ce
             } catch (t: Throwable) {
                 Timber.e(t, "AnalysisPipeline failed")
                 _state.value = AnalysisState.Failed
@@ -109,6 +113,7 @@ class AnalysisPipeline(
     fun cancel() {
         job?.cancel(); job = null
         _state.value = AnalysisState.Idle
+        _progress.value = null
     }
 
     // ---- 各阶段 ----

@@ -2,6 +2,7 @@ package com.xjw.qalbum.service.indexer
 
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.domain.model.ScanProgress
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -56,6 +57,10 @@ class ScanController(
             try {
                 val root = settings.chatpicPath.first()
                 pipeline.scan(root, mode).collect { _progress.value = it }
+            } catch (ce: CancellationException) {
+                // 用户主动取消属正常流程：标记为「已取消」并交还协程框架，不展示为失败
+                _progress.value = ScanProgress.Cancelled
+                throw ce
             } catch (t: Throwable) {
                 Timber.e(t, "Scan($mode) failed")
                 _progress.value = ScanProgress.Failed(t.message ?: "未知错误")

@@ -23,10 +23,10 @@ class CleanupController(
     suspend fun generateBatch(
         config: CleanupConfig,
         label: String,
-        maxCount: Int = 500,
+        maxItems: Int = 200,
         oldestFirst: Boolean = true,
     ): CleanupBatch =
-        recommender.generateBatch(config, label, maxCount, oldestFirst)
+        recommender.generateBatch(config, label, maxItems, oldestFirst)
 
     suspend fun applyBatch(batchId: Long): Int {
         val candidates = cleanupDao.getCandidates(batchId)

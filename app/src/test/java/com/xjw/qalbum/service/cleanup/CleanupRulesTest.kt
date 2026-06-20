@@ -91,8 +91,9 @@ class CleanupRulesTest {
 
     @Test
     fun balancedPresetCatchesPlainLowResolution() {
-        // 诉求 1：纯低分辨率清晰图，在默认（平衡）档就应该被扫到
-        val signal = signal(width = 500, height = 500, blurScore = 1000f, size = 200_000) // 250,000 像素，清晰
+        // 诉求 1：纯低分辨率清晰图，在默认（平衡）档就应该被扫到。
+        // 用非正方形样本，避免与「表情包」维度（平衡档默认开启）重叠。
+        val signal = signal(width = 700, height = 400, blurScore = 1000f, size = 200_000) // 280,000 像素，清晰，非正方形
         assertEquals(CleanupRules.REASON_LOW_RESOLUTION, CleanupRules.classify(signal, CleanupConfig.BALANCED))
     }
 
@@ -110,6 +111,78 @@ class CleanupRulesTest {
         assertNull(CleanupRules.classify(signal, config))
     }
 
+    // ---- 表情包维度 ----
+
+    @Test
+    fun emojiClassifiedWhenEnabled() {
+        val signal = signal(width = 640, height = 640)
+        val config = baseConfig.copy(emojiEnabled = true)
+        assertEquals(CleanupRules.REASON_EMOJI, CleanupRules.classify(signal, config))
+    }
+
+    @Test
+    fun emojiNotClassifiedWhenDisabled() {
+        val signal = signal(width = 640, height = 640)
+        val config = baseConfig.copy(emojiEnabled = false)
+        assertNull(CleanupRules.classify(signal, config))
+    }
+
+    @Test
+    fun emojiSamplesAllClassified() {
+        // 用户提供的真实样本（近似正方形、长边 ≤ 716）都应识别为表情包
+        val config = baseConfig.copy(emojiEnabled = true)
+        listOf(240 to 240, 515 to 524, 570 to 540, 640 to 640, 716 to 716).forEach { (w, h) ->
+            assertEquals(
+                "$w×$h 应识别为表情包",
+                CleanupRules.REASON_EMOJI,
+                CleanupRules.classify(signal(width = w, height = h), config),
+            )
+        }
+    }
+
+    @Test
+    fun nonSquareImageNotClassifiedAsEmoji() {
+        // 长宽差距大（0.5），不算表情包，避免误伤
+        val signal = signal(width = 800, height = 400)
+        val config = baseConfig.copy(emojiEnabled = true)
+        assertNull(CleanupRules.classify(signal, config))
+    }
+
+    @Test
+    fun largeSquareImageNotClassifiedAsEmoji() {
+        // 1080×1080 正方形照片，长边超上限，不算表情包
+        val signal = signal(width = 1080, height = 1080)
+        val config = baseConfig.copy(emojiEnabled = true)
+        assertNull(CleanupRules.classify(signal, config))
+    }
+
+    @Test
+    fun tinyIconNotClassifiedAsEmoji() {
+        // 32×32 小图标，短边低于下限，不算表情包
+        val signal = signal(width = 32, height = 32)
+        val config = baseConfig.copy(emojiEnabled = true)
+        assertNull(CleanupRules.classify(signal, config))
+    }
+
+    @Test
+    fun emojiTakesPriorityOverLowResolution() {
+        // 小正方形图同时满足低分辨率与表情包时，归「表情包」
+        val signal = signal(width = 240, height = 240) // 57,600 像素，也属低分
+        val config = baseConfig.copy(
+            emojiEnabled = true,
+            lowResolutionEnabled = true,
+            lowResolutionMaxPixels = 300_000,
+        )
+        assertEquals(CleanupRules.REASON_EMOJI, CleanupRules.classify(signal, config))
+    }
+
+    @Test
+    fun corruptTakesPriorityOverEmoji() {
+        val signal = signal(width = 240, height = 240, isCorrupt = true)
+        val config = baseConfig.copy(emojiEnabled = true, corruptEnabled = true)
+        assertEquals(CleanupRules.REASON_CORRUPT, CleanupRules.classify(signal, config))
+    }
+
     private val baseConfig = CleanupConfig(
         duplicateEnabled = false,
         lowResolutionEnabled = false,
@@ -120,6 +193,7 @@ class CleanupRulesTest {
         tinyFileMaxBytes = 30_720,
         blankEnabled = false,
         corruptEnabled = false,
+        emojiEnabled = false,
     )
 
     private fun signal(

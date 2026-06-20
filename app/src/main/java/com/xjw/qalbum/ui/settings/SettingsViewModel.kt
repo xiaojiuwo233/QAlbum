@@ -192,6 +192,10 @@ class SettingsViewModel(
     fun setTinyFileMaxBytes(bytes: Long) = updateCleanupConfig { it.copy(tinyFileMaxBytes = bytes) }
     fun setBlankEnabled(enabled: Boolean) = updateCleanupConfig { it.copy(blankEnabled = enabled) }
     fun setCorruptEnabled(enabled: Boolean) = updateCleanupConfig { it.copy(corruptEnabled = enabled) }
+    fun setEmojiEnabled(enabled: Boolean) = updateCleanupConfig { it.copy(emojiEnabled = enabled) }
+    fun setEmojiSquareRatio(ratio: Float) = updateCleanupConfig { it.copy(emojiSquareRatio = ratio) }
+    fun setEmojiMaxSide(px: Int) = updateCleanupConfig { it.copy(emojiMaxSide = px) }
+    fun setEmojiMinSide(px: Int) = updateCleanupConfig { it.copy(emojiMinSide = px) }
 
     // ---- 分析每项开关/数量 / 排序 / 重置 ----
 

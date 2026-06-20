@@ -13,4 +13,7 @@ sealed class ScanProgress {
 
     /** 扫描出错 */
     data class Failed(val reason: String) : ScanProgress()
+
+    /** 用户主动取消（区别于 Failed，不作为错误展示） */
+    object Cancelled : ScanProgress()
 }

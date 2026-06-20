@@ -563,7 +563,7 @@ fun CleanupSettingsScreen(
     ) { notify ->
         SettingsSection(header = "每次审核数量") {
             SettingsBlurb(
-                "每次「生成审核清理」最多纳入多少张候选图。会遵守「分析」里的顺序（从早到晚 / 从晚到早），处理完即止。",
+                "每次「生成审核清理」最多纳入多少个待处理项（一个重复组算 1 项）。会遵守「分析」里的顺序（从早到晚 / 从晚到早），处理完即止。",
             )
             InstantSaveTextField(
                 value = reviewLimit.toString(),
@@ -611,6 +611,31 @@ fun CleanupSettingsScreen(
                 enabled = config.duplicateEnabled,
                 onEnabledChange = viewModel::setDuplicateEnabled,
             )
+            CleanupDimensionRow(
+                title = "表情包",
+                subtitle = "近似正方形的小图 / 动图，默认勾选清理",
+                enabled = config.emojiEnabled,
+                onEnabledChange = viewModel::setEmojiEnabled,
+            ) {
+                ThresholdSlider(
+                    value = config.emojiSquareRatio,
+                    valueRange = CleanupConfig.MIN_EMOJI_SQUARE_RATIO..CleanupConfig.MAX_EMOJI_SQUARE_RATIO,
+                    onChange = { viewModel.setEmojiSquareRatio(it) },
+                    format = { "长宽比 ≥ ${String.format("%.2f", it)}（越大越接近正方形）" },
+                )
+                ThresholdSlider(
+                    value = config.emojiMaxSide.toFloat(),
+                    valueRange = CleanupConfig.MIN_EMOJI_MAX_SIDE.toFloat()..CleanupConfig.MAX_EMOJI_MAX_SIDE.toFloat(),
+                    onChange = { viewModel.setEmojiMaxSide(it.toInt()) },
+                    format = { "最长边 ≤ ${it.toInt()} px" },
+                )
+                ThresholdSlider(
+                    value = config.emojiMinSide.toFloat(),
+                    valueRange = CleanupConfig.MIN_EMOJI_MIN_SIDE.toFloat()..CleanupConfig.MAX_EMOJI_MIN_SIDE.toFloat(),
+                    onChange = { viewModel.setEmojiMinSide(it.toInt()) },
+                    format = { "最短边 ≥ ${it.toInt()} px" },
+                )
+            }
             CleanupDimensionRow(
                 title = "低分辨率",
                 subtitle = "总像素低于门限的图",
