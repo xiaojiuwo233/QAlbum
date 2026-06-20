@@ -49,7 +49,7 @@ import com.xjw.qalbum.data.db.entity.UserActionEntity
         ImageEmbeddingEntity::class,
         DirSnapshotEntity::class,
     ],
-    version = 6,
+    version = 7,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -116,13 +116,24 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v6 → v7：为 images 新增 deleted_at（永久删除时间戳，可空），支撑首页「今日已清理」统计。
+         * 仅加可空列＝SQLite 元数据级 ALTER，对 200w 行瞬时完成、不重写任何行；存量已删行 deleted_at 留空，
+         * 不计入任何「今日」窗口（符合语义）。必须显式迁移而非 destructive 回退，否则清库需重扫数小时。
+         */
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `images` ADD COLUMN `deleted_at` INTEGER")
+            }
+        }
+
         fun build(context: Context): AppDatabase {
             return Room.databaseBuilder(
                 context.applicationContext,
                 AppDatabase::class.java,
                 DB_NAME,
             )
-                .addMigrations(MIGRATION_4_5, MIGRATION_5_6)
+                .addMigrations(MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
                 // 已注册的版本走 Migration 保数据；只有遇到未覆盖的版本跳变才回退重建兜底
                 .fallbackToDestructiveMigration()
                 .build()

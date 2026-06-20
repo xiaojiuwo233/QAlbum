@@ -6,7 +6,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -62,6 +62,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -85,12 +87,13 @@ fun DashboardScreen(
     val analysisState by viewModel.analysisState.collectAsState()
     val analysisRunning by viewModel.analysisRunningProgress.collectAsState()
     val cleanedStats by viewModel.cleanedStats.collectAsState()
+    val todayCleanedStats by viewModel.todayCleanedStats.collectAsState()
 
     Scaffold(
         topBar = {
             CenterAlignedTopAppBar(
                 title = { Text(stringResource(R.string.app_name), style = MaterialTheme.typography.titleLarge) },
-                actions = { CleanedStatsLabel(cleanedStats) },
+                actions = { CleanedStatsLabel(cleanedStats, todayCleanedStats) },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface,
                 ),
@@ -129,30 +132,48 @@ fun DashboardScreen(
 // ── Cleaned Stats（顶栏右侧「已清理」小文本）──────────────────────────
 
 @Composable
-private fun CleanedStatsLabel(stats: ImageDao.CleanedStatsRow) {
-    // 还没清理过任何图片时不显示，避免顶栏出现无意义的「0 B」
+private fun CleanedStatsLabel(
+    stats: ImageDao.CleanedStatsRow,
+    todayStats: ImageDao.CleanedStatsRow,
+) {
+    // 累计为 0（从未清理过）时整个图标不显示，避免顶栏出现无意义的「0 B」；
+    // 一旦清理过，长按即可切到「今日」维度，今日为 0 也照常显示「今日 0 张 / 0 B」。
     if (stats.count <= 0) return
+    var todayMode by remember { mutableStateOf(false) }
     var showCount by remember { mutableStateOf(false) }
+    val haptic = LocalHapticFeedback.current
+
     Row(
         modifier = Modifier
             .padding(end = 4.dp)
             .clip(CircleShape)
-            .clickable { showCount = !showCount }
+            .combinedClickable(
+                onClick = { showCount = !showCount },
+                onLongClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    todayMode = !todayMode
+                    showCount = false   // 切换维度后从字节开始（与「显示今日 xxMB」一致）
+                },
+            )
             .padding(horizontal = 10.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
             imageVector = Icons.Outlined.CleaningServices,
-            contentDescription = "已清理",
+            contentDescription = if (todayMode) "今日已清理" else "已清理",
             modifier = Modifier.size(16.dp),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            tint = if (todayMode) MaterialTheme.colorScheme.primary
+            else MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.width(4.dp))
-        AnimatedContent(targetState = showCount, label = "cleaned-stats") { isCount ->
+        AnimatedContent(targetState = todayMode to showCount, label = "cleaned-stats") { (today, isCount) ->
+            val row = if (today) todayStats else stats
+            val prefix = if (today) "今日 " else ""
             Text(
-                text = if (isCount) "${formatCount(stats.count)} 张" else formatBytes(stats.bytes),
+                text = if (isCount) "$prefix${formatCount(row.count)} 张" else "$prefix${formatBytes(row.bytes)}",
                 style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = if (today) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }

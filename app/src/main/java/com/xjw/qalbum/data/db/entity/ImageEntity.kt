@@ -83,4 +83,8 @@ data class ImageEntity(
     @ColumnInfo(name = "status") val status: String = "active",
     @ColumnInfo(name = "is_protected") val isFavorite: Boolean = false,
     @ColumnInfo(name = "user_keep") val userKeep: Boolean? = null,
+
+    // 永久删除时间戳：仅三条永久删除路径标记 deleted 时写入，用于首页「今日已清理」统计；
+    // 功能上线前已删的历史行为 NULL，天然被任何「今日」窗口排除。
+    @ColumnInfo(name = "deleted_at") val deletedAt: Long? = null,
 )

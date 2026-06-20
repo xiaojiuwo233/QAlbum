@@ -101,7 +101,7 @@ class ThumbnailTrashManager(
                     }
                 }
                 if (okIds.isNotEmpty()) {
-                    imageDao.markDeleted(okIds)
+                    imageDao.markDeleted(okIds, System.currentTimeMillis())
                     deleted += okIds.size
                 }
                 done += chunk.size

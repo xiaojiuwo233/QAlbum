@@ -93,7 +93,7 @@ class QuarantineManager(
 
         val deleted = runCatching { provider.deleteFile(image.path) }.getOrDefault(false)
         if (deleted) {
-            imageDao.updateStatus(image.id, "deleted")
+            imageDao.markDeleted(listOf(image.id), System.currentTimeMillis())
         } else {
             Timber.w("Permanent delete failed for ${image.path}")
         }
@@ -124,7 +124,7 @@ class QuarantineManager(
         val image = imageDao.getById(record.imageId) ?: return@withContext false
         val src = File(rootDir, "${image.id}_${image.sourceType}_${image.filename}")
         src.delete()
-        imageDao.updateStatus(image.id, "deleted")
+        imageDao.markDeleted(listOf(image.id), System.currentTimeMillis())
         record.thumbnailPath?.let { File(it).delete() }
         cleanupDao.deleteQuarantine(quarantineId)
         true

@@ -30,8 +30,8 @@ interface ImageDao {
     @Query("UPDATE images SET status = :status WHERE id = :id")
     suspend fun updateStatus(id: Long, status: String)
 
-    @Query("UPDATE images SET status = 'deleted' WHERE id IN (:ids)")
-    suspend fun markDeleted(ids: List<Long>)
+    @Query("UPDATE images SET status = 'deleted', deleted_at = :deletedAt WHERE id IN (:ids)")
+    suspend fun markDeleted(ids: List<Long>, deletedAt: Long)
 
     @Query("UPDATE images SET last_seen = :ts WHERE id = :id")
     suspend fun touchLastSeen(id: Long, ts: Long)
@@ -358,6 +358,14 @@ interface ImageDao {
      */
     @Query("SELECT COUNT(*) AS count, IFNULL(SUM(size), 0) AS bytes FROM images WHERE status = 'deleted'")
     fun observeCleanedStats(): Flow<CleanedStatsRow>
+
+    /**
+     * 「今日已清理」：deleted_at 落在 [since, now] 内的永久删除张数与字节。
+     * deleted_at 由三条永久删除路径写入；功能上线前删除的历史行 deleted_at 为 NULL，不满足 >= since
+     * 而被自动排除，符合「今日」语义。复用 [CleanedStatsRow]。
+     */
+    @Query("SELECT COUNT(*) AS count, IFNULL(SUM(size), 0) AS bytes FROM images WHERE status = 'deleted' AND deleted_at >= :since")
+    fun observeCleanedStatsSince(since: Long): Flow<CleanedStatsRow>
 
     data class CleanedStatsRow(val count: Int, val bytes: Long)
 
