@@ -3,9 +3,13 @@ package com.xjw.qalbum.ui.cleanup
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.xjw.qalbum.data.db.dao.ImageDao
+import com.xjw.qalbum.data.db.dao.TagDao
 import com.xjw.qalbum.data.db.entity.CleanupBatchEntity
 import com.xjw.qalbum.data.db.entity.ImageEntity
+import com.xjw.qalbum.data.db.entity.ImageTagEntity
 import com.xjw.qalbum.data.db.entity.QuarantineEntity
+import com.xjw.qalbum.data.db.entity.TAG_USER_KEEP
+import com.xjw.qalbum.data.db.entity.TagEntity
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.data.repository.ImageRepository
 import com.xjw.qalbum.domain.model.CleanupConfig
@@ -17,6 +21,8 @@ import com.xjw.qalbum.service.cleanup.CleanupBatch
 import com.xjw.qalbum.service.cleanup.CleanupController
 import com.xjw.qalbum.service.cleanup.CleanupRules
 import com.xjw.qalbum.service.cleanup.DuplicateReviewPolicy
+import com.xjw.qalbum.service.cleanup.ExternalViewTarget
+import com.xjw.qalbum.service.cleanup.ImageFileManager
 import com.xjw.qalbum.service.cleanup.ReviewBatchItem
 import com.xjw.qalbum.service.cleanup.ThumbnailTrashManager
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -35,6 +41,8 @@ class CleanupViewModel(
     private val thumbnailTrashManager: ThumbnailTrashManager,
     private val imageRepository: ImageRepository,
     private val settings: SettingsRepository,
+    private val tagDao: TagDao,
+    private val imageFileManager: ImageFileManager,
 ) : ViewModel() {
 
     val analysisState: StateFlow<AnalysisState> = analysisPipeline.state
@@ -104,6 +112,19 @@ class CleanupViewModel(
 
     fun startAnalysis() = analysisPipeline.start()
     fun cancelAnalysis() = analysisPipeline.cancel()
+
+    /** 重新聚类重复（不重新 hash）：用新算法修复存量错误的重复分组 */
+    fun reclusterDuplicates(onDone: () -> Unit = {}) {
+        viewModelScope.launch {
+            _busy.value = true
+            try {
+                analysisPipeline.reclusterDuplicates()
+                onDone()
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
 
     fun generateBatch(onReady: () -> Unit = {}) {
         viewModelScope.launch {
@@ -236,9 +257,11 @@ class CleanupViewModel(
                 ) { done, total ->
                     _purgeProgress.value = PurgeProgress(done, total, "正在移入回收站…")
                 }
-                _reviewBatch.value = null
+                // 移入回收站不代表审核结束：剔除已处理的图，留在审核页继续筛选
+                _reviewBatch.value = review.copy(
+                    items = review.items.mapNotNull { pruneReviewItem(it, selectedIds) },
+                )
                 _selectedReviewDeleteIds.value = emptySet()
-                _lastBatch.value = null
                 onDone(moved)
             } finally {
                 _purgeProgress.value = null
@@ -250,6 +273,56 @@ class CleanupViewModel(
     fun closeReview() {
         _reviewBatch.value = null
         _selectedReviewDeleteIds.value = emptySet()
+        _lastBatch.value = null
+    }
+
+    /** 预览页：收藏 / 取消收藏 */
+    fun setFavorite(imageId: Long, favorite: Boolean) {
+        viewModelScope.launch { imageRepository.setFavorite(imageId, favorite) }
+    }
+
+    /**
+     * 预览页：保留 —— 永不再进审核（user_keep=true）+ 打「用户保留」标签（仅此一处添加，type=user），
+     * 并从当前审核列表移出。
+     */
+    fun keepImage(imageId: Long) {
+        viewModelScope.launch {
+            imageRepository.setUserKeep(imageId, true)
+            tagDao.insertTag(TagEntity(name = TAG_USER_KEEP, type = "user"))
+            tagDao.findByName(TAG_USER_KEEP)?.let { tag ->
+                tagDao.linkTag(ImageTagEntity(imageId = imageId, tagId = tag.id, source = "user"))
+            }
+            removeFromReview(imageId)
+        }
+    }
+
+    /** 预览页：立即清理这一张（移入回收站），并从审核列表移出 */
+    fun trashOne(imageId: Long, onDone: () -> Unit = {}) {
+        viewModelScope.launch {
+            val reason = _reviewBatch.value?.let { reasonByImageId(it.items)[imageId] }
+                ?: CleanupRules.REASON_DUPLICATE
+            _busy.value = true
+            try {
+                cleanupController.moveToTrash(listOf(imageId to reason))
+                removeFromReview(imageId)
+                onDone()
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    /** 预览页：分享（缓存 + 补后缀），回调拿到可分享的 content Uri */
+    fun shareImage(imageId: Long, onReady: (ExternalViewTarget) -> Unit) {
+        viewModelScope.launch { imageFileManager.prepareShare(imageId)?.let(onReady) }
+    }
+
+    private fun removeFromReview(imageId: Long) {
+        val removed = setOf(imageId)
+        _reviewBatch.value = _reviewBatch.value?.let { rb ->
+            rb.copy(items = rb.items.mapNotNull { pruneReviewItem(it, removed) })
+        }
+        _selectedReviewDeleteIds.value = _selectedReviewDeleteIds.value - imageId
     }
 
     private suspend fun loadReviewBatch(batch: CleanupBatch) {
@@ -362,6 +435,28 @@ internal fun suggestedSelection(items: List<ReviewItem>): Set<Long> = buildSet {
         when (item) {
             is ReviewItem.Single -> if (item.defaultSelected) add(item.image.id)
             is ReviewItem.Group -> addAll(item.defaultDeleteIds)
+        }
+    }
+}
+
+/** 移入回收站后，从审核项剔除已处理的图：重复组成员减少后重算保留/勾选，剩 <2 张则整组移除。 */
+internal fun pruneReviewItem(item: ReviewItem, removed: Set<Long>): ReviewItem? = when (item) {
+    is ReviewItem.Single -> if (item.image.id in removed) null else item
+    is ReviewItem.Group -> {
+        val remaining = item.members.filter { it.id !in removed }
+        if (remaining.size < 2) {
+            null
+        } else {
+            val decision = DuplicateReviewPolicy.decide(remaining)
+            if (decision == null) {
+                null
+            } else {
+                item.copy(
+                    members = remaining,
+                    keeperId = decision.keepId,
+                    defaultDeleteIds = decision.deleteIds,
+                )
+            }
         }
     }
 }

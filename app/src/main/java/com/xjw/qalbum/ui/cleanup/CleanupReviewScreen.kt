@@ -1,6 +1,16 @@
 package com.xjw.qalbum.ui.cleanup
 
+import android.content.Intent
 import android.widget.Toast
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.material.icons.outlined.Bookmark
+import androidx.compose.material.icons.outlined.Favorite
+import androidx.compose.material.icons.outlined.FavoriteBorder
+import androidx.compose.material.icons.outlined.Share
+import androidx.compose.ui.graphics.vector.ImageVector
+import com.xjw.qalbum.service.cleanup.ExternalViewTarget
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -94,7 +104,7 @@ fun CleanupReviewScreen(
     var columns by rememberSaveable { mutableIntStateOf(3) }
     var menuOpen by remember { mutableStateOf(false) }
     var showConfirm by remember { mutableStateOf(false) }
-    var preview by remember { mutableStateOf<ImageEntity?>(null) }
+    var previewId by remember { mutableStateOf<Long?>(null) }
 
     val countByReason = remember(items) {
         items.groupingBy { itemReason(it) }.eachCount()
@@ -153,7 +163,8 @@ fun CleanupReviewScreen(
                 start = 10.dp,
                 end = 10.dp,
                 top = 10.dp,
-                bottom = contentPadding.calculateBottomPadding() + 16.dp,
+                // 底部留出操作条高度（操作条在本页 Scaffold 的 bottomBar 里，含在 topPadding.bottom）
+                bottom = topPadding.calculateBottomPadding() + 16.dp,
             ),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -164,7 +175,7 @@ fun CleanupReviewScreen(
                         item = item,
                         selected = item.image.id in selectedIds,
                         onToggle = { viewModel.setReviewItemSelected(item.image.id, item.image.id !in selectedIds) },
-                        onLongPress = { preview = item.image },
+                        onLongPress = { previewId = item.image.id },
                     )
 
                     is ReviewItem.Group -> GroupTile(
@@ -177,8 +188,21 @@ fun CleanupReviewScreen(
         }
     }
 
-    preview?.let { image ->
-        ReviewPreviewDialog(image = image, onClose = { preview = null })
+    previewId?.let { id ->
+        val singles = visibleItems.filterIsInstance<ReviewItem.Single>().map { it.image }
+        val start = singles.indexOfFirst { it.id == id }.coerceAtLeast(0)
+        ReviewPreviewPager(
+            images = singles,
+            startIndex = start,
+            selectedIds = selectedIds,
+            busy = busy,
+            onClose = { previewId = null },
+            onToggleSelect = { viewModel.setReviewItemSelected(it, it !in selectedIds) },
+            onFavorite = { iid, fav -> viewModel.setFavorite(iid, fav) },
+            onKeep = { viewModel.keepImage(it); previewId = null },
+            onTrash = { viewModel.trashOne(it); previewId = null },
+            onShare = { iid -> viewModel.shareImage(iid) { t -> context.startActivity(shareChooser(t)) } },
+        )
     }
 
     if (showConfirm) {
@@ -194,8 +218,7 @@ fun CleanupReviewScreen(
                 TextButton(onClick = {
                     showConfirm = false
                     viewModel.applyReviewSelection { count ->
-                        Toast.makeText(context, "已移入回收站 $count 张", Toast.LENGTH_SHORT).show()
-                        onBack()
+                        Toast.makeText(context, "已移入回收站 $count 张，可继续筛选", Toast.LENGTH_SHORT).show()
                     }
                 }) { Text("移入回收站") }
             },
@@ -418,10 +441,12 @@ fun CleanupReviewGroupScreen(
     viewModel: CleanupViewModel,
     onBack: () -> Unit,
 ) {
+    val context = LocalContext.current
     val review by viewModel.reviewBatch.collectAsState()
     val selectedIds by viewModel.selectedReviewDeleteIds.collectAsState()
+    val busy by viewModel.busy.collectAsState()
     val group = review?.items?.filterIsInstance<ReviewItem.Group>()?.firstOrNull { it.groupId == groupId }
-    var preview by remember { mutableStateOf<ImageEntity?>(null) }
+    var previewId by remember { mutableStateOf<Long?>(null) }
 
     if (group == null) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -479,7 +504,12 @@ fun CleanupReviewGroupScreen(
         LazyVerticalGrid(
             columns = GridCells.Fixed(2),
             modifier = Modifier.fillMaxSize().padding(top = topPadding.calculateTopPadding()),
-            contentPadding = PaddingValues(10.dp),
+            contentPadding = PaddingValues(
+                start = 10.dp,
+                end = 10.dp,
+                top = 10.dp,
+                bottom = topPadding.calculateBottomPadding() + 16.dp,
+            ),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
@@ -489,14 +519,26 @@ fun CleanupReviewGroupScreen(
                     isKeeper = member.id == group.keeperId,
                     selected = member.id in selectedIds,
                     onToggle = { viewModel.setReviewItemSelected(member.id, member.id !in selectedIds) },
-                    onLongPress = { preview = member },
+                    onLongPress = { previewId = member.id },
                 )
             }
         }
     }
 
-    preview?.let { image ->
-        ReviewPreviewDialog(image = image, onClose = { preview = null })
+    previewId?.let { id ->
+        val start = group.members.indexOfFirst { it.id == id }.coerceAtLeast(0)
+        ReviewPreviewPager(
+            images = group.members,
+            startIndex = start,
+            selectedIds = selectedIds,
+            busy = busy,
+            onClose = { previewId = null },
+            onToggleSelect = { viewModel.setReviewItemSelected(it, it !in selectedIds) },
+            onFavorite = { iid, fav -> viewModel.setFavorite(iid, fav) },
+            onKeep = { viewModel.keepImage(it); previewId = null },
+            onTrash = { viewModel.trashOne(it); previewId = null },
+            onShare = { iid -> viewModel.shareImage(iid) { t -> context.startActivity(shareChooser(t)) } },
+        )
     }
 }
 
@@ -547,28 +589,54 @@ private fun GroupMemberTile(
     }
 }
 
-/** 长按全屏预览：完整展示（Fit），点任意处关闭 */
+/**
+ * 全屏预览：左右滑动切换上一张/下一张；顶部显示拍摄时间 + 分享；底部「收藏 / 勾选 / 清理 / 保留」。
+ * [images] 是预览时的快照列表；清理 / 保留会把该图移出审核并关闭预览。
+ */
 @Composable
-internal fun ReviewPreviewDialog(image: ImageEntity, onClose: () -> Unit) {
+internal fun ReviewPreviewPager(
+    images: List<ImageEntity>,
+    startIndex: Int,
+    selectedIds: Set<Long>,
+    busy: Boolean,
+    onClose: () -> Unit,
+    onToggleSelect: (Long) -> Unit,
+    onFavorite: (Long, Boolean) -> Unit,
+    onKeep: (Long) -> Unit,
+    onTrash: (Long) -> Unit,
+    onShare: (Long) -> Unit,
+) {
+    if (images.isEmpty()) {
+        onClose()
+        return
+    }
     val context = LocalContext.current
+    val pagerState = rememberPagerState(initialPage = startIndex.coerceIn(0, images.lastIndex)) { images.size }
+
     Dialog(
         onDismissRequest = onClose,
         properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
     ) {
-        Box(modifier = Modifier.fillMaxSize().background(Color.Black).clickable(onClick = onClose)) {
-            AsyncImage(
-                model = ImageRequest.Builder(context).data(ImageEntityModel(image)).crossfade(true).build(),
-                contentDescription = image.filename,
-                contentScale = ContentScale.Fit,
-                modifier = Modifier.fillMaxSize(),
-            )
+        Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+            HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize(), key = { images[it].id }) { page ->
+                AsyncImage(
+                    model = ImageRequest.Builder(context).data(ImageEntityModel(images[page])).crossfade(true).build(),
+                    contentDescription = images[page].filename,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+
+            val current = images.getOrNull(pagerState.currentPage) ?: images.first()
+
+            // 顶部：关闭 + 时间 + 分享
             Row(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .fillMaxWidth()
                     .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.72f), Color.Transparent)))
                     .statusBarsPadding()
-                    .padding(start = 4.dp, top = 6.dp, end = 12.dp, bottom = 28.dp),
+                    .padding(start = 4.dp, top = 6.dp, end = 4.dp, bottom = 28.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 IconButton(onClick = onClose) {
@@ -576,19 +644,90 @@ internal fun ReviewPreviewDialog(image: ImageEntity, onClose: () -> Unit) {
                 }
                 Column(modifier = Modifier.weight(1f).padding(start = 4.dp)) {
                     Text(
-                        image.filename.ifBlank { "图片" },
+                        formatImageTime(current.mtime),
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold,
                         color = Color.White,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    Text(imageMeta(image), style = MaterialTheme.typography.bodySmall, color = Color.White.copy(alpha = 0.72f))
+                    Text(imageMeta(current), style = MaterialTheme.typography.bodySmall, color = Color.White.copy(alpha = 0.72f))
                 }
+                IconButton(onClick = { onShare(current.id) }) {
+                    Icon(Icons.Outlined.Share, contentDescription = "分享", tint = Color.White)
+                }
+            }
+
+            // 底部操作栏
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.78f))))
+                    .navigationBarsPadding()
+                    .padding(top = 28.dp, bottom = 12.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                val isFav = current.isFavorite
+                val isSelected = current.id in selectedIds
+                PreviewAction(
+                    icon = if (isFav) Icons.Outlined.Favorite else Icons.Outlined.FavoriteBorder,
+                    label = if (isFav) "已收藏" else "收藏",
+                    onClick = { onFavorite(current.id, !isFav) },
+                )
+                PreviewAction(
+                    icon = if (isSelected) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
+                    label = if (isSelected) "已勾选" else "勾选",
+                    onClick = { onToggleSelect(current.id) },
+                )
+                PreviewAction(
+                    icon = Icons.Outlined.Delete,
+                    label = "清理",
+                    enabled = !busy,
+                    onClick = { onTrash(current.id) },
+                )
+                PreviewAction(
+                    icon = Icons.Outlined.Bookmark,
+                    label = "保留",
+                    onClick = { onKeep(current.id) },
+                )
             }
         }
     }
 }
+
+@Composable
+private fun PreviewAction(
+    icon: ImageVector,
+    label: String,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
+    val color = if (enabled) Color.White else Color.White.copy(alpha = 0.4f)
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 6.dp),
+    ) {
+        Icon(icon, contentDescription = label, tint = color)
+        Spacer(Modifier.height(2.dp))
+        Text(label, style = MaterialTheme.typography.labelSmall, color = color)
+    }
+}
+
+/** 分享选择器：把缓存好的临时文件（带后缀）以 content Uri 发送给其它 App。 */
+internal fun shareChooser(target: ExternalViewTarget): Intent =
+    Intent.createChooser(
+        Intent(Intent.ACTION_SEND).apply {
+            type = target.mimeType
+            putExtra(Intent.EXTRA_STREAM, target.uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        },
+        "分享图片",
+    )
 
 /** 审核项归属的筛选分类名：单图用维度，重复组统一为「重复」。 */
 private fun itemReason(item: ReviewItem): String = when (item) {

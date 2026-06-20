@@ -28,6 +28,10 @@ class ImageFileManager(
         File(context.cacheDir, "external_view").apply { if (!exists()) mkdirs() }
     }
 
+    private val shareDir: File by lazy {
+        File(context.cacheDir, "share").apply { if (!exists()) mkdirs() }
+    }
+
     /** 将图片导出到系统相册 Pictures/QAlbum/ */
     suspend fun exportToGallery(imageId: Long): Boolean = withContext(Dispatchers.IO) {
         val image = imageDao.getById(imageId) ?: return@withContext false
@@ -89,6 +93,39 @@ class ImageFileManager(
             Timber.e(t, "ImageFileManager.prepareExternalView failed for $imageId")
             null
         }
+    }
+
+    /**
+     * 准备一个可分享的临时文件（content Uri）。chatpic 原文件名是无后缀的 `Cache_xxx`，
+     * 这里按 MIME 补上正确扩展名（部分 App 必须靠后缀识别图片类型）。
+     */
+    suspend fun prepareShare(imageId: Long): ExternalViewTarget? = withContext(Dispatchers.IO) {
+        val image = imageDao.getById(imageId) ?: return@withContext null
+        val provider = accessManager.current()
+        if (!provider.isAvailable()) return@withContext null
+        try {
+            val ext = extensionForMime(image.mime)
+            val dest = File(shareDir, "qalbum_${image.id}.$ext")
+            provider.readFile(image.path).use { input ->
+                dest.outputStream().use { output -> input.copyTo(output) }
+            }
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", dest)
+            ExternalViewTarget(uri = uri, mimeType = image.mime.ifBlank { "image/*" })
+        } catch (t: Throwable) {
+            Timber.e(t, "ImageFileManager.prepareShare failed for $imageId")
+            null
+        }
+    }
+
+    private fun extensionForMime(mime: String): String = when (mime.lowercase()) {
+        "image/jpeg", "image/jpg" -> "jpg"
+        "image/png" -> "png"
+        "image/gif" -> "gif"
+        "image/webp" -> "webp"
+        "image/heic" -> "heic"
+        "image/heif" -> "heif"
+        "image/bmp" -> "bmp"
+        else -> "jpg"
     }
 }
 

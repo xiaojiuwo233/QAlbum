@@ -53,6 +53,7 @@ class AiTaggingService(
         // 写入标签 + 关联（标签在「标签管理页」可见可批量清理）。
         // 不再因 risk 标签自动收藏：自动收藏改由「设置 → 分析 → 自动收藏」显式控制。
         for (tagName in parsed.contentTags + parsed.riskTags) {
+            if (tagName == com.xjw.qalbum.data.db.entity.TAG_USER_KEEP) continue // 「用户保留」仅用户手动添加
             val tag = ensureTag(name = tagName, type = if (tagName in parsed.riskTags) "risk" else "ai")
             tagDao.linkTag(ImageTagEntity(imageId = imageId, tagId = tag.id, source = "ai"))
         }

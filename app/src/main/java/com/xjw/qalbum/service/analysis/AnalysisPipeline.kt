@@ -87,8 +87,9 @@ class AnalysisPipeline(
                 // limit<=0 视为无限（分块跑完所有待办）。各 *_done 标记持久化，故天然「从上次增量继续」。
                 val config = settings.analysisConfig.first()
                 val oldestFirst = settings.analysisOldestFirst.first()
-                runHashAndQuality(config.hashLimit, oldestFirst, reader)
-                runDuplicate()
+                // 只有本轮确实 hash 了新图，才重算重复聚类（否则跳过，避免「没新 hash 也全量查重」）
+                val hashed = runHashAndQuality(config.hashLimit, oldestFirst, reader)
+                if (hashed > 0) runDuplicate()
                 if (config.ocrEnabled) runOcr(config.ocrLimit, oldestFirst, reader)
                 // AI 标签 / 向量：各自开关 + 全局 AI 服务可用（endpoint 已配）才执行；失败不影响整体
                 if (isAiReady()) {
@@ -116,6 +117,20 @@ class AnalysisPipeline(
         _progress.value = null
     }
 
+    /** 仅重新聚类重复（不重新 hash）：重复算法更新或分组异常时手动触发，修复存量分组。 */
+    suspend fun reclusterDuplicates() {
+        if (_state.value == AnalysisState.Running) return
+        _state.value = AnalysisState.Running
+        try {
+            runDuplicate()
+        } catch (t: Throwable) {
+            Timber.e(t, "reclusterDuplicates failed")
+        } finally {
+            _state.value = AnalysisState.Idle
+            _progress.value = null
+        }
+    }
+
     // ---- 各阶段 ----
 
     /**
@@ -123,18 +138,18 @@ class AnalysisPipeline(
      * 随后在内存里同时算出 xxHash / pHash / 宽高 / 模糊度 / 纯色 / 损坏。
      * 块内按 [HASH_CONCURRENCY] 并发，整块结果一次事务写回（[ImageDao.saveHashQualityBatch]）。
      */
-    private suspend fun runHashAndQuality(limit: Int, oldestFirst: Boolean, reader: ImageBytesReader) {
+    private suspend fun runHashAndQuality(limit: Int, oldestFirst: Boolean, reader: ImageBytesReader): Int {
         val provider = accessManager.current()
         if (!provider.isAvailable()) {
             Timber.w("Hash/Quality phase skipped: access provider not ready")
-            return
+            return 0
         }
 
         // 先取待办 id 列表（一次排序、仅 id），再分块装载实体处理：内存恒定、支持「无限」
         val ids = imageDao.pendingHashIds(resolveLimit(limit), oldestFirst)
         if (ids.isEmpty()) {
             _progress.value = AnalysisProgress(AnalysisPhase.HASH, 0, 0, msg = "完成")
-            return
+            return 0
         }
         val total = ids.size
         val processed = AtomicInteger(0)
@@ -164,6 +179,7 @@ class AnalysisPipeline(
         }
         _progress.value = AnalysisProgress(AnalysisPhase.HASH, processed.get(), total, msg = "完成")
         Timber.i("AnalysisPipeline.runHashAndQuality: analyzed ${processed.get()}/$total images (limit=$limit)")
+        return processed.get()
     }
 
     /** 一次读取字节 → xxHash + pHash + 质量，避免对同一文件重复跨进程读取。 */
@@ -192,8 +208,7 @@ class AnalysisPipeline(
     private suspend fun runDuplicate() {
         _progress.value = AnalysisProgress(AnalysisPhase.DUPLICATE, 0, 0, msg = "聚类中…")
         imageDao.clearDuplicateAssignments()
-        duplicateDetector.clusterExact()
-        duplicateDetector.clusterVisual()
+        duplicateDetector.recluster()
         _progress.value = AnalysisProgress(AnalysisPhase.DUPLICATE, 1, 1, msg = "完成")
     }
 

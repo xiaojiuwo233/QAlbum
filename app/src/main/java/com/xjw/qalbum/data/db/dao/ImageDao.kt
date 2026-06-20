@@ -568,6 +568,20 @@ interface ImageDao {
         val phash: Long?,
     )
 
+    /** 重复聚类投影：一次取齐 xxHash / pHash / 尺寸，避免逐个 getById（窄投影，内存可控） */
+    @Query("""
+        SELECT id, xxhash, phash, width, height, size FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb'
+          AND (xxhash IS NOT NULL OR phash IS NOT NULL)
+    """)
+    suspend fun dedupProjection(): List<DedupRow>
+
+    /** 批量写回重复分配（一个事务，避免逐图 update 各起一次写锁） */
+    @Transaction
+    suspend fun assignDuplicates(items: List<DuplicateAssignment>) {
+        items.forEach { assignDuplicate(it.id, it.groupId, it.isBest) }
+    }
+
     @Query("UPDATE images SET delete_score = :score WHERE id = :id")
     suspend fun updateDeleteScore(id: Long, score: Float)
 
@@ -817,3 +831,16 @@ data class CleanupSignalRow(
     val isDuplicateBest: Boolean,
     val deleteScore: Float,
 )
+
+/** 重复聚类所需的最小投影（由 [ImageDao.dedupProjection] 填充） */
+data class DedupRow(
+    val id: Long,
+    val xxhash: String?,
+    val phash: Long?,
+    val width: Int,
+    val height: Int,
+    val size: Long,
+)
+
+/** 一条重复分配结果（由 [DuplicateClusterer] 产出，[ImageDao.assignDuplicates] 批量写回） */
+data class DuplicateAssignment(val id: Long, val groupId: Long, val isBest: Boolean)

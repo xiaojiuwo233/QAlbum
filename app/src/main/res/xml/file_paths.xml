@@ -3,4 +3,7 @@
     <cache-path
         name="external_view"
         path="external_view/" />
+    <cache-path
+        name="share"
+        path="share/" />
 </paths>

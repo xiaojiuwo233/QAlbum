@@ -23,18 +23,18 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavBackStackEntry
 import androidx.navigation.NavGraph.Companion.findStartDestination
-import androidx.navigation.NavHostController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
-import androidx.navigation.compose.navigation
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
@@ -47,11 +47,7 @@ import com.xjw.qalbum.ui.anim.sharedAxisXEnter
 import com.xjw.qalbum.ui.anim.sharedAxisXExit
 import com.xjw.qalbum.ui.anim.sharedAxisXPopEnter
 import com.xjw.qalbum.ui.anim.sharedAxisXPopExit
-import com.xjw.qalbum.ui.cleanup.CleanupMainScreen
-import com.xjw.qalbum.ui.cleanup.CleanupRecycleBinScreen
-import com.xjw.qalbum.ui.cleanup.CleanupReviewGroupScreen
-import com.xjw.qalbum.ui.cleanup.CleanupReviewScreen
-import com.xjw.qalbum.ui.cleanup.CleanupViewModel
+import com.xjw.qalbum.ui.cleanup.CleanupScreen
 import com.xjw.qalbum.ui.dashboard.DashboardScreen
 import com.xjw.qalbum.ui.detail.ImageDetailScreen
 import com.xjw.qalbum.ui.gallery.FavoriteGalleryScreen
@@ -67,7 +63,6 @@ import com.xjw.qalbum.ui.settings.ScanSettingsScreen
 import com.xjw.qalbum.ui.settings.SettingsCategory
 import com.xjw.qalbum.ui.settings.SettingsScreen
 import com.xjw.qalbum.ui.tags.TagsScreen
-import org.koin.androidx.compose.koinViewModel
 import org.koin.compose.koinInject
 
 /**
@@ -90,7 +85,9 @@ fun AppNavigation() {
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
     val currentDestination = NavDestination.fromRoute(currentRoute)
-    val showBottomBar = currentRoute in bottomBarRoutes
+    // 审核 / 重复组详情 / 回收站是清理页内部子页（activePage 切换）：进入时隐藏底部导航栏做全屏专注。
+    var cleanupReviewMode by remember { mutableStateOf(false) }
+    val showBottomBar = currentRoute in bottomBarRoutes && !cleanupReviewMode
 
     val slideSpec = MaterialTheme.motionScheme.defaultSpatialSpec<IntOffset>()
     val fadeSpec = MaterialTheme.motionScheme.defaultEffectsSpec<Float>()
@@ -212,43 +209,12 @@ fun AppNavigation() {
                         animatedScope = this,
                     )
                 }
-                // 清理域：嵌套导航图，主页 + 审核 / 重复组详情 / 回收站共享同一个 CleanupViewModel。
-                // 子页不在 bottomBarRoutes → 全屏、底部导航栏滑出、走 Shared Axis X 转场。
-                navigation(startDestination = NavDestination.Cleanup.route, route = CLEANUP_GRAPH_ROUTE) {
-                    composable(NavDestination.Cleanup.route) { entry ->
-                        CleanupMainScreen(
-                            contentPadding = contentPadding,
-                            viewModel = cleanupGraphViewModel(navController, entry),
-                            onOpenReview = { navController.navigate(CLEANUP_REVIEW_ROUTE) },
-                            onOpenRecycleBin = { navController.navigate(CLEANUP_RECYCLEBIN_ROUTE) },
-                            onOpenTags = { navController.navigate("tags") },
-                        )
-                    }
-                    composable(CLEANUP_REVIEW_ROUTE) { entry ->
-                        CleanupReviewScreen(
-                            contentPadding = contentPadding,
-                            viewModel = cleanupGraphViewModel(navController, entry),
-                            onBack = { navController.popBackStack() },
-                            onOpenGroup = { gid -> navController.navigate("$CLEANUP_GROUP_ROUTE/$gid") },
-                        )
-                    }
-                    composable(
-                        route = "$CLEANUP_GROUP_ROUTE/{groupId}",
-                        arguments = listOf(navArgument("groupId") { type = NavType.LongType }),
-                    ) { entry ->
-                        CleanupReviewGroupScreen(
-                            groupId = entry.arguments?.getLong("groupId") ?: 0L,
-                            viewModel = cleanupGraphViewModel(navController, entry),
-                            onBack = { navController.popBackStack() },
-                        )
-                    }
-                    composable(CLEANUP_RECYCLEBIN_ROUTE) { entry ->
-                        CleanupRecycleBinScreen(
-                            contentPadding = contentPadding,
-                            viewModel = cleanupGraphViewModel(navController, entry),
-                            onBack = { navController.popBackStack() },
-                        )
-                    }
+                composable(NavDestination.Cleanup.route) {
+                    CleanupScreen(
+                        contentPadding = contentPadding,
+                        onOpenTags = { navController.navigate("tags") },
+                        onReviewModeChange = { cleanupReviewMode = it },
+                    )
                 }
                 composable("tags") {
                     TagsScreen(
@@ -389,19 +355,3 @@ private fun PaddingValues.bottomOnly(): PaddingValues {
     )
 }
 
-// ---- 清理域嵌套图 ----
-
-private const val CLEANUP_GRAPH_ROUTE = "cleanup_graph"
-private const val CLEANUP_REVIEW_ROUTE = "cleanup_review"
-private const val CLEANUP_GROUP_ROUTE = "cleanup_group"
-private const val CLEANUP_RECYCLEBIN_ROUTE = "cleanup_recyclebin"
-
-/** cleanup 嵌套图内各页共享的 ViewModel：scope 到图的 NavBackStackEntry，保证生成→审核→详情状态一致。 */
-@Composable
-private fun cleanupGraphViewModel(
-    navController: NavHostController,
-    entry: NavBackStackEntry,
-): CleanupViewModel {
-    val parentEntry = remember(entry) { navController.getBackStackEntry(CLEANUP_GRAPH_ROUTE) }
-    return koinViewModel(viewModelStoreOwner = parentEntry)
-}

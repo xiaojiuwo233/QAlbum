@@ -49,3 +49,6 @@ data class ImageTagEntity(
     @ColumnInfo(name = "confidence") val confidence: Float = 1.0f,
     @ColumnInfo(name = "source") val source: String,
 )
+
+/** 用户专属「保留」标签名：仅用户在审核页手动「保留」时添加（type=user），AI 不得自动添加。 */
+const val TAG_USER_KEEP = "用户保留"

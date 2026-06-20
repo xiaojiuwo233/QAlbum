@@ -202,6 +202,8 @@ val appModule = module {
             thumbnailTrashManager = get(),
             imageRepository = get(),
             settings = get(),
+            tagDao = get(),
+            imageFileManager = get(),
         )
     }
     viewModel {
