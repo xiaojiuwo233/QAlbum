@@ -40,6 +40,13 @@
 -keep class com.paddle.ocr.** { *; }
 -keep class ai.onnxruntime.** { *; }
 
+# --- OpenCV ---
+# OpenCV 的 Java 类（Mat / Size / Point / Scalar / MatOfPoint 等）由 native 经 JNI 按名
+# 创建与访问；官方 org.opencv AAR 不带 consumer proguard 规则，release minify 下必须整体
+# 保留，否则 OpenCV 能 dlopen 成功但 JNI 调用即崩溃（OCR 仍不可用）。
+-keep class org.opencv.** { *; }
+-dontwarn org.opencv.**
+
 # --- OkHttp ---
 -dontwarn okhttp3.**
 -dontwarn okio.**

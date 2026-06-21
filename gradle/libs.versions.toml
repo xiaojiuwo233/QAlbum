@@ -45,7 +45,11 @@ okhttp = "4.12.0"
 kotlinxSerialization = "1.7.3"
 kotlinxCoroutines = "1.9.0"
 onnxruntime = "1.21.1"
-opencv = "4.5.3"
+# OpenCV：官方 Maven 包（org.opencv，4.9.0+ 起在 Maven Central 发布）。
+# 旧的 com.quickbirdstudios:opencv:4.5.3 在 Android 14+/新 bionic 上 dlopen 失败
+# （libopencv_java4.so 引用了运行时不存在的符号 __sfp_handle_exceptions），导致 OCR 整阶段跳过。
+# 官方 4.x 库名仍是 opencv_java4、Java 包仍是 org.opencv.*，与 ppocr-sdk 完全兼容。
+opencv = "4.12.0"
 
 # Hash
 zeroAllocationHashing = "0.16"
@@ -121,7 +125,7 @@ kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "kotlinxCoroutines" }
 kotlinx-coroutines-play-services = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-play-services", version.ref = "kotlinxCoroutines" }
 onnxruntime-android = { group = "com.microsoft.onnxruntime", name = "onnxruntime-android", version.ref = "onnxruntime" }
-opencv-android = { group = "com.quickbirdstudios", name = "opencv", version.ref = "opencv" }
+opencv-android = { group = "org.opencv", name = "opencv", version.ref = "opencv" }
 
 # 算法
 zero-allocation-hashing = { group = "net.openhft", name = "zero-allocation-hashing", version.ref = "zeroAllocationHashing" }
