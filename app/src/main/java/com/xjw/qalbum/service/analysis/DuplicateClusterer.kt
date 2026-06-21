@@ -7,13 +7,15 @@ import kotlin.math.max
  * 重复聚类核心（纯函数，可单测）。
  *
  * 两类重复：
- * - **精确**：xxHash 完全相同 —— 一定同内容，可靠。
- * - **视觉**：pHash 距离近 —— 但 pHash 对「文字页 / 代码截图 / 纯色」这类低频结构雷同的图区分度差，
- *   仅靠距离会把大量**不相关**图经 union-find 传递聚成巨型组。故视觉聚类额外要求：
- *   1) 距离 < [visualThreshold]（收紧）；2) **宽高比接近**（[aspectTolerance]，挡掉「尺寸大不相同」的误聚）；
- *   3) 连通分量大小 ≤ [maxVisualGroupSize]（兜底，超大视觉组判定为误聚直接丢弃）。
- *
- * 精确重复不受这些限制（同一图被转发上百次是合法的大组）。
+ * - **精确**：xxHash 完全相同 —— 一定同内容，可靠，不受任何视觉约束（同一图被转发上百次是合法大组）。
+ * - **视觉**：多信号合议，避免 pHash 单打独斗把「截图 / 文档 / 纯色」这类低频结构雷同、但内容不同的图误聚。
+ *   连边需**同时**满足：
+ *   1) pHash 距离 < [visualThreshold]（粗筛 + 高 16 位分桶，避免 O(N²)）；
+ *   2) **分块指纹（blockHash, 256bit）距离 < [blockThreshold]** —— 精筛，要求「局部逐格一致」，
+ *      这是区分截图的主力（「整体相似」对截图永远成立，「逐格一致」只对真副本成立）；
+ *   3) **宽高比接近**（[aspectTolerance]）；
+ *   随后连通分量大小 > [maxVisualGroupSize] 的整组判定误聚丢弃（兜底）。
+ *   纯色图（[Item.isBlank]）与尚未回填 blockHash 的图不参与视觉聚类。
  */
 object DuplicateClusterer {
 
@@ -24,11 +26,21 @@ object DuplicateClusterer {
         val width: Int,
         val height: Int,
         val size: Long,
-    )
+        /** 256bit（32 字节）分块指纹：视觉去重的精筛信号，要求「局部逐格一致」。null = 尚未回填，不参与视觉聚类。 */
+        val blockHash: ByteArray? = null,
+        /** 纯色/空白图：任何 hash 都雷同，直接排除出视觉聚类，避免误聚。 */
+        val isBlank: Boolean = false,
+    ) {
+        // blockHash 是 ByteArray，data class 默认 equals/hashCode 不按内容比较；本类仅以 id 标识、
+        // 不作为集合 key，故只按 id 判等。显式重写以免 IDE 对 Array 字段告警。
+        override fun equals(other: Any?): Boolean = other is Item && other.id == id
+        override fun hashCode(): Int = id.hashCode()
+    }
 
     data class Assignment(val id: Long, val groupId: Long, val isBest: Boolean)
 
     const val DEFAULT_VISUAL_THRESHOLD = 8
+    const val DEFAULT_BLOCK_THRESHOLD = 40
     const val DEFAULT_ASPECT_TOLERANCE = 0.12
     const val DEFAULT_MAX_VISUAL_GROUP = 20
 
@@ -36,8 +48,11 @@ object DuplicateClusterer {
         items: List<Item>,
         startGroupId: Long,
         visualThreshold: Int = DEFAULT_VISUAL_THRESHOLD,
+        blockThreshold: Int = DEFAULT_BLOCK_THRESHOLD,
         aspectTolerance: Double = DEFAULT_ASPECT_TOLERANCE,
         maxVisualGroupSize: Int = DEFAULT_MAX_VISUAL_GROUP,
+        /** 人工拆分形成的「禁止再聚」约束：imageId → 所属 cohort 集合；共享任一 cohort 的两图不连边。 */
+        exclusions: Map<Long, Set<Long>> = emptyMap(),
     ): List<Assignment> {
         val assignments = mutableListOf<Assignment>()
         var nextGroup = startGroupId
@@ -57,18 +72,30 @@ object DuplicateClusterer {
                 nextGroup++
             }
 
-        // 2) 视觉重复：未被精确分组、且有 pHash 的图
-        val visualItems = items.filter { it.id !in assignedExact && it.phash != null }
+        // 2) 视觉重复：未被精确分组、有 pHash + blockHash、且非纯色的图
+        val visualItems = items.filter {
+            it.id !in assignedExact && it.phash != null && it.blockHash != null && !it.isBlank
+        }
         if (visualItems.isNotEmpty()) {
             val byId = visualItems.associateBy { it.id }
             val uf = UnionFind(visualItems.map { it.id })
+            // 共享任一 cohort 的两图已被用户裁定「非重复」，禁止连边（人工拆分的持久化约束）
+            fun sharesCohort(a: Long, b: Long): Boolean {
+                val ca = exclusions[a] ?: return false
+                val cb = exclusions[b] ?: return false
+                return ca.any { it in cb }
+            }
             // 高 16 位分桶，桶内两两比较，避免 O(N²)
             visualItems.groupBy { (it.phash!! ushr 48) and 0xFFFF }.values.forEach { bucket ->
                 for (i in bucket.indices) {
                     for (j in i + 1 until bucket.size) {
                         val a = bucket[i]
                         val b = bucket[j]
-                        if (hamming(a.phash!!, b.phash!!) < visualThreshold && aspectClose(a, b, aspectTolerance)) {
+                        if (hamming(a.phash!!, b.phash!!) < visualThreshold &&
+                            blockHashDistance(a.blockHash!!, b.blockHash!!) < blockThreshold &&
+                            aspectClose(a, b, aspectTolerance) &&
+                            !sharesCohort(a.id, b.id)
+                        ) {
                             uf.union(a.id, b.id)
                         }
                     }
@@ -108,6 +135,14 @@ object DuplicateClusterer {
     }
 
     fun hamming(a: Long, b: Long): Int = java.lang.Long.bitCount(a xor b)
+
+    /** 两个分块指纹（等长 ByteArray）的汉明距离；长度不等视为最大距离（判定不相似）。 */
+    fun blockHashDistance(a: ByteArray, b: ByteArray): Int {
+        if (a.size != b.size) return Int.MAX_VALUE
+        var d = 0
+        for (i in a.indices) d += Integer.bitCount((a[i].toInt() xor b[i].toInt()) and 0xFF)
+        return d
+    }
 
     /** 宽高比是否接近（任一缺尺寸则视为不接近，保守不聚） */
     fun aspectClose(a: Item, b: Item, tolerance: Double): Boolean {

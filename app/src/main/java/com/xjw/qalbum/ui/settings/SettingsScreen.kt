@@ -96,6 +96,7 @@ import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.domain.model.AccessMode
 import com.xjw.qalbum.domain.model.CleanupConfig
 import com.xjw.qalbum.domain.model.CleanupPreset
+import com.xjw.qalbum.domain.model.DuplicateStrictness
 import com.xjw.qalbum.service.ai.AiPrivacyGuard
 import com.xjw.qalbum.service.ocr.OcrModelDownloadState
 import com.xjw.qalbum.service.ocr.OcrModelStatus
@@ -556,6 +557,7 @@ fun CleanupSettingsScreen(
     val reviewLimit by viewModel.reviewLimit.collectAsState()
     val allDuplicates by viewModel.cleanupAllDuplicates.collectAsState()
     val maxDupGroupSize by viewModel.maxDuplicateGroupSize.collectAsState()
+    val duplicateStrictness by viewModel.duplicateStrictness.collectAsState()
     val activePreset = CleanupPreset.match(config)
 
     SettingsDetailScaffold(
@@ -624,6 +626,31 @@ fun CleanupSettingsScreen(
                 enabled = config.duplicateEnabled,
                 onEnabledChange = viewModel::setDuplicateEnabled,
             ) {
+                Text("匹配严格度", style = MaterialTheme.typography.titleSmall)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    DuplicateStrictness.entries.forEach { s ->
+                        FilterChip(
+                            selected = duplicateStrictness == s,
+                            onClick = { viewModel.setDuplicateStrictness(s) },
+                            label = {
+                                Text(
+                                    when (s) {
+                                        DuplicateStrictness.LOOSE -> "宽松"
+                                        DuplicateStrictness.STANDARD -> "标准"
+                                        DuplicateStrictness.STRICT -> "严格"
+                                    },
+                                )
+                            },
+                        )
+                    }
+                }
+                SettingsBlurb(
+                    when (duplicateStrictness) {
+                        DuplicateStrictness.LOOSE -> "找得更多，但可能把相似图误判为重复（改后需重新查重）"
+                        DuplicateStrictness.STANDARD -> "推荐：兼顾找全与精准（改后需重新查重）"
+                        DuplicateStrictness.STRICT -> "宁可漏掉也尽量不误判，适合截图多的相册（改后需重新查重）"
+                    },
+                )
                 ThresholdSlider(
                     value = maxDupGroupSize.toFloat(),
                     valueRange = SettingsRepository.MIN_MAX_DUP_GROUP_SIZE.toFloat()..SettingsRepository.MAX_MAX_DUP_GROUP_SIZE.toFloat(),

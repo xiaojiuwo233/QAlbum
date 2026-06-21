@@ -3,8 +3,10 @@ package com.xjw.qalbum.data.repository
 import androidx.paging.Pager
 import androidx.paging.PagingConfig
 import androidx.paging.PagingData
+import com.xjw.qalbum.data.db.dao.DedupExclusionDao
 import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.db.dao.OcrDao
+import com.xjw.qalbum.data.db.entity.DedupExclusionEntity
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.db.entity.OcrTextEntity
 import com.xjw.qalbum.domain.model.GallerySort
@@ -20,6 +22,7 @@ import kotlinx.coroutines.flow.map
 class ImageRepository(
     private val imageDao: ImageDao,
     private val ocrDao: OcrDao,
+    private val dedupExclusionDao: DedupExclusionDao,
 ) {
 
     // ---- 时间线 ----
@@ -108,6 +111,20 @@ class ImageRepository(
 
     suspend fun getByDuplicateGroup(groupId: Long): List<ImageEntity> =
         imageDao.getByDuplicateGroup(groupId)
+
+    /**
+     * 拆分重复组：用户判定该组「差异过大」非真重复。整组成员写入一个新 cohort（重新查重时禁止再聚到一起），
+     * 并清除该组的重复分配。返回受影响成员数。
+     */
+    suspend fun splitDuplicateGroup(groupId: Long): Int {
+        val ids = imageDao.imageIdsInDuplicateGroup(groupId)
+        if (ids.size >= 2) {
+            val cohortId = dedupExclusionDao.maxCohortId() + 1
+            dedupExclusionDao.insertAll(ids.map { DedupExclusionEntity(cohortId = cohortId, imageId = it) })
+        }
+        imageDao.clearDuplicateGroup(groupId)
+        return ids.size
+    }
 
     suspend fun getOcr(imageId: Long): OcrTextEntity? = ocrDao.getByImageId(imageId)
 

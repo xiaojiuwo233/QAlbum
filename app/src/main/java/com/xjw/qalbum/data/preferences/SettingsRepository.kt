@@ -13,6 +13,7 @@ import com.xjw.qalbum.domain.model.AccessMode
 import com.xjw.qalbum.domain.model.AnalysisConfig
 import com.xjw.qalbum.domain.model.AutoFavoriteConfig
 import com.xjw.qalbum.domain.model.CleanupConfig
+import com.xjw.qalbum.domain.model.DuplicateStrictness
 import com.xjw.qalbum.domain.model.GallerySort
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -166,6 +167,15 @@ class SettingsRepository(private val context: Context) {
         ds.edit { it[Keys.MAX_DUP_GROUP_SIZE] = value.coerceIn(MIN_MAX_DUP_GROUP_SIZE, MAX_MAX_DUP_GROUP_SIZE) }
     }
 
+    /** 重复检测严格度（视觉阈值档位）。缺省回退 [DuplicateStrictness.DEFAULT]；改后需重新查重才生效。 */
+    val duplicateStrictness: Flow<DuplicateStrictness> = ds.data.map {
+        DuplicateStrictness.fromName(it[Keys.DUPLICATE_STRICTNESS])
+    }
+
+    suspend fun setDuplicateStrictness(value: DuplicateStrictness) {
+        ds.edit { it[Keys.DUPLICATE_STRICTNESS] = value.name }
+    }
+
     // ---- 图库页偏好（列数 / 排序 / 大图标记阈值） ----
 
     /** 图库每行图片数；与捏合缩放共用，范围 [MIN_GALLERY_COLUMNS, MAX_GALLERY_COLUMNS] */
@@ -283,6 +293,7 @@ class SettingsRepository(private val context: Context) {
         val REVIEW_LIMIT = intPreferencesKey("review_limit")
         val CLEANUP_ALL_DUPLICATES = booleanPreferencesKey("cleanup_all_duplicates")
         val MAX_DUP_GROUP_SIZE = intPreferencesKey("max_dup_group_size")
+        val DUPLICATE_STRICTNESS = stringPreferencesKey("duplicate_strictness")
 
         val GALLERY_COLUMNS = intPreferencesKey("gallery_columns")
         val GALLERY_SORT = stringPreferencesKey("gallery_sort")

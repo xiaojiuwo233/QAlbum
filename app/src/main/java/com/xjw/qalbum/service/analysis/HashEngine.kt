@@ -144,6 +144,43 @@ object HashEngine {
     fun isVisuallySimilar(a: Long, b: Long, threshold: Int = 10): Boolean =
         hammingDistance(a, b) < threshold
 
+    // ---- blockHash（分块指纹，视觉去重精筛）----
+
+    /**
+     * 从 Bitmap 计算 256bit 分块指纹：缩放到 (BLOCK_COLS × BLOCK_ROWS) 灰度后水平相邻比较（16×16 dHash）。
+     * 供分析阶段与 pHash 共用已解码 bitmap，零额外解码；要求「局部逐格一致」，是截图去重的精筛主力。
+     */
+    fun computeBlockHashFromBitmap(bitmap: Bitmap): ByteArray {
+        val scaled = Bitmap.createScaledBitmap(bitmap, BLOCK_COLS, BLOCK_ROWS, true)
+        val pixels = IntArray(BLOCK_COLS * BLOCK_ROWS)
+        scaled.getPixels(pixels, 0, BLOCK_COLS, 0, 0, BLOCK_COLS, BLOCK_ROWS)
+        if (scaled !== bitmap) scaled.recycle()
+        val gray = IntArray(pixels.size) { i ->
+            val p = pixels[i]
+            val r = (p shr 16) and 0xFF
+            val g = (p shr 8) and 0xFF
+            val b = p and 0xFF
+            (r * 77 + g * 150 + b * 29) shr 8 // 整数 luma，与 QualityAnalyzer 一致
+        }
+        return blockHashFromGray(gray, BLOCK_COLS, BLOCK_ROWS)
+    }
+
+    /** 从 (cols × rows) 灰度网格用「水平相邻比较」生成分块指纹（(cols-1)*rows bit，按 byte 打包）。 */
+    fun blockHashFromGray(gray: IntArray, cols: Int, rows: Int): ByteArray {
+        val out = ByteArray(((cols - 1) * rows + 7) / 8)
+        var idx = 0
+        for (y in 0 until rows) {
+            val base = y * cols
+            for (x in 0 until cols - 1) {
+                if (gray[base + x] < gray[base + x + 1]) {
+                    out[idx ushr 3] = (out[idx ushr 3].toInt() or (1 shl (idx and 7))).toByte()
+                }
+                idx++
+            }
+        }
+        return out
+    }
+
     // ---- 共享 IO / 解码 ----
 
     /** 读取图片字节（带上限），供「一次读取多结果」复用。失败或空返回 null。 */
@@ -199,6 +236,8 @@ object HashEngine {
     private const val PHASH_SCALE = 32   // 缩放尺寸
     private const val PHASH_LOW = 8      // 低频块尺寸
     private const val MAX_PHASH_SIDE = 256
+    private const val BLOCK_COLS = 17    // 分块指纹：水平 17 列（16 次相邻比较）
+    private const val BLOCK_ROWS = 16    // 分块指纹：16 行 → 16×16 = 256 bit
     private val INV_SQRT2 = 1.0 / sqrt(2.0)
     private const val MAX_HASH_BYTES = 32 * 1024 * 1024   // xxHash 最多 32MB（限制罕见的超大图）
     private const val MAX_DECODE_BYTES = 32 * 1024 * 1024

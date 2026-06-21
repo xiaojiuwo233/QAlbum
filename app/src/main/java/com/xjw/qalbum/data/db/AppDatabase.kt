@@ -7,6 +7,7 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.xjw.qalbum.data.db.dao.CleanupDao
+import com.xjw.qalbum.data.db.dao.DedupExclusionDao
 import com.xjw.qalbum.data.db.dao.DirSnapshotDao
 import com.xjw.qalbum.data.db.dao.EmbeddingDao
 import com.xjw.qalbum.data.db.dao.ImageDao
@@ -16,6 +17,7 @@ import com.xjw.qalbum.data.db.dao.TagDao
 import com.xjw.qalbum.data.db.dao.UserActionDao
 import com.xjw.qalbum.data.db.entity.CleanupBatchEntity
 import com.xjw.qalbum.data.db.entity.CleanupCandidateEntity
+import com.xjw.qalbum.data.db.entity.DedupExclusionEntity
 import com.xjw.qalbum.data.db.entity.DirSnapshotEntity
 import com.xjw.qalbum.data.db.entity.ImageEmbeddingEntity
 import com.xjw.qalbum.data.db.entity.ImageEntity
@@ -48,8 +50,9 @@ import com.xjw.qalbum.data.db.entity.UserActionEntity
         UserActionEntity::class,
         ImageEmbeddingEntity::class,
         DirSnapshotEntity::class,
+        DedupExclusionEntity::class,
     ],
-    version = 7,
+    version = 8,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -62,6 +65,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun userActionDao(): UserActionDao
     abstract fun embeddingDao(): EmbeddingDao
     abstract fun dirSnapshotDao(): DirSnapshotDao
+    abstract fun dedupExclusionDao(): DedupExclusionDao
 
     companion object {
         const val DB_NAME = "qalbum.db"
@@ -127,13 +131,38 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v7 → v8：重复检测增强。
+         * 1. images 新增 block_hash（256bit 分块指纹，BLOB 可空）—— 视觉去重精筛信号；存量行留空，
+         *    由后续分析「随增量」回填（pendingHashIds 会纳入 block_hash IS NULL 的图）。
+         *    仅加可空列＝元数据级 ALTER，对 200w 行瞬时完成、不重写任何行。
+         * 2. 新增 dedup_exclusions 表 —— 记录用户手动拆分重复组形成的「禁止再聚」约束。
+         */
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `images` ADD COLUMN `block_hash` BLOB")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `dedup_exclusions` (
+                        `cohort_id` INTEGER NOT NULL,
+                        `image_id` INTEGER NOT NULL,
+                        PRIMARY KEY(`cohort_id`, `image_id`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_dedup_exclusions_image_id` ON `dedup_exclusions` (`image_id`)"
+                )
+            }
+        }
+
         fun build(context: Context): AppDatabase {
             return Room.databaseBuilder(
                 context.applicationContext,
                 AppDatabase::class.java,
                 DB_NAME,
             )
-                .addMigrations(MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
+                .addMigrations(MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
                 // 已注册的版本走 Migration 保数据；只有遇到未覆盖的版本跳变才回退重建兜底
                 .fallbackToDestructiveMigration()
                 .build()

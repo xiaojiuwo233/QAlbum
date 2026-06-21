@@ -277,6 +277,30 @@ class CleanupViewModel(
         _lastBatch.value = null
     }
 
+    /**
+     * 用户判定重复组「差异过大」非真重复：拆分该组并永久排斥（重新查重不再聚到一起），
+     * 同时从当前审核列表移除该组、清掉其成员的勾选。
+     */
+    fun splitDuplicateGroup(groupId: Long, onDone: () -> Unit = {}) {
+        viewModelScope.launch {
+            _busy.value = true
+            try {
+                val memberIds = _reviewBatch.value?.items
+                    ?.filterIsInstance<ReviewItem.Group>()
+                    ?.firstOrNull { it.groupId == groupId }
+                    ?.members?.map { it.id }?.toSet().orEmpty()
+                imageRepository.splitDuplicateGroup(groupId)
+                _reviewBatch.value = _reviewBatch.value?.let { rb ->
+                    rb.copy(items = rb.items.filterNot { it is ReviewItem.Group && it.groupId == groupId })
+                }
+                _selectedReviewDeleteIds.value = _selectedReviewDeleteIds.value - memberIds
+                onDone()
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
     /** 预览页：收藏 / 取消收藏 */
     fun setFavorite(imageId: Long, favorite: Boolean) {
         viewModelScope.launch { imageRepository.setFavorite(imageId, favorite) }

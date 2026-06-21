@@ -172,7 +172,7 @@ class AnalysisPipeline(
                                 _progress.value = AnalysisProgress(AnalysisPhase.HASH, done, total)
                             }
                             HashQualityWrite(
-                                img.id, r.xxhash, r.phash, r.width, r.height, r.blur, r.blank, r.corrupt,
+                                img.id, r.xxhash, r.phash, r.blockHash, r.width, r.height, r.blur, r.blank, r.corrupt,
                             )
                         }
                     }
@@ -189,19 +189,21 @@ class AnalysisPipeline(
     /** 一次读取字节 → xxHash + pHash + 质量，避免对同一文件重复跨进程读取。 */
     private suspend fun analyzeOne(reader: ImageBytesReader, path: String): HashQualityResult {
         val bytes = reader.read(path, PrivilegedImageReader.MAX_IMAGE_BYTES)
-            ?: return HashQualityResult(null, null, 0, 0, null, false, true)
+            ?: return HashQualityResult(null, null, null, 0, 0, null, false, true)
         val xxhash = HashEngine.xxHashOf(bytes)
         val bitmap = HashEngine.decodeScaledBytes(bytes, QUALITY_DECODE_SIDE)
-            ?: return HashQualityResult(xxhash, null, 0, 0, null, false, true)
+            ?: return HashQualityResult(xxhash, null, null, 0, 0, null, false, true)
         val phash = HashEngine.computePHashFromBitmap(bitmap)
+        val blockHash = HashEngine.computeBlockHashFromBitmap(bitmap) // 复用已解码 bitmap，零额外解码
         val q = QualityAnalyzer.analyzeBitmap(bitmap)
         bitmap.recycle()
-        return HashQualityResult(xxhash, phash, q.width, q.height, q.blurScore, q.isBlank, q.isCorrupt)
+        return HashQualityResult(xxhash, phash, blockHash, q.width, q.height, q.blurScore, q.isBlank, q.isCorrupt)
     }
 
     private data class HashQualityResult(
         val xxhash: String?,
         val phash: Long?,
+        val blockHash: ByteArray?,
         val width: Int,
         val height: Int,
         val blur: Float?,
@@ -212,7 +214,10 @@ class AnalysisPipeline(
     private suspend fun runDuplicate() {
         _progress.value = AnalysisProgress(AnalysisPhase.DUPLICATE, 0, 0, msg = "聚类中…")
         imageDao.clearDuplicateAssignments()
-        duplicateDetector.recluster(settings.maxDuplicateGroupSize.first())
+        duplicateDetector.recluster(
+            settings.maxDuplicateGroupSize.first(),
+            settings.duplicateStrictness.first(),
+        )
         _progress.value = AnalysisProgress(AnalysisPhase.DUPLICATE, 1, 1, msg = "完成")
     }
 

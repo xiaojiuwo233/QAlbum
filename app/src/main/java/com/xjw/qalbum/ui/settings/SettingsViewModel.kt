@@ -11,6 +11,7 @@ import com.xjw.qalbum.domain.model.AccessMode
 import com.xjw.qalbum.domain.model.AnalysisConfig
 import com.xjw.qalbum.domain.model.AutoFavoriteConfig
 import com.xjw.qalbum.domain.model.CleanupConfig
+import com.xjw.qalbum.domain.model.DuplicateStrictness
 import com.xjw.qalbum.domain.model.normalizeAnalysisLimit
 import com.xjw.qalbum.domain.model.CleanupPreset
 import com.xjw.qalbum.domain.model.ScanProgress
@@ -260,6 +261,13 @@ class SettingsViewModel(
 
     fun setMaxDuplicateGroupSize(value: Int) {
         persist { settings.setMaxDuplicateGroupSize(value) }
+    }
+
+    val duplicateStrictness: StateFlow<DuplicateStrictness> = settings.duplicateStrictness
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), DuplicateStrictness.DEFAULT)
+
+    fun setDuplicateStrictness(value: DuplicateStrictness) {
+        persist { settings.setDuplicateStrictness(value) }
     }
 
     // ---- 自动收藏配置（分析阶段，默认关闭，规则可自定义）----

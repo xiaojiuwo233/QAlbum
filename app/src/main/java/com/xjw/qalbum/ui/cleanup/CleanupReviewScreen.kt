@@ -515,6 +515,7 @@ fun CleanupReviewGroupScreen(
     val busy by viewModel.busy.collectAsState()
     val group = review?.items?.filterIsInstance<ReviewItem.Group>()?.firstOrNull { it.groupId == groupId }
     var previewId by remember { mutableStateOf<Long?>(null) }
+    var showSplitDialog by remember { mutableStateOf(false) }
 
     if (group == null) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -544,6 +545,10 @@ fun CleanupReviewGroupScreen(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
+                    }
+                    // 差异过大不是真重复时，用户可拆分本组并永久排斥（重新查重不再聚到一起）
+                    TextButton(onClick = { showSplitDialog = true }, enabled = !busy) {
+                        Text("拆分")
                     }
                 }
             }
@@ -606,6 +611,30 @@ fun CleanupReviewGroupScreen(
             onKeep = { viewModel.keepImage(it); previewId = null },
             onTrash = { viewModel.trashOne(it); previewId = null },
             onShare = { iid -> viewModel.shareImage(iid) { t -> context.startActivity(shareChooser(t)) } },
+        )
+    }
+
+    if (showSplitDialog) {
+        AlertDialog(
+            onDismissRequest = { showSplitDialog = false },
+            title = { Text("拆分重复组") },
+            text = {
+                Text(
+                    "如果这一组图片差异过大、并非真正的重复，可以拆分它。\n\n" +
+                        "拆分后这些图片会从重复中移除，且重新查重时不会再被聚到一起。",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showSplitDialog = false
+                        viewModel.splitDuplicateGroup(groupId) { onBack() }
+                    },
+                ) { Text("确认拆分") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSplitDialog = false }) { Text("取消") }
+            },
         )
     }
 }

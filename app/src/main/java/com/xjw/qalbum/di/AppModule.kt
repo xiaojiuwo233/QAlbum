@@ -64,9 +64,10 @@ val appModule = module {
     single { get<AppDatabase>().userActionDao() }
     single { get<AppDatabase>().embeddingDao() }
     single { get<AppDatabase>().dirSnapshotDao() }
+    single { get<AppDatabase>().dedupExclusionDao() }
 
     single { SettingsRepository(get()) }
-    single { ImageRepository(imageDao = get(), ocrDao = get()) }
+    single { ImageRepository(imageDao = get(), ocrDao = get(), dedupExclusionDao = get()) }
 
     // 应用级协程作用域：用于必须脱离 UI / 页面生命周期完成的写入（如设置落盘）。
     // 与 AnalysisPipeline / ScanController 各自持有的 IO 作用域同范式，随进程存活。
@@ -94,7 +95,7 @@ val appModule = module {
 
     // ---- 分析 / 清理 / OCR / AI 服务 ----
 
-    single { DuplicateDetector(imageDao = get()) }
+    single { DuplicateDetector(imageDao = get(), dedupExclusionDao = get()) }
     single { FileOcrModelStore(context = get()) }
     single<OcrModelStore> { get<FileOcrModelStore>() }
     single { OcrModelDownloadService(modelStore = get(), okHttpClient = get(), appScope = get()) }

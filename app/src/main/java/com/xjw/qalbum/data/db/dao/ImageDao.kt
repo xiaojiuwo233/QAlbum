@@ -95,6 +95,7 @@ interface ImageDao {
             hash_done = CASE WHEN size != :size OR mtime != :mtime THEN 0 ELSE hash_done END,
             xxhash = CASE WHEN size != :size OR mtime != :mtime THEN NULL ELSE xxhash END,
             phash = CASE WHEN size != :size OR mtime != :mtime THEN NULL ELSE phash END,
+            block_hash = CASE WHEN size != :size OR mtime != :mtime THEN NULL ELSE block_hash END,
             blur_score = CASE WHEN size != :size OR mtime != :mtime THEN NULL ELSE blur_score END,
             width = CASE WHEN size != :size OR mtime != :mtime THEN 0 ELSE width END,
             height = CASE WHEN size != :size OR mtime != :mtime THEN 0 ELSE height END,
@@ -160,7 +161,7 @@ interface ImageDao {
     /** 仅重置本地分析（hash/质量/重复/评分）标记与结果；OCR/AI/向量 不动 */
     @Query("""
         UPDATE images SET
-            hash_done = 0, xxhash = NULL, phash = NULL,
+            hash_done = 0, xxhash = NULL, phash = NULL, block_hash = NULL,
             blur_score = NULL, width = 0, height = 0, is_blank = 0, is_corrupt = 0,
             duplicate_group_id = NULL, is_duplicate_best = 0,
             delete_score = 0, info_score = 0
@@ -171,7 +172,7 @@ interface ImageDao {
     /** 重置全部分析标记（含 OCR/AI/向量）；调用方需同时清空 ocr_text / ocr_fts / image_embeddings 表 */
     @Query("""
         UPDATE images SET
-            hash_done = 0, xxhash = NULL, phash = NULL,
+            hash_done = 0, xxhash = NULL, phash = NULL, block_hash = NULL,
             blur_score = NULL, width = 0, height = 0, is_blank = 0, is_corrupt = 0,
             duplicate_group_id = NULL, is_duplicate_best = 0,
             delete_score = 0, info_score = 0,
@@ -463,16 +464,18 @@ interface ImageDao {
      */
     @Query("""
         SELECT id FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb' AND hash_done = 0
+        WHERE status = 'active' AND source_type <> 'chatthumb'
+          AND (hash_done = 0 OR (block_hash IS NULL AND is_corrupt = 0))
         ORDER BY (CASE WHEN :oldestFirst THEN mtime ELSE -mtime END) ASC
         LIMIT :limit
     """)
     suspend fun pendingHashIds(limit: Int, oldestFirst: Boolean): List<Long>
 
-    /** 待 hash（即待「hash+质量」合并分析）的总数，用于进度条总量 */
+    /** 待 hash（即待「hash+质量」合并分析）的总数，用于进度条总量；含待回填 block_hash 的存量图 */
     @Query("""
         SELECT COUNT(*) FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb' AND hash_done = 0
+        WHERE status = 'active' AND source_type <> 'chatthumb'
+          AND (hash_done = 0 OR (block_hash IS NULL AND is_corrupt = 0))
     """)
     suspend fun countPendingHash(): Int
 
@@ -504,7 +507,7 @@ interface ImageDao {
     /** 合并 hash + 质量为单条 UPDATE：每图一次写（原是 saveHash + saveQuality 两次写两个事务）。 */
     @Query("""
         UPDATE images
-        SET xxhash = :xxhash, phash = :phash, hash_done = 1,
+        SET xxhash = :xxhash, phash = :phash, block_hash = :blockHash, hash_done = 1,
             width = :w, height = :h,
             blur_score = :blur, is_blank = :blank, is_corrupt = :corrupt
         WHERE id = :id
@@ -513,6 +516,7 @@ interface ImageDao {
         id: Long,
         xxhash: String?,
         phash: Long?,
+        blockHash: ByteArray?,
         w: Int,
         h: Int,
         blur: Float?,
@@ -528,7 +532,7 @@ interface ImageDao {
     @Transaction
     suspend fun saveHashQualityBatch(rows: List<HashQualityWrite>) {
         for (r in rows) {
-            saveHashQuality(r.id, r.xxhash, r.phash, r.width, r.height, r.blur, r.blank, r.corrupt)
+            saveHashQuality(r.id, r.xxhash, r.phash, r.blockHash, r.width, r.height, r.blur, r.blank, r.corrupt)
         }
     }
 
@@ -576,9 +580,9 @@ interface ImageDao {
         val phash: Long?,
     )
 
-    /** 重复聚类投影：一次取齐 xxHash / pHash / 尺寸，避免逐个 getById（窄投影，内存可控） */
+    /** 重复聚类投影：一次取齐 xxHash / pHash / blockHash / 尺寸 / 纯色标记，避免逐个 getById（窄投影，内存可控） */
     @Query("""
-        SELECT id, xxhash, phash, width, height, size FROM images
+        SELECT id, xxhash, phash, block_hash AS blockHash, width, height, size, is_blank AS isBlank FROM images
         WHERE status = 'active' AND source_type <> 'chatthumb'
           AND (xxhash IS NOT NULL OR phash IS NOT NULL)
     """)
@@ -649,6 +653,14 @@ interface ImageDao {
         ORDER BY is_duplicate_best DESC, size DESC
     """)
     suspend fun getByDuplicateGroup(groupId: Long): List<ImageEntity>
+
+    /** 某重复组的全部成员 id（人工拆分用） */
+    @Query("SELECT id FROM images WHERE duplicate_group_id = :groupId")
+    suspend fun imageIdsInDuplicateGroup(groupId: Long): List<Long>
+
+    /** 清除某重复组的分配（人工拆分时调用，不影响其他组） */
+    @Query("UPDATE images SET duplicate_group_id = NULL, is_duplicate_best = 0 WHERE duplicate_group_id = :groupId")
+    suspend fun clearDuplicateGroup(groupId: Long)
 
     @Query("UPDATE images SET user_keep = :keep WHERE id = :id")
     suspend fun setUserKeep(id: Long, keep: Boolean?)
@@ -829,6 +841,7 @@ data class HashQualityWrite(
     val id: Long,
     val xxhash: String?,
     val phash: Long?,
+    val blockHash: ByteArray?,
     val width: Int,
     val height: Int,
     val blur: Float?,
@@ -856,9 +869,11 @@ data class DedupRow(
     val id: Long,
     val xxhash: String?,
     val phash: Long?,
+    val blockHash: ByteArray?,
     val width: Int,
     val height: Int,
     val size: Long,
+    val isBlank: Boolean,
 )
 
 /** 一条重复分配结果（由 [DuplicateClusterer] 产出，[ImageDao.assignDuplicates] 批量写回） */

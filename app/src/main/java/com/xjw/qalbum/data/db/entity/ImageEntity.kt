@@ -60,6 +60,8 @@ data class ImageEntity(
     // --- Hash ---
     @ColumnInfo(name = "xxhash") val xxhash: String? = null,
     @ColumnInfo(name = "phash") val phash: Long? = null,
+    // 256bit 分块指纹（视觉去重精筛，要求局部逐格一致）。null = 尚未回填。
+    @ColumnInfo(name = "block_hash", typeAffinity = ColumnInfo.BLOB) val blockHash: ByteArray? = null,
 
     // --- 质量评估 ---
     @ColumnInfo(name = "blur_score") val blurScore: Float? = null,
@@ -87,4 +89,49 @@ data class ImageEntity(
     // 永久删除时间戳：仅三条永久删除路径标记 deleted 时写入，用于首页「今日已清理」统计；
     // 功能上线前已删的历史行为 NULL，天然被任何「今日」窗口排除。
     @ColumnInfo(name = "deleted_at") val deletedAt: Long? = null,
-)
+) {
+    // blockHash 是 ByteArray，data class 默认 equals/hashCode 会按引用比较它，导致内容相同的两个实例
+    // 不相等（污染 Compose 重组 / 集合去重）。故显式重写：blockHash 用 contentEquals，其余全字段比较，
+    // hashCode 取 id（满足「equals 相等 → hashCode 相等」契约）。范式同 ImageEmbeddingEntity。
+    // 注意：新增字段时需同步更新此 equals。
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is ImageEntity) return false
+        return id == other.id &&
+            path == other.path &&
+            filename == other.filename &&
+            parentDir == other.parentDir &&
+            sourceType == other.sourceType &&
+            cacheKey == other.cacheKey &&
+            variantGroup == other.variantGroup &&
+            isVariantPrimary == other.isVariantPrimary &&
+            size == other.size &&
+            mtime == other.mtime &&
+            firstSeen == other.firstSeen &&
+            lastSeen == other.lastSeen &&
+            mime == other.mime &&
+            width == other.width &&
+            height == other.height &&
+            isAnimated == other.isAnimated &&
+            isCorrupt == other.isCorrupt &&
+            xxhash == other.xxhash &&
+            phash == other.phash &&
+            (blockHash?.contentEquals(other.blockHash) ?: (other.blockHash == null)) &&
+            blurScore == other.blurScore &&
+            isBlank == other.isBlank &&
+            hashDone == other.hashDone &&
+            ocrDone == other.ocrDone &&
+            aiDone == other.aiDone &&
+            embeddingDone == other.embeddingDone &&
+            infoScore == other.infoScore &&
+            deleteScore == other.deleteScore &&
+            duplicateGroupId == other.duplicateGroupId &&
+            isDuplicateBest == other.isDuplicateBest &&
+            status == other.status &&
+            isFavorite == other.isFavorite &&
+            userKeep == other.userKeep &&
+            deletedAt == other.deletedAt
+    }
+
+    override fun hashCode(): Int = id.hashCode()
+}
