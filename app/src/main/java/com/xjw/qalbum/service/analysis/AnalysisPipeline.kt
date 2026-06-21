@@ -41,12 +41,14 @@ import java.util.concurrent.atomic.AtomicInteger
  * 后台分析 pipeline
  *
  * 阶段顺序（每阶段处理 N 条后再切下一阶段，避免一阶段卡死整体进度）：
- * 1. HASH      —— 所有活跃图片：xxHash + pHash
- * 2. QUALITY   —— 图片宽高 + 模糊度 + 纯色 + 损坏
- * 3. DUPLICATE —— 全库：xxHash 完全重复 + pHash 视觉相似
- * 4. SCORE     —— 每张图片：computeDeleteScore / computeInfoScore
+ * 1. HASH      —— 所有活跃图片：xxHash + pHash + 质量（宽高 / 模糊 / 纯色 / 损坏）
+ * 2. DUPLICATE —— 全库：xxHash 完全重复 + pHash 视觉相似（仅本轮有新 hash 才重算）
+ * 3. SCORE     —— 每张图片：computeDeleteScore / computeInfoScore（读已累积的 OCR 信号）
+ * 4. OCR       —— 逐图文字识别（慢）
+ * 5. AI_TAG / EMBEDDING —— 需全局 AI 服务可用
  *
- * Phase 3+ 会在 SCORE 之前增加 OCR 阶段；Phase 4 增加 AI_TAG / EMBEDDING。
+ * SCORE 前置于 OCR/AI：评分只依赖 DB 里已累积的结果，故放在慢的 OCR 之前先刷新、不被逐图
+ * OCR 阻塞；本轮新产生的 OCR/AI 结果会在下一轮分析的评分中反映（渐进更新，可接受）。
  */
 class AnalysisPipeline(
     private val accessManager: AccessManager,
@@ -90,13 +92,15 @@ class AnalysisPipeline(
                 // 只有本轮确实 hash 了新图，才重算重复聚类（否则跳过，避免「没新 hash 也全量查重」）
                 val hashed = runHashAndQuality(config.hashLimit, oldestFirst, reader)
                 if (hashed > 0) runDuplicate()
+                // 评分前置：只读 DB 里「已累积」的 OCR 信号（hasPhone 等），不依赖本轮 OCR/AI 输出，
+                // 放到慢的 OCR 之前先把 info/delete 评分刷新出来，避免被逐图 OCR 阻塞、迟迟不更新。
+                runScore()
                 if (config.ocrEnabled) runOcr(config.ocrLimit, oldestFirst, reader)
                 // AI 标签 / 向量：各自开关 + 全局 AI 服务可用（endpoint 已配）才执行；失败不影响整体
                 if (isAiReady()) {
                     if (config.aiTagEnabled) runAiTag(config.aiLimit, oldestFirst, reader)
                     if (config.embeddingEnabled) runEmbedding(config.embeddingLimit, oldestFirst)
                 }
-                runScore()
                 _state.value = AnalysisState.Done
             } catch (ce: CancellationException) {
                 // 用户主动取消：交还协程框架，状态由 cancel() 置回 Idle，不展示为失败

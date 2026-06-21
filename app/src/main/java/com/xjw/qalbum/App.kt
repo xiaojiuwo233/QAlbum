@@ -5,6 +5,10 @@ import androidx.work.Configuration
 import coil3.ImageLoader
 import coil3.SingletonImageLoader
 import com.xjw.qalbum.di.appModule
+import com.xjw.qalbum.log.AppLog
+import com.xjw.qalbum.log.CrashHandler
+import com.xjw.qalbum.log.FileLoggingTree
+import com.xjw.qalbum.log.LogcatCapture
 import org.koin.android.ext.android.get
 import org.koin.android.ext.koin.androidContext
 import org.koin.android.ext.koin.androidLogger
@@ -26,9 +30,24 @@ class App : Application(), Configuration.Provider {
     override fun onCreate() {
         super.onCreate()
 
+        // 日志系统：最早期装好，保证之后所有日志（含崩溃）都被持久化捕获。
+        // - FileLoggingTree：所有构建都把 Timber 日志写入文件（release 也生效，闪退后仍在）
+        // - DebugTree（仅 debug）：开发期回显到 Android Studio logcat
+        // - LogcatCapture（仅 release）：镜像 logcat，补齐绕过 Timber 的第三方/原生日志，且与上面零重复
+        AppLog.init(this)
+        CrashHandler.install()
+        Timber.plant(FileLoggingTree())
         if (BuildConfig.DEBUG) {
             Timber.plant(Timber.DebugTree())
+        } else {
+            LogcatCapture.start()
         }
+        Timber.i(
+            "===== App 启动 v%s (build %d) %s =====",
+            BuildConfig.VERSION_NAME,
+            BuildConfig.VERSION_CODE,
+            if (BuildConfig.DEBUG) "debug" else "release",
+        )
 
         startKoin {
             androidLogger(if (BuildConfig.DEBUG) Level.INFO else Level.ERROR)

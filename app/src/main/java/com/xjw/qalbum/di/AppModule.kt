@@ -31,6 +31,7 @@ import com.xjw.qalbum.service.ocr.PaddleOcrRunner
 import com.xjw.qalbum.ui.dashboard.DashboardViewModel
 import com.xjw.qalbum.ui.gallery.GalleryViewModel
 import com.xjw.qalbum.ui.imageloading.buildImageLoader
+import com.xjw.qalbum.ui.logs.LogViewModel
 import com.xjw.qalbum.ui.settings.SettingsViewModel
 import com.xjw.qalbum.worker.AnalysisWorker
 import com.xjw.qalbum.worker.IncrementalScanWorker
@@ -220,6 +221,7 @@ val appModule = module {
             cleanupController = get(),
         )
     }
+    viewModel { LogViewModel() }
 
     // ---- Worker ----
 

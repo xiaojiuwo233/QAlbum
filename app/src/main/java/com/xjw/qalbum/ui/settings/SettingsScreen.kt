@@ -29,6 +29,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.Article
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.Analytics
 import androidx.compose.material.icons.outlined.AutoAwesome
@@ -127,6 +128,7 @@ enum class SettingsCategory(
     AI("settings_ai", "AI 配置", "Endpoint / Key / 模型", Icons.Outlined.AutoAwesome, SettingsGroup.DATA),
     PERSONALIZATION("settings_personalization", "个性化", "Material You 动态取色", Icons.Outlined.Palette, SettingsGroup.SYSTEM),
     ACCESS("settings_access", "权限与访问", "Shizuku / Root 授权与切换", Icons.Outlined.Security, SettingsGroup.SYSTEM),
+    LOGS("settings_logs", "日志", "运行日志 / 崩溃记录 / 导出", Icons.AutoMirrored.Outlined.Article, SettingsGroup.SYSTEM),
     ABOUT("settings_about", "关于", "版本信息", Icons.Outlined.Info, SettingsGroup.SYSTEM),
     ;
 

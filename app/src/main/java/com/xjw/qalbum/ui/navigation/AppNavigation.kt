@@ -51,6 +51,7 @@ import com.xjw.qalbum.ui.cleanup.CleanupScreen
 import com.xjw.qalbum.ui.dashboard.DashboardScreen
 import com.xjw.qalbum.ui.detail.ImageDetailScreen
 import com.xjw.qalbum.ui.gallery.FavoriteGalleryScreen
+import com.xjw.qalbum.ui.logs.LogScreen
 import com.xjw.qalbum.ui.gallery.GalleryScreen
 import com.xjw.qalbum.ui.search.SearchScreen
 import com.xjw.qalbum.ui.settings.AboutSettingsScreen
@@ -271,6 +272,9 @@ fun AppNavigation() {
                         sharedScope = this@SharedTransitionLayout,
                         animatedScope = this,
                     )
+                }
+                composable(SettingsCategory.LOGS.route) {
+                    LogScreen(onBack = { navController.popBackStack() })
                 }
                 composable(SettingsCategory.ABOUT.route) {
                     AboutSettingsScreen(

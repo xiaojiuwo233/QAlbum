@@ -33,7 +33,9 @@ class AndroidPaddleOcrFactory(private val context: Context) : PaddleOcrFactory {
             context = context,
             config = PaddleOCRConfig(
                 recScoreThresh = 0.0f,
-                recBatchSize = 1,
+                // 批量识别：一张图的多个文本行一次推理（原逐行 =1，文本多的图很慢）。
+                // RecPreprocessor.preprocessBatch 会把批内不同宽度 padding 对齐；6 为 PaddleOCR 常用值。
+                recBatchSize = 6,
             ),
             engineConfig = EngineConfig(numThreads = 4),
             detModelAssetPath = modelFiles.detModelPath,
