@@ -34,6 +34,7 @@ import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.Analytics
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.CleaningServices
+import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.Security
@@ -910,6 +911,44 @@ fun PersonalizationSettingsScreen(
                 checked = sharedTransition,
                 onCheckedChange = viewModel::setDetailSharedTransition,
             )
+        }
+        SettingsSection(header = "导出相册目录") {
+            SettingsBlurb("保存图片时可选目录，实际存到 Pictures/QAlbum/<目录名>。保存弹窗里也能临时新建。")
+            val exportSubdirs by viewModel.exportSubdirs.collectAsState()
+            exportSubdirs.forEach { dir ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(dir, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+                    IconButton(onClick = { viewModel.removeExportSubdir(dir) }) {
+                        Icon(Icons.Outlined.Delete, contentDescription = "删除目录")
+                    }
+                }
+            }
+            if (exportSubdirs.isEmpty()) {
+                Text(
+                    "还没有自定义目录",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            var newDir by remember { mutableStateOf("") }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedTextField(
+                    value = newDir,
+                    onValueChange = { newDir = it },
+                    placeholder = { Text("新建目录名") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                )
+                Button(
+                    onClick = { viewModel.addExportSubdir(newDir); newDir = "" },
+                    enabled = newDir.isNotBlank(),
+                ) {
+                    Text("添加")
+                }
+            }
         }
     }
 }

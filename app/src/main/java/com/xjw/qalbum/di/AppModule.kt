@@ -66,7 +66,7 @@ val appModule = module {
     single { get<AppDatabase>().dirSnapshotDao() }
     single { get<AppDatabase>().dedupExclusionDao() }
 
-    single { SettingsRepository(get()) }
+    single { SettingsRepository(get(), appScope = get()) }
     single { ImageRepository(imageDao = get(), ocrDao = get(), dedupExclusionDao = get()) }
 
     // 应用级协程作用域：用于必须脱离 UI / 页面生命周期完成的写入（如设置落盘）。

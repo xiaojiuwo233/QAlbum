@@ -109,10 +109,24 @@ class GalleryViewModel(
     /** 选中图片的原始字节总和（用于删除确认框展示「N 张图片 · X MB」） */
     suspend fun selectedSize(ids: Set<Long>): Long = imageRepository.sumSizeByIds(ids.toList())
 
-    fun exportImages(ids: Set<Long>, onDone: (Int) -> Unit = {}) {
+    /** 导出子目录列表（保存弹窗用） */
+    val exportSubdirs: StateFlow<List<String>> = settings.exportSubdirs
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** 保存弹窗新建子目录（落盘走 App 级 appScope） */
+    fun createSubdir(name: String) = settings.addExportSubdir(name)
+
+    /**
+     * 多选「保存」：导出到 Pictures/QAlbum[/子目录]；[alsoTrash] 为真则保存后把这些图一并移入回收站。
+     * 回调返回成功保存的张数。
+     */
+    fun saveImages(ids: Set<Long>, subdir: String?, alsoTrash: Boolean, onDone: (Int) -> Unit = {}) {
         viewModelScope.launch {
-            val count = ids.count { imageFileManager.exportToGallery(it) }
-            onDone(count)
+            val saved = ids.count { imageFileManager.exportToGallery(it, subdir) }
+            if (alsoTrash) {
+                ids.forEach { quarantineManager.quarantine(it, "保存后移入回收站") }
+            }
+            onDone(saved)
         }
     }
 

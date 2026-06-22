@@ -121,6 +121,15 @@ class SettingsViewModel(
         persist { settings.setDetailSharedTransition(enabled) }
     }
 
+    // ---- 导出相册目录管理 ----
+
+    val exportSubdirs: StateFlow<List<String>> = settings.exportSubdirs
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** 新建 / 删除导出子目录（SettingsRepository 内部已走 appScope 落盘） */
+    fun addExportSubdir(name: String) = settings.addExportSubdir(name)
+    fun removeExportSubdir(name: String) = settings.removeExportSubdir(name)
+
     fun checkAccess() {
         viewModelScope.launch {
             val provider = accessManager.current()

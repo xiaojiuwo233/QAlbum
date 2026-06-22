@@ -10,9 +10,11 @@ import com.xjw.qalbum.data.repository.ImageRepository
 import com.xjw.qalbum.service.cleanup.ImageFileManager
 import com.xjw.qalbum.service.cleanup.QuarantineManager
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 /**
@@ -90,11 +92,33 @@ class ImageDetailViewModel(
         }
     }
 
-    fun exportToGallery() {
-        val image = (_state.value as? ImageDetailState.Ready)?.current ?: return
+    /** 导出子目录列表（保存弹窗用） */
+    val exportSubdirs: StateFlow<List<String>> = settings.exportSubdirs
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** 保存弹窗新建子目录（落盘走 App 级 appScope） */
+    fun createSubdir(name: String) = settings.addExportSubdir(name)
+
+    /**
+     * 详情页「保存」：导出到 Pictures/QAlbum[/子目录]；[alsoTrash] 为真则保存后把当前图移入回收站，
+     * 并像删除那样切到下一张（已无图则回调 [onExhausted] 退出）。
+     */
+    fun saveCurrent(subdir: String?, alsoTrash: Boolean, onExhausted: () -> Unit = {}) {
+        val ready = _state.value as? ImageDetailState.Ready ?: return
+        val image = ready.current
         viewModelScope.launch {
-            val ok = imageFileManager.exportToGallery(image.id)
-            _toast.value = if (ok) "已导出到系统相册（Pictures/QAlbum）" else "导出失败"
+            val ok = imageFileManager.exportToGallery(image.id, subdir)
+            if (!ok) {
+                _toast.value = "保存失败"
+                return@launch
+            }
+            if (alsoTrash) {
+                val trashed = quarantineManager.quarantine(image.id, "保存后移入回收站")
+                _toast.value = if (trashed) "已保存并移入回收站" else "已保存（移入回收站失败）"
+                if (trashed) advanceAfterRemoval(ready, image.id, onExhausted)
+            } else {
+                _toast.value = "已保存到相册"
+            }
         }
     }
 

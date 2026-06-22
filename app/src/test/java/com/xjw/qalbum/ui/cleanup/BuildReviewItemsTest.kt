@@ -5,6 +5,7 @@ import com.xjw.qalbum.service.cleanup.CleanupRules
 import com.xjw.qalbum.service.cleanup.ReviewBatchItem
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -85,6 +86,74 @@ class BuildReviewItemsTest {
         assertEquals(CleanupRules.REASON_EMOJI, map[1L])
         assertEquals(CleanupRules.REASON_DUPLICATE, map[10L])
         assertEquals(CleanupRules.REASON_DUPLICATE, map[11L])
+    }
+
+    @Test
+    fun pruneGroup_deletePath_dropsSurvivorWhenOneLeft() {
+        val group = ReviewItem.Group(
+            groupId = 7,
+            keeperId = 1,
+            members = listOf(img(1, source = "chatraw", w = 1200, h = 1200), img(2, source = "chatimg", w = 800, h = 800)),
+            defaultDeleteIds = setOf(2L),
+        )
+        // 批量删除路径：删掉劣质副本(2)，幸存的保留图(1)是用户隐含保留 → 整组移除
+        assertNull(pruneReviewItem(group, setOf(2L), keepSingleton = false))
+    }
+
+    @Test
+    fun pruneGroup_keepPath_convertsSurvivorToSingle() {
+        val group = ReviewItem.Group(
+            groupId = 7,
+            keeperId = 1,
+            members = listOf(img(1, source = "chatraw", w = 1200, h = 1200), img(2, source = "chatimg", w = 800, h = 800)),
+            defaultDeleteIds = setOf(2L),
+        )
+        // 保留/单张处理路径：处理掉保留图(1)，剩下的副本(2)尚未决定 → 转单图留在审核
+        val pruned = pruneReviewItem(group, setOf(1L), keepSingleton = true)
+        assertTrue(pruned is ReviewItem.Single)
+        pruned as ReviewItem.Single
+        assertEquals(2L, pruned.image.id)
+        assertEquals(CleanupRules.REASON_DUPLICATE, pruned.reason)
+        assertFalse(pruned.defaultSelected)
+    }
+
+    @Test
+    fun pruneGroup_keepPath_dropsWhenEmpty() {
+        val group = ReviewItem.Group(
+            groupId = 7,
+            keeperId = 1,
+            members = listOf(img(1), img(2)),
+            defaultDeleteIds = setOf(2L),
+        )
+        assertNull(pruneReviewItem(group, setOf(1L, 2L), keepSingleton = true))
+    }
+
+    @Test
+    fun pruneGroup_recomputesWhenTwoOrMoreRemain() {
+        val group = ReviewItem.Group(
+            groupId = 7,
+            keeperId = 1,
+            members = listOf(
+                img(1, source = "chatraw", w = 1200, h = 1200),
+                img(2, source = "chatimg", w = 800, h = 800),
+                img(3, source = "chatimg", w = 600, h = 600),
+            ),
+            defaultDeleteIds = setOf(2L, 3L),
+        )
+        // 3 图组删 1 张，剩 2 张仍是可对比的重复组
+        val pruned = pruneReviewItem(group, setOf(3L), keepSingleton = true)
+        assertTrue(pruned is ReviewItem.Group)
+        pruned as ReviewItem.Group
+        assertEquals(2, pruned.members.size)
+        assertEquals(1L, pruned.keeperId)
+    }
+
+    @Test
+    fun pruneSingle_removedReturnsNull() {
+        val single = ReviewItem.Single(img(1), CleanupRules.REASON_EMOJI, defaultSelected = true)
+        assertNull(pruneReviewItem(single, setOf(1L), keepSingleton = true))
+        // 未处理则原样保留
+        assertEquals(single, pruneReviewItem(single, setOf(2L), keepSingleton = true))
     }
 
     private fun img(

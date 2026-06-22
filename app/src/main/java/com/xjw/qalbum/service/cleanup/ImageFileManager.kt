@@ -8,6 +8,7 @@ import android.provider.MediaStore
 import androidx.core.content.FileProvider
 import com.xjw.qalbum.access.AccessManager
 import com.xjw.qalbum.data.db.dao.ImageDao
+import com.xjw.qalbum.data.preferences.SettingsRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import timber.log.Timber
@@ -32,18 +33,22 @@ class ImageFileManager(
         File(context.cacheDir, "share").apply { if (!exists()) mkdirs() }
     }
 
-    /** 将图片导出到系统相册 Pictures/QAlbum/ */
-    suspend fun exportToGallery(imageId: Long): Boolean = withContext(Dispatchers.IO) {
+    /** 将图片导出到系统相册 Pictures/QAlbum[/子目录]。[subdir] 为 null/空时存到 QAlbum 根目录。 */
+    suspend fun exportToGallery(imageId: Long, subdir: String? = null): Boolean = withContext(Dispatchers.IO) {
         val image = imageDao.getById(imageId) ?: return@withContext false
         val provider = accessManager.current()
         if (!provider.isAvailable()) return@withContext false
 
         try {
+            val relativePath = buildString {
+                append("Pictures/QAlbum")
+                subdir?.let { SettingsRepository.sanitizeExportSubdir(it) }?.let { append("/").append(it) }
+            }
             val values = ContentValues().apply {
                 put(MediaStore.Images.Media.DISPLAY_NAME, image.filename.ifBlank { "qalbum_${image.id}.jpg" })
                 put(MediaStore.Images.Media.MIME_TYPE, image.mime.ifBlank { "image/jpeg" })
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/QAlbum")
+                    put(MediaStore.Images.Media.RELATIVE_PATH, relativePath)
                     put(MediaStore.Images.Media.IS_PENDING, 1)
                 }
             }

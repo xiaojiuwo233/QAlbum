@@ -30,7 +30,6 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
@@ -38,17 +37,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
-import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Favorite
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.IosShare
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.AssistChip
-import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -86,8 +81,8 @@ import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import coil3.request.crossfade
 import com.xjw.qalbum.data.db.entity.ImageEntity
-import com.xjw.qalbum.data.db.entity.OcrTextEntity
 import com.xjw.qalbum.ui.anim.sharedImage
+import com.xjw.qalbum.ui.components.SaveToAlbumSheet
 import com.xjw.qalbum.ui.imageloading.ImageEntityModel
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
@@ -110,6 +105,8 @@ fun ImageDetailScreen(
     val state by viewModel.state.collectAsState()
     val toast by viewModel.toast.collectAsState()
     val context = LocalContext.current
+    var showSaveSheet by remember { mutableStateOf(false) }
+    val exportSubdirs by viewModel.exportSubdirs.collectAsState()
 
     LaunchedEffect(toast) {
         toast?.let {
@@ -133,7 +130,7 @@ fun ImageDetailScreen(
                 onBack = onBack,
                 onPageSelected = viewModel::selectIndex,
                 onToggleFavorite = viewModel::toggleFavorite,
-                onExport = viewModel::exportToGallery,
+                onExport = { showSaveSheet = true },
                 onOpenExternal = {
                     viewModel.prepareOpenExternal { target ->
                         target ?: return@prepareOpenExternal
@@ -154,6 +151,19 @@ fun ImageDetailScreen(
                 animatedScope = animatedScope,
             )
         }
+    }
+
+    if (showSaveSheet) {
+        SaveToAlbumSheet(
+            imageCount = 1,
+            subdirs = exportSubdirs,
+            onCreateSubdir = viewModel::createSubdir,
+            onDismiss = { showSaveSheet = false },
+            onConfirm = { subdir, alsoTrash ->
+                showSaveSheet = false
+                viewModel.saveCurrent(subdir, alsoTrash, onExhausted = onBack)
+            },
+        )
     }
 }
 
@@ -358,7 +368,7 @@ private fun ImmersivePhotoViewer(
             exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
             modifier = Modifier.align(Alignment.BottomCenter),
         ) {
-            DetailsSheet(
+            PhotoDetailsSheet(
                 image = state.current,
                 ocr = state.ocr,
                 onClose = { detailsVisible = false },
@@ -567,153 +577,6 @@ private fun DeleteConfirmDialog(
 }
 
 @Composable
-private fun DetailsSheet(
-    image: ImageEntity,
-    ocr: OcrTextEntity?,
-    onClose: () -> Unit,
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .fillMaxHeight(0.62f)
-            .clip(RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
-            .background(MaterialTheme.colorScheme.surface)
-            .navigationBarsPadding(),
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 8.dp, bottom = 2.dp),
-            contentAlignment = Alignment.Center,
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(width = 42.dp, height = 4.dp)
-                    .clip(RoundedCornerShape(999.dp))
-                    .background(MaterialTheme.colorScheme.outlineVariant),
-            )
-            IconButton(
-                onClick = onClose,
-                modifier = Modifier.align(Alignment.CenterEnd).padding(end = 8.dp),
-            ) {
-                Icon(Icons.Outlined.Close, contentDescription = "关闭")
-            }
-        }
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            item {
-                Column {
-                    Text(
-                        formatTitleDate(image.mtime),
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Text(
-                        image.filename,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
-            item { MetadataBlock(image) }
-            ocr?.takeIf { it.text.isNotBlank() }?.let { text ->
-                item { OcrBlock(text) }
-            }
-        }
-    }
-}
-
-@Composable
-private fun MetadataBlock(image: ImageEntity) {
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            AssistChip(
-                onClick = {},
-                label = { Text(image.sourceType) },
-                colors = AssistChipDefaults.assistChipColors(),
-            )
-            AssistChip(
-                onClick = {},
-                label = { Text(image.mime) },
-                colors = AssistChipDefaults.assistChipColors(),
-            )
-        }
-        HorizontalDivider(Modifier.padding(vertical = 6.dp))
-        InfoRow("大小", formatBytes(image.size))
-        InfoRow("尺寸", if (image.width > 0) "${image.width} x ${image.height}" else "未读取")
-        InfoRow("修改时间", formatTime(image.mtime))
-        InfoRow("首次扫描", formatTime(image.firstSeen))
-        InfoRow("路径", image.path)
-        image.duplicateGroupId?.let {
-            InfoRow("重复组", "#$it")
-        }
-    }
-}
-
-@Composable
-private fun OcrBlock(ocr: OcrTextEntity) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                "OCR 识别文本",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.weight(1f),
-            )
-            Text(
-                "置信度 ${(ocr.confidence * 100).toInt()}%",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        val flags = buildList {
-            if (ocr.hasIdNumber) add("证件号")
-            if (ocr.hasOrderNo) add("订单号")
-            if (ocr.hasAmount) add("金额")
-            if (ocr.hasPhone) add("手机号")
-            if (ocr.hasAddress) add("地址")
-        }
-        if (flags.isNotEmpty()) {
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                flags.forEach { flag -> AssistChip(onClick = {}, label = { Text(flag) }) }
-            }
-        }
-        Text(
-            ocr.text.trim(),
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 12,
-        )
-    }
-}
-
-@Composable
-private fun InfoRow(label: String, value: String) {
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-        verticalAlignment = Alignment.Top,
-    ) {
-        Text(
-            label,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.weight(0.32f),
-        )
-        Text(
-            value,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurface,
-            modifier = Modifier.weight(0.68f),
-        )
-    }
-}
-
-@Composable
 private fun ViewerAction(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     label: String,
@@ -759,20 +622,9 @@ private fun CenteredText(text: String) {
     }
 }
 
-private val timeFormatter = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.CHINA)
 private val titleFormatter = SimpleDateFormat("yyyy年M月d日 HH:mm", Locale.CHINA)
 
-private fun formatTime(ts: Long): String = timeFormatter.format(Date(ts))
-
 private fun formatTitleDate(ts: Long): String = titleFormatter.format(Date(ts))
-
-private fun formatBytes(bytes: Long): String {
-    if (bytes <= 0) return "0 B"
-    val units = arrayOf("B", "KB", "MB", "GB", "TB")
-    val exp = (Math.log10(bytes.toDouble()) / Math.log10(1024.0)).toInt().coerceAtMost(units.size - 1)
-    val value = bytes.toDouble() / Math.pow(1024.0, exp.toDouble())
-    return String.format("%.2f %s", value, units[exp])
-}
 
 /** 来源目录映射成短标签：chatimg→img、chatraw→raw、chatthumb→thumb */
 private fun sourceLabel(sourceType: String): String = when (sourceType) {

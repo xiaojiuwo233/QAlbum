@@ -2,6 +2,18 @@ package com.xjw.qalbum.ui.cleanup
 
 import android.content.Intent
 import android.widget.Toast
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.produceState
+import com.xjw.qalbum.data.db.entity.OcrTextEntity
+import com.xjw.qalbum.ui.components.SaveToAlbumSheet
+import com.xjw.qalbum.ui.detail.PhotoDetailsSheet
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -108,6 +120,7 @@ internal fun CleanupReviewScreen(
     val selectedIds by viewModel.selectedReviewDeleteIds.collectAsState()
     val busy by viewModel.busy.collectAsState()
     val purgeProgress by viewModel.purgeProgress.collectAsState()
+    val exportSubdirs by viewModel.exportSubdirs.collectAsState()
 
     val items = review?.items.orEmpty()
     var menuOpen by remember { mutableStateOf(false) }
@@ -217,6 +230,15 @@ internal fun CleanupReviewScreen(
             onKeep = { viewModel.keepImage(it); previewId = null },
             onTrash = { viewModel.trashOne(it); previewId = null },
             onShare = { iid -> viewModel.shareImage(iid) { t -> context.startActivity(shareChooser(t)) } },
+            exportSubdirs = exportSubdirs,
+            onCreateSubdir = viewModel::createSubdir,
+            onSave = { iid, subdir, alsoTrash ->
+                viewModel.saveImage(iid, subdir, alsoTrash) { ok ->
+                    Toast.makeText(context, if (ok) "已保存到相册" else "保存失败", Toast.LENGTH_SHORT).show()
+                }
+                if (alsoTrash) previewId = null
+            },
+            onLoadOcr = viewModel::getOcr,
         )
     }
 
@@ -502,7 +524,13 @@ private fun SelectionCircle(selected: Boolean, modifier: Modifier = Modifier) {
     )
 }
 
-/** 重复组详情页：组内大图对比、逐张勾选，支持「全部删除 / 仅保留 1 张 / 全部保留」。 */
+/**
+ * 重复组详情页：组内逐张勾选/预览，支持「全部删除 / 仅保留 1 张 / 全部保留」。
+ *
+ * 进入时固定一份成员快照：之后在预览里逐张「保留 / 清理」导致组缩减甚至消失，本页仍按快照展示——
+ * 已处理的灰显标记、未处理的可继续操作，直到整组处理完。
+ * 避免「处理一张后整组消失、另一张却脱离审核流消失在图库里」。
+ */
 @Composable
 fun CleanupReviewGroupScreen(
     groupId: Long,
@@ -513,20 +541,44 @@ fun CleanupReviewGroupScreen(
     val review by viewModel.reviewBatch.collectAsState()
     val selectedIds by viewModel.selectedReviewDeleteIds.collectAsState()
     val busy by viewModel.busy.collectAsState()
-    val group = review?.items?.filterIsInstance<ReviewItem.Group>()?.firstOrNull { it.groupId == groupId }
+    val exportSubdirs by viewModel.exportSubdirs.collectAsState()
+    // 组缩到只剩 1 张时会被转成单图、liveGroup 随之变 null；用进入时的成员快照兜住页面展示。
+    val liveGroup = review?.items?.filterIsInstance<ReviewItem.Group>()?.firstOrNull { it.groupId == groupId }
+    var snapshot by remember(groupId) { mutableStateOf<List<ImageEntity>?>(null) }
+    LaunchedEffect(groupId, liveGroup) {
+        if (snapshot == null && liveGroup != null) snapshot = liveGroup.members
+    }
+    val members = snapshot ?: liveGroup?.members ?: emptyList()
+
+    // reviewBatch 里仍在审核的 id（无论现在属于 Group 还是已被转成 Single）
+    val liveIds: Set<Long> = remember(review) {
+        buildSet {
+            review?.items?.forEach { item ->
+                when (item) {
+                    is ReviewItem.Single -> add(item.image.id)
+                    is ReviewItem.Group -> item.members.forEach { add(it.id) }
+                }
+            }
+        }
+    }
+
     var previewId by remember { mutableStateOf<Long?>(null) }
     var showSplitDialog by remember { mutableStateOf(false) }
 
-    if (group == null) {
+    if (members.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text("重复组已处理", color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         return
     }
 
-    val memberIds = group.members.map { it.id }
-    val nonKeeperIds = memberIds.filter { it != group.keeperId }
-    val selectedInGroup = group.members.count { it.id in selectedIds }
+    val keeperId = liveGroup?.keeperId
+    val pendingMembers = members.filter { it.id in liveIds }   // 仍待处理（可勾选/预览）
+    val pendingIds = pendingMembers.map { it.id }
+    val pendingNonKeeperIds = pendingIds.filter { it != keeperId }
+    val selectedInGroup = pendingMembers.count { it.id in selectedIds }
+    val processedCount = members.size - pendingMembers.size
+    val allProcessed = pendingMembers.isEmpty()
 
     Scaffold(
         topBar = {
@@ -541,13 +593,17 @@ fun CleanupReviewGroupScreen(
                     Column(modifier = Modifier.weight(1f).padding(start = 4.dp)) {
                         Text("重复组", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
                         Text(
-                            "共 ${group.members.size} 张 · 已选 $selectedInGroup · 高亮为建议保留",
+                            buildString {
+                                append("共 ${members.size} 张")
+                                if (processedCount > 0) append(" · 已处理 $processedCount")
+                                append(if (allProcessed) " · 已全部处理" else " · 已选 $selectedInGroup")
+                            },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                     // 差异过大不是真重复时，用户可拆分本组并永久排斥（重新查重不再聚到一起）
-                    TextButton(onClick = { showSplitDialog = true }, enabled = !busy) {
+                    TextButton(onClick = { showSplitDialog = true }, enabled = !busy && !allProcessed) {
                         Text("拆分")
                     }
                 }
@@ -560,13 +616,25 @@ fun CleanupReviewGroupScreen(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    OutlinedButton(onClick = { viewModel.deselectReviewIds(memberIds) }, modifier = Modifier.weight(1f)) {
+                    OutlinedButton(
+                        onClick = { viewModel.deselectReviewIds(pendingIds) },
+                        enabled = !allProcessed,
+                        modifier = Modifier.weight(1f),
+                    ) {
                         Text("全部保留")
                     }
-                    OutlinedButton(onClick = { viewModel.selectReviewIds(nonKeeperIds) }, modifier = Modifier.weight(1f)) {
+                    OutlinedButton(
+                        onClick = { viewModel.selectReviewIds(pendingNonKeeperIds) },
+                        enabled = !allProcessed && pendingNonKeeperIds.isNotEmpty(),
+                        modifier = Modifier.weight(1f),
+                    ) {
                         Text("仅留 1 张")
                     }
-                    FilledTonalButton(onClick = { viewModel.selectReviewIds(memberIds) }, modifier = Modifier.weight(1f)) {
+                    FilledTonalButton(
+                        onClick = { viewModel.selectReviewIds(pendingIds) },
+                        enabled = !allProcessed,
+                        modifier = Modifier.weight(1f),
+                    ) {
                         Text("全部删除")
                     }
                 }
@@ -586,32 +654,48 @@ fun CleanupReviewGroupScreen(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            items(group.members, key = { it.id }) { member ->
+            items(members, key = { it.id }) { member ->
+                val processed = member.id !in liveIds
                 GroupMemberTile(
                     image = member,
-                    isKeeper = member.id == group.keeperId,
+                    isKeeper = member.id == keeperId,
                     selected = member.id in selectedIds,
+                    processed = processed,
                     onToggle = { viewModel.setReviewItemSelected(member.id, member.id !in selectedIds) },
-                    onLongPress = { previewId = member.id },
+                    onLongPress = { if (!processed) previewId = member.id },
                 )
             }
         }
     }
 
     previewId?.let { id ->
-        val start = group.members.indexOfFirst { it.id == id }.coerceAtLeast(0)
-        ReviewPreviewPager(
-            images = group.members,
-            startIndex = start,
-            selectedIds = selectedIds,
-            busy = busy,
-            onClose = { previewId = null },
-            onToggleSelect = { viewModel.setReviewItemSelected(it, it !in selectedIds) },
-            onFavorite = { iid, fav -> viewModel.setFavorite(iid, fav) },
-            onKeep = { viewModel.keepImage(it); previewId = null },
-            onTrash = { viewModel.trashOne(it); previewId = null },
-            onShare = { iid -> viewModel.shareImage(iid) { t -> context.startActivity(shareChooser(t)) } },
-        )
+        // 预览只在「仍待处理」的成员间滑动；已处理的不进预览
+        val start = pendingMembers.indexOfFirst { it.id == id }
+        if (start < 0) {
+            LaunchedEffect(id) { previewId = null }
+        } else {
+            ReviewPreviewPager(
+                images = pendingMembers,
+                startIndex = start,
+                selectedIds = selectedIds,
+                busy = busy,
+                onClose = { previewId = null },
+                onToggleSelect = { viewModel.setReviewItemSelected(it, it !in selectedIds) },
+                onFavorite = { iid, fav -> viewModel.setFavorite(iid, fav) },
+                onKeep = { viewModel.keepImage(it); previewId = null },
+                onTrash = { viewModel.trashOne(it); previewId = null },
+                onShare = { iid -> viewModel.shareImage(iid) { t -> context.startActivity(shareChooser(t)) } },
+                exportSubdirs = exportSubdirs,
+                onCreateSubdir = viewModel::createSubdir,
+                onSave = { iid, subdir, alsoTrash ->
+                    viewModel.saveImage(iid, subdir, alsoTrash) { ok ->
+                        Toast.makeText(context, if (ok) "已保存到相册" else "保存失败", Toast.LENGTH_SHORT).show()
+                    }
+                    if (alsoTrash) previewId = null
+                },
+                onLoadOcr = viewModel::getOcr,
+            )
+        }
     }
 
     if (showSplitDialog) {
@@ -644,6 +728,7 @@ private fun GroupMemberTile(
     image: ImageEntity,
     isKeeper: Boolean,
     selected: Boolean,
+    processed: Boolean,
     onToggle: () -> Unit,
     onLongPress: () -> Unit,
 ) {
@@ -654,7 +739,7 @@ private fun GroupMemberTile(
             .aspectRatio(1f)
             .clip(RoundedCornerShape(12.dp))
             .background(MaterialTheme.colorScheme.surfaceContainerHighest)
-            .combinedClickable(onClick = onToggle, onLongClick = onLongPress),
+            .combinedClickable(onClick = { if (!processed) onToggle() }, onLongClick = onLongPress),
     ) {
         AsyncImage(
             model = ImageRequest.Builder(context).data(ImageEntityModel(image)).crossfade(true).build(),
@@ -662,15 +747,21 @@ private fun GroupMemberTile(
             contentScale = ContentScale.Fit,
             modifier = Modifier.fillMaxSize(),
         )
-        if (selected) {
-            Box(Modifier.matchParentSize().background(MaterialTheme.colorScheme.error.copy(alpha = 0.22f)))
+        if (processed) {
+            // 已处理（已清理 / 已保留）：压暗 + 角标，不再参与勾选
+            Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.55f)))
+            TileBadge(text = "已处理", modifier = Modifier.align(Alignment.TopEnd))
+        } else {
+            if (selected) {
+                Box(Modifier.matchParentSize().background(MaterialTheme.colorScheme.error.copy(alpha = 0.22f)))
+            }
+            // 建议标签放右上（醒目），勾选圈移到左上，尺寸信息留左下，三者互不重叠
+            TileBadge(
+                text = if (isKeeper) "建议保留" else "建议删除",
+                modifier = Modifier.align(Alignment.TopEnd),
+            )
+            SelectionCircle(selected = selected, modifier = Modifier.align(Alignment.TopStart))
         }
-        // 建议标签放右上（醒目），勾选圈移到左上，尺寸信息留左下，三者互不重叠
-        TileBadge(
-            text = if (isKeeper) "建议保留" else "建议删除",
-            modifier = Modifier.align(Alignment.TopEnd),
-        )
-        SelectionCircle(selected = selected, modifier = Modifier.align(Alignment.TopStart))
         Text(
             imageMeta(image),
             style = MaterialTheme.typography.labelSmall,
@@ -688,8 +779,9 @@ private fun GroupMemberTile(
 }
 
 /**
- * 全屏预览：左右滑动切换上一张/下一张；顶部显示拍摄时间 + 分享；底部「收藏 / 勾选 / 清理 / 保留」。
+ * 全屏预览：左右滑动切换上一张/下一张；顶部「时间 + 详情 + 保存 + 分享」；底部「收藏 / 勾选 / 清理 / 保留」。
  * [images] 是预览时的快照列表；清理 / 保留会把该图移出审核并关闭预览。
+ * 「保存」导出到系统相册（Pictures/QAlbum），「详情」复用图库的元数据 + OCR 详情卡。
  */
 @Composable
 internal fun ReviewPreviewPager(
@@ -703,6 +795,10 @@ internal fun ReviewPreviewPager(
     onKeep: (Long) -> Unit,
     onTrash: (Long) -> Unit,
     onShare: (Long) -> Unit,
+    exportSubdirs: List<String>,
+    onCreateSubdir: (String) -> Unit,
+    onSave: (id: Long, subdir: String?, alsoTrash: Boolean) -> Unit,
+    onLoadOcr: suspend (Long) -> OcrTextEntity?,
 ) {
     if (images.isEmpty()) {
         onClose()
@@ -710,6 +806,8 @@ internal fun ReviewPreviewPager(
     }
     val context = LocalContext.current
     val pagerState = rememberPagerState(initialPage = startIndex.coerceIn(0, images.lastIndex)) { images.size }
+    var detailsVisible by remember { mutableStateOf(false) }
+    var showSaveSheet by remember { mutableStateOf(false) }
 
     Dialog(
         onDismissRequest = onClose,
@@ -727,7 +825,7 @@ internal fun ReviewPreviewPager(
 
             val current = images.getOrNull(pagerState.currentPage) ?: images.first()
 
-            // 顶部：关闭 + 时间 + 分享
+            // 顶部：关闭 + 时间 + 详情 + 保存 + 分享
             Row(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
@@ -750,6 +848,12 @@ internal fun ReviewPreviewPager(
                         overflow = TextOverflow.Ellipsis,
                     )
                     Text(imageMeta(current), style = MaterialTheme.typography.bodySmall, color = Color.White.copy(alpha = 0.72f))
+                }
+                IconButton(onClick = { detailsVisible = true }) {
+                    Icon(Icons.Outlined.Info, contentDescription = "详情", tint = Color.White)
+                }
+                IconButton(onClick = { showSaveSheet = true }) {
+                    Icon(Icons.Outlined.Download, contentDescription = "保存", tint = Color.White)
                 }
                 IconButton(onClick = { onShare(current.id) }) {
                     Icon(Icons.Outlined.Share, contentDescription = "分享", tint = Color.White)
@@ -789,6 +893,36 @@ internal fun ReviewPreviewPager(
                     icon = Icons.Outlined.Bookmark,
                     label = "保留",
                     onClick = { onKeep(current.id) },
+                )
+            }
+
+            // 「查看详情」：复用图库详情卡（元数据 + OCR），从底部滑入覆盖底部操作栏
+            val ocr by produceState<OcrTextEntity?>(null, current.id, detailsVisible) {
+                value = if (detailsVisible) onLoadOcr(current.id) else null
+            }
+            AnimatedVisibility(
+                visible = detailsVisible,
+                enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+                exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
+                modifier = Modifier.align(Alignment.BottomCenter),
+            ) {
+                PhotoDetailsSheet(
+                    image = current,
+                    ocr = ocr,
+                    onClose = { detailsVisible = false },
+                )
+            }
+
+            if (showSaveSheet) {
+                SaveToAlbumSheet(
+                    imageCount = 1,
+                    subdirs = exportSubdirs,
+                    onCreateSubdir = onCreateSubdir,
+                    onDismiss = { showSaveSheet = false },
+                    onConfirm = { subdir, alsoTrash ->
+                        showSaveSheet = false
+                        onSave(current.id, subdir, alsoTrash)
+                    },
                 )
             }
         }

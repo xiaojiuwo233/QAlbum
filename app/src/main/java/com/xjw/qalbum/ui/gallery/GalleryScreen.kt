@@ -100,6 +100,7 @@ import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.domain.model.GallerySort
 import com.xjw.qalbum.ui.anim.sharedContainer
 import com.xjw.qalbum.ui.anim.sharedImage
+import com.xjw.qalbum.ui.components.SaveToAlbumSheet
 import com.xjw.qalbum.ui.imageloading.ImageEntityModel
 import org.koin.androidx.compose.koinViewModel
 
@@ -124,6 +125,8 @@ fun GalleryScreen(
     var selectedIds by remember { mutableStateOf(setOf<Long>()) }
     var showDeleteConfirm by rememberSaveable { mutableStateOf(false) }
     var showPrefsSheet by rememberSaveable { mutableStateOf(false) }
+    var showSaveSheet by rememberSaveable { mutableStateOf(false) }
+    val exportSubdirs by viewModel.exportSubdirs.collectAsState()
 
     val clearSelection = { selectedIds = emptySet() }
     val toggleSelection: (Long) -> Unit = { id ->
@@ -152,12 +155,7 @@ fun GalleryScreen(
                 SelectionTopBar(
                     count = selectedIds.size,
                     onClose = clearSelection,
-                    onExport = {
-                        val ids = selectedIds
-                        viewModel.exportImages(ids) { count ->
-                            Toast.makeText(context, "已导出 $count 张", Toast.LENGTH_SHORT).show()
-                        }
-                    },
+                    onExport = { showSaveSheet = true },
                     onFavorite = {
                         val ids = selectedIds
                         viewModel.addFavorites(ids) { count ->
@@ -246,6 +244,24 @@ fun GalleryScreen(
             onDismiss = { showPrefsSheet = false },
         )
     }
+
+    if (showSaveSheet) {
+        SaveToAlbumSheet(
+            imageCount = selectedIds.size,
+            subdirs = exportSubdirs,
+            onCreateSubdir = viewModel::createSubdir,
+            onDismiss = { showSaveSheet = false },
+            onConfirm = { subdir, alsoTrash ->
+                val ids = selectedIds
+                showSaveSheet = false
+                viewModel.saveImages(ids, subdir, alsoTrash) { count ->
+                    Toast.makeText(context, "已保存 $count 张", Toast.LENGTH_SHORT).show()
+                    clearSelection()
+                    items.refresh()
+                }
+            },
+        )
+    }
 }
 
 @Composable
@@ -267,6 +283,8 @@ fun FavoriteGalleryScreen(
     var columns by rememberSaveable { mutableIntStateOf(4) }
     var selectedIds by remember { mutableStateOf(setOf<Long>()) }
     var showDeleteConfirm by rememberSaveable { mutableStateOf(false) }
+    var showSaveSheet by rememberSaveable { mutableStateOf(false) }
+    val exportSubdirs by viewModel.exportSubdirs.collectAsState()
 
     val clearSelection = { selectedIds = emptySet() }
     val toggleSelection: (Long) -> Unit = { id ->
@@ -292,12 +310,7 @@ fun FavoriteGalleryScreen(
                 FavoriteSelectionTopBar(
                     count = selectedIds.size,
                     onClose = clearSelection,
-                    onExport = {
-                        val ids = selectedIds
-                        viewModel.exportImages(ids) { count ->
-                            Toast.makeText(context, "已导出 $count 张", Toast.LENGTH_SHORT).show()
-                        }
-                    },
+                    onExport = { showSaveSheet = true },
                     onRemoveFavorite = {
                         val ids = selectedIds
                         viewModel.removeFavorites(ids) { count ->
@@ -366,6 +379,24 @@ fun FavoriteGalleryScreen(
                 )
             }
         }
+    }
+
+    if (showSaveSheet) {
+        SaveToAlbumSheet(
+            imageCount = selectedIds.size,
+            subdirs = exportSubdirs,
+            onCreateSubdir = viewModel::createSubdir,
+            onDismiss = { showSaveSheet = false },
+            onConfirm = { subdir, alsoTrash ->
+                val ids = selectedIds
+                showSaveSheet = false
+                viewModel.saveImages(ids, subdir, alsoTrash) { count ->
+                    Toast.makeText(context, "已保存 $count 张", Toast.LENGTH_SHORT).show()
+                    clearSelection()
+                    items.refresh()
+                }
+            },
+        )
     }
 }
 

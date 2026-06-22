@@ -7,6 +7,7 @@ import com.xjw.qalbum.data.db.dao.TagDao
 import com.xjw.qalbum.data.db.entity.CleanupBatchEntity
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.db.entity.ImageTagEntity
+import com.xjw.qalbum.data.db.entity.OcrTextEntity
 import com.xjw.qalbum.data.db.entity.QuarantineEntity
 import com.xjw.qalbum.data.db.entity.TAG_USER_KEEP
 import com.xjw.qalbum.data.db.entity.TagEntity
@@ -335,7 +336,7 @@ class CleanupViewModel(
                     tag?.let { tagDao.linkTag(ImageTagEntity(imageId = id, tagId = it.id, source = "user")) }
                 }
                 _reviewBatch.value = _reviewBatch.value?.let { rb ->
-                    rb.copy(items = rb.items.mapNotNull { pruneReviewItem(it, ids) })
+                    rb.copy(items = rb.items.mapNotNull { pruneReviewItem(it, ids, keepSingleton = true) })
                 }
                 _selectedReviewDeleteIds.value = emptySet()
                 onDone(ids.size)
@@ -366,10 +367,36 @@ class CleanupViewModel(
         viewModelScope.launch { imageFileManager.prepareShare(imageId)?.let(onReady) }
     }
 
+    /** 导出子目录列表（保存弹窗用） */
+    val exportSubdirs: StateFlow<List<String>> = settings.exportSubdirs
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** 保存弹窗新建子目录（落盘走 App 级 appScope） */
+    fun createSubdir(name: String) = settings.addExportSubdir(name)
+
+    /**
+     * 预览页「保存」：导出到 Pictures/QAlbum[/子目录]；[alsoTrash] 为真则保存后把该图移入回收站并移出审核。
+     */
+    fun saveImage(imageId: Long, subdir: String?, alsoTrash: Boolean, onDone: (Boolean) -> Unit) {
+        viewModelScope.launch {
+            val ok = imageFileManager.exportToGallery(imageId, subdir)
+            if (ok && alsoTrash) {
+                val reason = _reviewBatch.value?.let { reasonByImageId(it.items)[imageId] }
+                    ?: CleanupRules.REASON_DUPLICATE
+                cleanupController.moveToTrash(listOf(imageId to reason))
+                removeFromReview(imageId)
+            }
+            onDone(ok)
+        }
+    }
+
+    /** 预览页「查看详情」：按需取该图 OCR 文本（与图库详情页同源） */
+    suspend fun getOcr(imageId: Long): OcrTextEntity? = imageRepository.getOcr(imageId)
+
     private fun removeFromReview(imageId: Long) {
         val removed = setOf(imageId)
         _reviewBatch.value = _reviewBatch.value?.let { rb ->
-            rb.copy(items = rb.items.mapNotNull { pruneReviewItem(it, removed) })
+            rb.copy(items = rb.items.mapNotNull { pruneReviewItem(it, removed, keepSingleton = true) })
         }
         _selectedReviewDeleteIds.value = _selectedReviewDeleteIds.value - imageId
     }
@@ -488,23 +515,44 @@ internal fun suggestedSelection(items: List<ReviewItem>): Set<Long> = buildSet {
     }
 }
 
-/** 移入回收站后，从审核项剔除已处理的图：重复组成员减少后重算保留/勾选，剩 <2 张则整组移除。 */
-internal fun pruneReviewItem(item: ReviewItem, removed: Set<Long>): ReviewItem? = when (item) {
+/**
+ * 处理（清理 / 保留）部分图后，从审核项剔除已处理的图：重复组成员减少后重算保留/勾选。
+ *
+ * 组缩到只剩 1 张时不再是「可对比的重复组」，此时：
+ * - [keepSingleton] = false（批量删除路径）：幸存者是用户**未勾选删除**、即隐含保留的图，整组移除，保持审核列表干净。
+ * - [keepSingleton] = true（保留 / 预览单张处理路径）：剩下那张**尚未被用户决定**，转成单图留在审核，
+ *   避免它脱离审核流后「消失在茫茫图库里」找不到。
+ */
+internal fun pruneReviewItem(
+    item: ReviewItem,
+    removed: Set<Long>,
+    keepSingleton: Boolean = false,
+): ReviewItem? = when (item) {
     is ReviewItem.Single -> if (item.image.id in removed) null else item
     is ReviewItem.Group -> {
         val remaining = item.members.filter { it.id !in removed }
-        if (remaining.size < 2) {
-            null
-        } else {
-            val decision = DuplicateReviewPolicy.decide(remaining)
-            if (decision == null) {
-                null
-            } else {
-                item.copy(
-                    members = remaining,
-                    keeperId = decision.keepId,
-                    defaultDeleteIds = decision.deleteIds,
+        when {
+            remaining.isEmpty() -> null
+            remaining.size == 1 -> if (keepSingleton) {
+                ReviewItem.Single(
+                    image = remaining.single(),
+                    reason = CleanupRules.REASON_DUPLICATE,
+                    defaultSelected = false,
                 )
+            } else {
+                null
+            }
+            else -> {
+                val decision = DuplicateReviewPolicy.decide(remaining)
+                if (decision == null) {
+                    null
+                } else {
+                    item.copy(
+                        members = remaining,
+                        keeperId = decision.keepId,
+                        defaultDeleteIds = decision.deleteIds,
+                    )
+                }
             }
         }
     }

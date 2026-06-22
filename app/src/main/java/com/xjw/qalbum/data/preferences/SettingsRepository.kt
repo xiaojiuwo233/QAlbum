@@ -15,8 +15,10 @@ import com.xjw.qalbum.domain.model.AutoFavoriteConfig
 import com.xjw.qalbum.domain.model.CleanupConfig
 import com.xjw.qalbum.domain.model.DuplicateStrictness
 import com.xjw.qalbum.domain.model.GallerySort
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -29,7 +31,10 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(na
  *
  * 这里只放轻量级、跨页面共享的配置；耗时/大型配置应放数据库。
  */
-class SettingsRepository(private val context: Context) {
+class SettingsRepository(
+    private val context: Context,
+    private val appScope: CoroutineScope,
+) {
 
     private val ds = context.dataStore
 
@@ -246,6 +251,37 @@ class SettingsRepository(private val context: Context) {
         ds.edit { it[Keys.DETAIL_SHARED_TRANSITION] = enabled }
     }
 
+    // ---- 导出相册子目录（保存图片到 Pictures/QAlbum/<子目录>）----
+
+    /** 用户创建的导出子目录名列表；缺省空（仅根目录） */
+    val exportSubdirs: Flow<List<String>> = ds.data.map { decodeSubdirs(it[Keys.EXPORT_SUBDIRS]) }
+
+    /** 新建导出子目录（清洗非法字符 + 去重）；fire-and-forget 走 appScope 落盘，避免页面销毁丢写 */
+    fun addExportSubdir(name: String) {
+        val clean = sanitizeExportSubdir(name) ?: return
+        appScope.launch {
+            ds.edit { prefs ->
+                val current = decodeSubdirs(prefs[Keys.EXPORT_SUBDIRS])
+                if (current.none { it.equals(clean, ignoreCase = true) }) {
+                    prefs[Keys.EXPORT_SUBDIRS] = cleanupJson.encodeToString(current + clean)
+                }
+            }
+        }
+    }
+
+    /** 删除导出子目录（仅移除设置项，不影响已导出到系统相册的文件） */
+    fun removeExportSubdir(name: String) {
+        appScope.launch {
+            ds.edit { prefs ->
+                val current = decodeSubdirs(prefs[Keys.EXPORT_SUBDIRS])
+                prefs[Keys.EXPORT_SUBDIRS] = cleanupJson.encodeToString(current.filterNot { it == name })
+            }
+        }
+    }
+
+    private fun decodeSubdirs(raw: String?): List<String> =
+        raw?.let { runCatching { cleanupJson.decodeFromString<List<String>>(it) }.getOrNull() } ?: emptyList()
+
     companion object {
         const val DEFAULT_CHATPIC_PATH =
             "/storage/emulated/0/Android/data/com.tencent.mobileqq/Tencent/MobileQQ/chatpic"
@@ -272,6 +308,12 @@ class SettingsRepository(private val context: Context) {
 
         const val DEFAULT_LARGE_THRESHOLD_BYTES = 1L * 1024 * 1024
         const val MIN_LARGE_THRESHOLD_BYTES = 100L * 1024
+
+        /** 清洗导出子目录名：去空白、剔除文件系统非法字符、限长；非法或空返回 null */
+        fun sanitizeExportSubdir(name: String): String? {
+            val cleaned = name.trim().replace(Regex("""[/\\:*?"<>|]"""), "").trim()
+            return cleaned.ifBlank { null }?.take(40)
+        }
     }
 
     private object Keys {
@@ -304,5 +346,6 @@ class SettingsRepository(private val context: Context) {
 
         val DYNAMIC_COLOR = booleanPreferencesKey("dynamic_color")
         val DETAIL_SHARED_TRANSITION = booleanPreferencesKey("detail_shared_transition")
+        val EXPORT_SUBDIRS = stringPreferencesKey("export_subdirs")
     }
 }
