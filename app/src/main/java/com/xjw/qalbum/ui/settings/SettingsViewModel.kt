@@ -279,6 +279,11 @@ class SettingsViewModel(
         persist { settings.setDuplicateStrictness(value) }
     }
 
+    /** 清除重复检测的学习成果，回退到当前严格度档位的基础模型。 */
+    fun resetDuplicateModel() {
+        persist { settings.resetSimilarityWeights() }
+    }
+
     // ---- 自动收藏配置（分析阶段，默认关闭，规则可自定义）----
 
     val autoFavoriteConfig: StateFlow<AutoFavoriteConfig> = settings.autoFavoriteConfig

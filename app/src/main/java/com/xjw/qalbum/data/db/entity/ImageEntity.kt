@@ -62,6 +62,8 @@ data class ImageEntity(
     @ColumnInfo(name = "phash") val phash: Long? = null,
     // 256bit 分块指纹（视觉去重精筛，要求局部逐格一致）。null = 尚未回填。
     @ColumnInfo(name = "block_hash", typeAffinity = ColumnInfo.BLOB) val blockHash: ByteArray? = null,
+    // 32 字节特征网格（16 亮度 + 16 边缘密度）：区分深/浅背景与版式的判别特征。null = 尚未回填。
+    @ColumnInfo(name = "feature_grid", typeAffinity = ColumnInfo.BLOB) val featureGrid: ByteArray? = null,
 
     // --- 质量评估 ---
     @ColumnInfo(name = "blur_score") val blurScore: Float? = null,
@@ -117,6 +119,7 @@ data class ImageEntity(
             xxhash == other.xxhash &&
             phash == other.phash &&
             (blockHash?.contentEquals(other.blockHash) ?: (other.blockHash == null)) &&
+            (featureGrid?.contentEquals(other.featureGrid) ?: (other.featureGrid == null)) &&
             blurScore == other.blurScore &&
             isBlank == other.isBlank &&
             hashDone == other.hashDone &&

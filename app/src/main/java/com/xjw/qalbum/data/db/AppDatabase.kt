@@ -52,7 +52,7 @@ import com.xjw.qalbum.data.db.entity.UserActionEntity
         DirSnapshotEntity::class,
         DedupExclusionEntity::class,
     ],
-    version = 8,
+    version = 9,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -156,13 +156,24 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v8 → v9：images 新增 feature_grid（32 字节特征网格：16 亮度 + 16 边缘密度，BLOB 可空）——
+         * 视觉去重的判别特征（区分深/浅背景与版式）；存量行留空，随分析增量回填
+         * （pendingHashIds 纳入 feature_grid IS NULL 的图）。仅加可空列＝元数据级 ALTER，瞬时完成。
+         */
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `images` ADD COLUMN `feature_grid` BLOB")
+            }
+        }
+
         fun build(context: Context): AppDatabase {
             return Room.databaseBuilder(
                 context.applicationContext,
                 AppDatabase::class.java,
                 DB_NAME,
             )
-                .addMigrations(MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
+                .addMigrations(MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
                 // 已注册的版本走 Migration 保数据；只有遇到未覆盖的版本跳变才回退重建兜底
                 .fallbackToDestructiveMigration()
                 .build()

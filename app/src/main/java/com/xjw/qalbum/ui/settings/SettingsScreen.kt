@@ -652,6 +652,10 @@ fun CleanupSettingsScreen(
                         DuplicateStrictness.STRICT -> "宁可漏掉也尽量不误判，适合截图多的相册（改后需重新查重）"
                     },
                 )
+                OutlinedButton(onClick = {
+                    viewModel.resetDuplicateModel()
+                    notify("已重置重复检测的学习记录")
+                }) { Text("重置学习记录") }
                 ThresholdSlider(
                     value = maxDupGroupSize.toFloat(),
                     valueRange = SettingsRepository.MIN_MAX_DUP_GROUP_SIZE.toFloat()..SettingsRepository.MAX_MAX_DUP_GROUP_SIZE.toFloat(),

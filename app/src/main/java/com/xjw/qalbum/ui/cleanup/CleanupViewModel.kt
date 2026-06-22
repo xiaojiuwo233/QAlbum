@@ -15,9 +15,12 @@ import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.data.repository.ImageRepository
 import com.xjw.qalbum.domain.model.CleanupConfig
 import com.xjw.qalbum.domain.model.CleanupPreset
+import com.xjw.qalbum.domain.model.DuplicateStrictness
 import com.xjw.qalbum.service.analysis.AnalysisPipeline
 import com.xjw.qalbum.service.analysis.AnalysisProgress
 import com.xjw.qalbum.service.analysis.AnalysisState
+import com.xjw.qalbum.service.analysis.SimilarityLearner
+import com.xjw.qalbum.service.analysis.SimilarityModel
 import com.xjw.qalbum.service.cleanup.CleanupBatch
 import com.xjw.qalbum.service.cleanup.CleanupController
 import com.xjw.qalbum.service.cleanup.CleanupRules
@@ -291,6 +294,7 @@ class CleanupViewModel(
                     ?.firstOrNull { it.groupId == groupId }
                     ?.members?.map { it.id }?.toSet().orEmpty()
                 imageRepository.splitDuplicateGroup(groupId)
+                learnSplitFeedback(memberIds) // 用拆分反馈在线更新相似度模型
                 _reviewBatch.value = _reviewBatch.value?.let { rb ->
                     rb.copy(items = rb.items.filterNot { it is ReviewItem.Group && it.groupId == groupId })
                 }
@@ -299,6 +303,24 @@ class CleanupViewModel(
             } finally {
                 _busy.value = false
             }
+        }
+    }
+
+    /**
+     * 用一次「拆分」反馈在线更新视觉相似度模型：组内两两为负样本（用户判定非重复），
+     * 配正锚点防塌缩。失败不影响拆分本身。
+     */
+    private suspend fun learnSplitFeedback(memberIds: Set<Long>) {
+        if (memberIds.size < 2) return
+        runCatching {
+            val feats = imageRepository.featuresByIds(memberIds.toList())
+                .map { SimilarityLearner.Feat(it.blockHash, it.featureGrid) }
+            val strictness = settings.duplicateStrictness.first()
+            val weights = settings.similarityWeights.first()
+            val base = weights?.let { SimilarityModel(it[0], it[1], it[2], it[3]) }
+                ?: SimilarityModel.DEFAULT.copy(threshold = strictness.scoreThreshold)
+            val updated = SimilarityLearner.learnFromSplit(base, feats)
+            settings.setSimilarityWeights(updated.wBlock, updated.wLuma, updated.wEdge, updated.threshold)
         }
     }
 

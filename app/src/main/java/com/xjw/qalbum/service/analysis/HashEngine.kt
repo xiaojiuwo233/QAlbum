@@ -181,6 +181,70 @@ object HashEngine {
         return out
     }
 
+    /**
+     * 从 Bitmap 计算 32 字节特征网格：前 16 字节 = 4×4 亮度网格，后 16 字节 = 4×4 边缘密度网格。
+     * 与 pHash/blockHash 共用已解码 bitmap，仅多一次 32×32 缩放，开销极小。
+     */
+    fun computeFeatureGridFromBitmap(bitmap: Bitmap): ByteArray {
+        val side = FEATURE_SIDE
+        val scaled = Bitmap.createScaledBitmap(bitmap, side, side, true)
+        val pixels = IntArray(side * side)
+        scaled.getPixels(pixels, 0, side, 0, 0, side, side)
+        if (scaled !== bitmap) scaled.recycle()
+        val gray = IntArray(pixels.size) { i ->
+            val p = pixels[i]
+            ((p shr 16 and 0xFF) * 77 + (p shr 8 and 0xFF) * 150 + (p and 0xFF) * 29) shr 8
+        }
+        return lumaGridFromGray(gray, side, FEATURE_GRID_N) + edgeGridFromGray(gray, side, FEATURE_GRID_N)
+    }
+
+    /** 亮度网格：srcSide×srcSide 灰度按 gridN×gridN 分区，每区**均值**（0-255）。保留绝对明暗，区分深/浅背景。 */
+    fun lumaGridFromGray(gray: IntArray, srcSide: Int, gridN: Int): ByteArray {
+        val out = ByteArray(gridN * gridN)
+        val cell = srcSide / gridN
+        if (cell <= 0) return out
+        for (gy in 0 until gridN) {
+            for (gx in 0 until gridN) {
+                var sum = 0L
+                var cnt = 0
+                for (y in gy * cell until (gy + 1) * cell) {
+                    val base = y * srcSide
+                    for (x in gx * cell until (gx + 1) * cell) {
+                        sum += gray[base + x]
+                        cnt++
+                    }
+                }
+                out[gy * gridN + gx] = (if (cnt > 0) (sum / cnt) else 0L).toInt().coerceIn(0, 255).toByte()
+            }
+        }
+        return out
+    }
+
+    /** 边缘密度网格：每区内梯度幅值（与右 / 下邻居差）均值（0-255）。捕捉文字密集度 / 图表 vs 文字的版式差异。 */
+    fun edgeGridFromGray(gray: IntArray, srcSide: Int, gridN: Int): ByteArray {
+        val out = ByteArray(gridN * gridN)
+        val cell = srcSide / gridN
+        if (cell <= 0) return out
+        for (gy in 0 until gridN) {
+            for (gx in 0 until gridN) {
+                var sum = 0L
+                var cnt = 0
+                for (y in gy * cell until (gy + 1) * cell) {
+                    val base = y * srcSide
+                    for (x in gx * cell until (gx + 1) * cell) {
+                        val g = gray[base + x]
+                        val dx = if (x + 1 < srcSide) kotlin.math.abs(gray[base + x + 1] - g) else 0
+                        val dy = if (y + 1 < srcSide) kotlin.math.abs(gray[(y + 1) * srcSide + x] - g) else 0
+                        sum += (dx + dy)
+                        cnt++
+                    }
+                }
+                out[gy * gridN + gx] = (if (cnt > 0) (sum / cnt) else 0L).toInt().coerceIn(0, 255).toByte()
+            }
+        }
+        return out
+    }
+
     // ---- 共享 IO / 解码 ----
 
     /** 读取图片字节（带上限），供「一次读取多结果」复用。失败或空返回 null。 */
@@ -238,6 +302,8 @@ object HashEngine {
     private const val MAX_PHASH_SIDE = 256
     private const val BLOCK_COLS = 17    // 分块指纹：水平 17 列（16 次相邻比较）
     private const val BLOCK_ROWS = 16    // 分块指纹：16 行 → 16×16 = 256 bit
+    private const val FEATURE_SIDE = 32  // 亮度/边缘网格的源灰度边长
+    private const val FEATURE_GRID_N = 4 // 4×4 网格 → 每特征 16 字节
     private val INV_SQRT2 = 1.0 / sqrt(2.0)
     private const val MAX_HASH_BYTES = 32 * 1024 * 1024   // xxHash 最多 32MB（限制罕见的超大图）
     private const val MAX_DECODE_BYTES = 32 * 1024 * 1024

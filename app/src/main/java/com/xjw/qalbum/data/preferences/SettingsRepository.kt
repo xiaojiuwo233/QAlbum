@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.doublePreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
@@ -181,6 +182,37 @@ class SettingsRepository(
         ds.edit { it[Keys.DUPLICATE_STRICTNESS] = value.name }
     }
 
+    /**
+     * 视觉相似度学习模型的 4 个参数 [wBlock, wLuma, wEdge, threshold]；未学习返回 null
+     * （调用方回退到严格度档位的基础模型）。只存原始 double，不依赖 service 层的模型类型。
+     */
+    val similarityWeights: Flow<DoubleArray?> = ds.data.map { p ->
+        val wb = p[Keys.SIM_W_BLOCK]
+        val wl = p[Keys.SIM_W_LUMA]
+        val we = p[Keys.SIM_W_EDGE]
+        val th = p[Keys.SIM_THRESHOLD]
+        if (wb != null && wl != null && we != null && th != null) doubleArrayOf(wb, wl, we, th) else null
+    }
+
+    suspend fun setSimilarityWeights(wBlock: Double, wLuma: Double, wEdge: Double, threshold: Double) {
+        ds.edit {
+            it[Keys.SIM_W_BLOCK] = wBlock
+            it[Keys.SIM_W_LUMA] = wLuma
+            it[Keys.SIM_W_EDGE] = wEdge
+            it[Keys.SIM_THRESHOLD] = threshold
+        }
+    }
+
+    /** 清除学习成果，回退到档位基础模型。 */
+    suspend fun resetSimilarityWeights() {
+        ds.edit {
+            it.remove(Keys.SIM_W_BLOCK)
+            it.remove(Keys.SIM_W_LUMA)
+            it.remove(Keys.SIM_W_EDGE)
+            it.remove(Keys.SIM_THRESHOLD)
+        }
+    }
+
     // ---- 图库页偏好（列数 / 排序 / 大图标记阈值） ----
 
     /** 图库每行图片数；与捏合缩放共用，范围 [MIN_GALLERY_COLUMNS, MAX_GALLERY_COLUMNS] */
@@ -336,6 +368,10 @@ class SettingsRepository(
         val CLEANUP_ALL_DUPLICATES = booleanPreferencesKey("cleanup_all_duplicates")
         val MAX_DUP_GROUP_SIZE = intPreferencesKey("max_dup_group_size")
         val DUPLICATE_STRICTNESS = stringPreferencesKey("duplicate_strictness")
+        val SIM_W_BLOCK = doublePreferencesKey("sim_w_block")
+        val SIM_W_LUMA = doublePreferencesKey("sim_w_luma")
+        val SIM_W_EDGE = doublePreferencesKey("sim_w_edge")
+        val SIM_THRESHOLD = doublePreferencesKey("sim_threshold")
 
         val GALLERY_COLUMNS = intPreferencesKey("gallery_columns")
         val GALLERY_SORT = stringPreferencesKey("gallery_sort")

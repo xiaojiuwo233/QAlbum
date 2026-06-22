@@ -7,15 +7,15 @@ import kotlin.math.max
  * 重复聚类核心（纯函数，可单测）。
  *
  * 两类重复：
- * - **精确**：xxHash 完全相同 —— 一定同内容，可靠，不受任何视觉约束（同一图被转发上百次是合法大组）。
- * - **视觉**：多信号合议，避免 pHash 单打独斗把「截图 / 文档 / 纯色」这类低频结构雷同、但内容不同的图误聚。
- *   连边需**同时**满足：
- *   1) pHash 距离 < [visualThreshold]（粗筛 + 高 16 位分桶，避免 O(N²)）；
- *   2) **分块指纹（blockHash, 256bit）距离 < [blockThreshold]** —— 精筛，要求「局部逐格一致」，
- *      这是区分截图的主力（「整体相似」对截图永远成立，「逐格一致」只对真副本成立）；
- *   3) **宽高比接近**（[aspectTolerance]）；
- *   随后连通分量大小 > [maxVisualGroupSize] 的整组判定误聚丢弃（兜底）。
- *   纯色图（[Item.isBlank]）与尚未回填 blockHash 的图不参与视觉聚类。
+ * - **精确**：xxHash 完全相同 —— 一定同内容，可靠，不受任何视觉约束。
+ * - **视觉**：多信号**加权合议**（[SimilarityModel]），避免把「截图 / 文档」这类结构雷同、内容不同的图误聚。
+ *   连边需满足硬门槛（pHash 距离 < [visualThreshold]、宽高比接近、非纯色、未被人工拆分排斥）+
+ *   模型判定相似：`model.isSimilar(dBlock, dLuma, dEdge)`，其中
+ *   - dBlock = blockHash 归一化距离（整体梯度结构）
+ *   - dLuma  = 亮度网格归一化距离（深/浅背景、明暗布局）
+ *   - dEdge  = 边缘网格归一化距离（文字密度 / 图表 vs 文字）
+ *   随后连通分量 > [maxVisualGroupSize] 整组判定误聚丢弃（兜底）。
+ *   缺任一视觉特征（pHash/blockHash/featureGrid）或纯色图不参与视觉聚类。
  */
 object DuplicateClusterer {
 
@@ -26,13 +26,14 @@ object DuplicateClusterer {
         val width: Int,
         val height: Int,
         val size: Long,
-        /** 256bit（32 字节）分块指纹：视觉去重的精筛信号，要求「局部逐格一致」。null = 尚未回填，不参与视觉聚类。 */
+        /** 256bit（32 字节）分块指纹（整体梯度结构）。 */
         val blockHash: ByteArray? = null,
-        /** 纯色/空白图：任何 hash 都雷同，直接排除出视觉聚类，避免误聚。 */
+        /** 32 字节特征网格：前 16 = 4×4 亮度网格，后 16 = 4×4 边缘密度网格。 */
+        val featureGrid: ByteArray? = null,
+        /** 纯色/空白图：排除出视觉聚类。 */
         val isBlank: Boolean = false,
     ) {
-        // blockHash 是 ByteArray，data class 默认 equals/hashCode 不按内容比较；本类仅以 id 标识、
-        // 不作为集合 key，故只按 id 判等。显式重写以免 IDE 对 Array 字段告警。
+        // 含 ByteArray，按 id 判等即可（不作集合 key）。
         override fun equals(other: Any?): Boolean = other is Item && other.id == id
         override fun hashCode(): Int = id.hashCode()
     }
@@ -40,25 +41,25 @@ object DuplicateClusterer {
     data class Assignment(val id: Long, val groupId: Long, val isBest: Boolean)
 
     const val DEFAULT_VISUAL_THRESHOLD = 8
-    const val DEFAULT_BLOCK_THRESHOLD = 40
     const val DEFAULT_ASPECT_TOLERANCE = 0.12
     const val DEFAULT_MAX_VISUAL_GROUP = 20
+    const val BLOCK_HASH_BITS = 256
+    const val GRID_BYTES = 16
 
     fun cluster(
         items: List<Item>,
         startGroupId: Long,
         visualThreshold: Int = DEFAULT_VISUAL_THRESHOLD,
-        blockThreshold: Int = DEFAULT_BLOCK_THRESHOLD,
+        model: SimilarityModel = SimilarityModel.DEFAULT,
         aspectTolerance: Double = DEFAULT_ASPECT_TOLERANCE,
         maxVisualGroupSize: Int = DEFAULT_MAX_VISUAL_GROUP,
-        /** 人工拆分形成的「禁止再聚」约束：imageId → 所属 cohort 集合；共享任一 cohort 的两图不连边。 */
         exclusions: Map<Long, Set<Long>> = emptyMap(),
     ): List<Assignment> {
         val assignments = mutableListOf<Assignment>()
         var nextGroup = startGroupId
         val assignedExact = HashSet<Long>()
 
-        // 1) 精确重复：xxHash 相同（可靠），不受视觉约束限制（同图被转发上百次是合法大组）
+        // 1) 精确重复：xxHash 相同（可靠），不受视觉约束限制
         items.filter { it.xxhash != null }
             .groupBy { it.xxhash!! }
             .values
@@ -72,9 +73,10 @@ object DuplicateClusterer {
                 nextGroup++
             }
 
-        // 2) 视觉重复：未被精确分组、有 pHash + blockHash、且非纯色的图
+        // 2) 视觉重复：未被精确分组、有 pHash + blockHash + featureGrid、且非纯色的图
         val visualItems = items.filter {
-            it.id !in assignedExact && it.phash != null && it.blockHash != null && !it.isBlank
+            it.id !in assignedExact && it.phash != null && it.blockHash != null &&
+                it.featureGrid != null && !it.isBlank
         }
         if (visualItems.isNotEmpty()) {
             val byId = visualItems.associateBy { it.id }
@@ -91,8 +93,11 @@ object DuplicateClusterer {
                     for (j in i + 1 until bucket.size) {
                         val a = bucket[i]
                         val b = bucket[j]
+                        val dBlock = blockHashDistance(a.blockHash!!, b.blockHash!!) / BLOCK_HASH_BITS.toDouble()
+                        val dLuma = lumaDistance(a.featureGrid!!, b.featureGrid!!)
+                        val dEdge = edgeDistance(a.featureGrid!!, b.featureGrid!!)
                         if (hamming(a.phash!!, b.phash!!) < visualThreshold &&
-                            blockHashDistance(a.blockHash!!, b.blockHash!!) < blockThreshold &&
+                            model.isSimilar(dBlock, dLuma, dEdge) &&
                             aspectClose(a, b, aspectTolerance) &&
                             !sharesCohort(a.id, b.id)
                         ) {
@@ -142,6 +147,21 @@ object DuplicateClusterer {
         var d = 0
         for (i in a.indices) d += Integer.bitCount((a[i].toInt() xor b[i].toInt()) and 0xFF)
         return d
+    }
+
+    /** featureGrid 前 16 字节（亮度网格）归一化 L1 距离 [0,1]。 */
+    fun lumaDistance(a: ByteArray, b: ByteArray): Double = gridL1(a, b, 0)
+
+    /** featureGrid 后 16 字节（边缘网格）归一化 L1 距离 [0,1]。 */
+    fun edgeDistance(a: ByteArray, b: ByteArray): Double = gridL1(a, b, GRID_BYTES)
+
+    private fun gridL1(a: ByteArray, b: ByteArray, offset: Int): Double {
+        if (a.size < offset + GRID_BYTES || b.size < offset + GRID_BYTES) return 1.0
+        var sum = 0
+        for (i in 0 until GRID_BYTES) {
+            sum += abs((a[offset + i].toInt() and 0xFF) - (b[offset + i].toInt() and 0xFF))
+        }
+        return sum / (GRID_BYTES * 255.0)
     }
 
     /** 宽高比是否接近（任一缺尺寸则视为不接近，保守不聚） */

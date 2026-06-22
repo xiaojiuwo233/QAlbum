@@ -23,6 +23,7 @@ class DuplicateDetector(
     suspend fun recluster(
         maxVisualGroupSize: Int = DuplicateClusterer.DEFAULT_MAX_VISUAL_GROUP,
         strictness: DuplicateStrictness = DuplicateStrictness.DEFAULT,
+        model: SimilarityModel = SimilarityModel.DEFAULT,
     ) {
         val rows = imageDao.dedupProjection()
         if (rows.isEmpty()) {
@@ -35,6 +36,7 @@ class DuplicateDetector(
                 xxhash = it.xxhash,
                 phash = it.phash,
                 blockHash = it.blockHash,
+                featureGrid = it.featureGrid,
                 isBlank = it.isBlank,
                 width = it.width,
                 height = it.height,
@@ -47,7 +49,7 @@ class DuplicateDetector(
             items,
             startGroupId,
             visualThreshold = strictness.visualThreshold,
-            blockThreshold = strictness.blockThreshold,
+            model = model,
             maxVisualGroupSize = maxVisualGroupSize,
             exclusions = exclusions,
         )

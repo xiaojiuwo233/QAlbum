@@ -5,6 +5,7 @@ import androidx.paging.PagingConfig
 import androidx.paging.PagingData
 import com.xjw.qalbum.data.db.dao.DedupExclusionDao
 import com.xjw.qalbum.data.db.dao.ImageDao
+import com.xjw.qalbum.data.db.dao.ImageFeatureRow
 import com.xjw.qalbum.data.db.dao.OcrDao
 import com.xjw.qalbum.data.db.entity.DedupExclusionEntity
 import com.xjw.qalbum.data.db.entity.ImageEntity
@@ -102,6 +103,10 @@ class ImageRepository(
 
     suspend fun getByIds(ids: List<Long>): List<ImageEntity> =
         if (ids.isEmpty()) emptyList() else imageDao.getByIds(ids)
+
+    /** 取若干图的视觉特征（反馈学习用） */
+    suspend fun featuresByIds(ids: List<Long>): List<ImageFeatureRow> =
+        if (ids.isEmpty()) emptyList() else imageDao.featuresByIds(ids)
 
     /** 选中图片的原始字节总和；分块查询，避免 id 过多触及 SQLite 变量上限 */
     suspend fun sumSizeByIds(ids: List<Long>): Long {
