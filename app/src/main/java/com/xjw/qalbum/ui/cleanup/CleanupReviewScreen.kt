@@ -2,27 +2,12 @@ package com.xjw.qalbum.ui.cleanup
 
 import android.content.Intent
 import android.widget.Toast
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
-import androidx.compose.material.icons.outlined.Download
-import androidx.compose.material.icons.outlined.Info
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.produceState
 import com.xjw.qalbum.data.db.entity.OcrTextEntity
-import com.xjw.qalbum.ui.components.SaveToAlbumSheet
-import com.xjw.qalbum.ui.detail.PhotoDetailsSheet
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.pager.HorizontalPager
-import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.outlined.Bookmark
 import androidx.compose.material.icons.outlined.Favorite
 import androidx.compose.material.icons.outlined.FavoriteBorder
-import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.SwapVert
-import androidx.compose.ui.graphics.vector.ImageVector
 import com.xjw.qalbum.service.cleanup.ExternalViewTarget
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -83,7 +68,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
@@ -92,13 +76,13 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import coil3.request.crossfade
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.service.cleanup.CleanupRules
+import com.xjw.qalbum.ui.components.FullScreenImagePager
+import com.xjw.qalbum.ui.components.PreviewAction
 import com.xjw.qalbum.ui.imageloading.ImageEntityModel
 
 /** 审核网格页（折叠重复组）：全屏、隐藏底部导航栏。 */
@@ -801,9 +785,8 @@ private fun GroupMemberTile(
 }
 
 /**
- * 全屏预览：左右滑动切换上一张/下一张；顶部「时间 + 详情 + 保存 + 分享」；底部「收藏 / 勾选 / 清理 / 保留」。
- * [images] 是预览时的快照列表；清理 / 保留会把该图移出审核并关闭预览。
- * 「保存」导出到系统相册（Pictures/QAlbum），「详情」复用图库的元数据 + OCR 详情卡。
+ * 全屏预览：左右滑动切换、双指/双击缩放；顶部「时间 + 详情 + 保存 + 分享」；底部「收藏 / 勾选 / 清理 / 保留」。
+ * 复用通用 [FullScreenImagePager]（缩放 + 详情卡点外部关闭）；清理 / 保留会把该图移出审核并关闭预览。
  */
 @Composable
 internal fun ReviewPreviewPager(
@@ -822,153 +805,45 @@ internal fun ReviewPreviewPager(
     onSave: (id: Long, subdir: String?, alsoTrash: Boolean) -> Unit,
     onLoadOcr: suspend (Long) -> OcrTextEntity?,
 ) {
-    if (images.isEmpty()) {
-        onClose()
-        return
-    }
-    val context = LocalContext.current
-    val pagerState = rememberPagerState(initialPage = startIndex.coerceIn(0, images.lastIndex)) { images.size }
-    var detailsVisible by remember { mutableStateOf(false) }
-    var showSaveSheet by remember { mutableStateOf(false) }
-
-    Dialog(
-        onDismissRequest = onClose,
-        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
-    ) {
-        Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
-            HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize(), key = { images[it].id }) { page ->
-                AsyncImage(
-                    model = ImageRequest.Builder(context).data(ImageEntityModel(images[page])).crossfade(true).build(),
-                    contentDescription = images[page].filename,
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier.fillMaxSize(),
-                )
-            }
-
-            val current = images.getOrNull(pagerState.currentPage) ?: images.first()
-
-            // 顶部：关闭 + 时间 + 详情 + 保存 + 分享
-            Row(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .fillMaxWidth()
-                    .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.72f), Color.Transparent)))
-                    .statusBarsPadding()
-                    .padding(start = 4.dp, top = 6.dp, end = 4.dp, bottom = 28.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                IconButton(onClick = onClose) {
-                    Icon(Icons.Outlined.Close, contentDescription = "关闭", tint = Color.White)
-                }
-                Column(modifier = Modifier.weight(1f).padding(start = 4.dp)) {
-                    Text(
-                        formatImageTime(current.mtime),
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color = Color.White,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(imageMeta(current), style = MaterialTheme.typography.bodySmall, color = Color.White.copy(alpha = 0.72f))
-                }
-                IconButton(onClick = { detailsVisible = true }) {
-                    Icon(Icons.Outlined.Info, contentDescription = "详情", tint = Color.White)
-                }
-                IconButton(onClick = { showSaveSheet = true }) {
-                    Icon(Icons.Outlined.Download, contentDescription = "保存", tint = Color.White)
-                }
-                IconButton(onClick = { onShare(current.id) }) {
-                    Icon(Icons.Outlined.Share, contentDescription = "分享", tint = Color.White)
-                }
-            }
-
-            // 底部操作栏
-            Row(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.78f))))
-                    .navigationBarsPadding()
-                    .padding(top = 28.dp, bottom = 12.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                val isFav = current.isFavorite
-                val isSelected = current.id in selectedIds
-                PreviewAction(
-                    icon = if (isFav) Icons.Outlined.Favorite else Icons.Outlined.FavoriteBorder,
-                    label = if (isFav) "已收藏" else "收藏",
-                    onClick = { onFavorite(current.id, !isFav) },
-                )
-                PreviewAction(
-                    icon = if (isSelected) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
-                    label = if (isSelected) "已勾选" else "勾选",
-                    onClick = { onToggleSelect(current.id) },
-                )
-                PreviewAction(
-                    icon = Icons.Outlined.Delete,
-                    label = "清理",
-                    enabled = !busy,
-                    onClick = { onTrash(current.id) },
-                )
-                PreviewAction(
-                    icon = Icons.Outlined.Bookmark,
-                    label = "保留",
-                    onClick = { onKeep(current.id) },
-                )
-            }
-
-            // 「查看详情」：复用图库详情卡（元数据 + OCR），从底部滑入覆盖底部操作栏
-            val ocr by produceState<OcrTextEntity?>(null, current.id, detailsVisible) {
-                value = if (detailsVisible) onLoadOcr(current.id) else null
-            }
-            AnimatedVisibility(
-                visible = detailsVisible,
-                enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
-                exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
-                modifier = Modifier.align(Alignment.BottomCenter),
-            ) {
-                PhotoDetailsSheet(
-                    image = current,
-                    ocr = ocr,
-                    onClose = { detailsVisible = false },
-                )
-            }
-
-            if (showSaveSheet) {
-                SaveToAlbumSheet(
-                    imageCount = 1,
-                    subdirs = exportSubdirs,
-                    onCreateSubdir = onCreateSubdir,
-                    onDismiss = { showSaveSheet = false },
-                    onConfirm = { subdir, alsoTrash ->
-                        showSaveSheet = false
-                        onSave(current.id, subdir, alsoTrash)
-                    },
-                )
-            }
+    FullScreenImagePager(
+        images = images,
+        startIndex = startIndex,
+        onClose = onClose,
+        onShare = onShare,
+        exportSubdirs = exportSubdirs,
+        onCreateSubdir = onCreateSubdir,
+        onSave = onSave,
+        onLoadOcr = onLoadOcr,
+    ) { current ->
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            val isFav = current.isFavorite
+            val isSelected = current.id in selectedIds
+            PreviewAction(
+                icon = if (isFav) Icons.Outlined.Favorite else Icons.Outlined.FavoriteBorder,
+                label = if (isFav) "已收藏" else "收藏",
+                onClick = { onFavorite(current.id, !isFav) },
+            )
+            PreviewAction(
+                icon = if (isSelected) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
+                label = if (isSelected) "已勾选" else "勾选",
+                onClick = { onToggleSelect(current.id) },
+            )
+            PreviewAction(
+                icon = Icons.Outlined.Delete,
+                label = "清理",
+                enabled = !busy,
+                onClick = { onTrash(current.id) },
+            )
+            PreviewAction(
+                icon = Icons.Outlined.Bookmark,
+                label = "保留",
+                onClick = { onKeep(current.id) },
+            )
         }
-    }
-}
-
-@Composable
-private fun PreviewAction(
-    icon: ImageVector,
-    label: String,
-    enabled: Boolean = true,
-    onClick: () -> Unit,
-) {
-    val color = if (enabled) Color.White else Color.White.copy(alpha = 0.4f)
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier
-            .clip(RoundedCornerShape(12.dp))
-            .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 6.dp),
-    ) {
-        Icon(icon, contentDescription = label, tint = color)
-        Spacer(Modifier.height(2.dp))
-        Text(label, style = MaterialTheme.typography.labelSmall, color = color)
     }
 }
 

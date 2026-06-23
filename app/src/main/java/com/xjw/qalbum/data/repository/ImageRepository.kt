@@ -86,6 +86,10 @@ class ImageRepository(
     fun observeFavoriteDateBucketCounts(): Flow<Map<Long, Int>> =
         imageDao.observeFavoriteDateBucketCounts().map { rows -> rows.toBucketCountMap() }
 
+    /** 某标签下活跃图片的日期分桶计数（标签详情页时间线表头用，与图库同口径） */
+    fun observeTagDateBucketCounts(tagId: Long): Flow<Map<Long, Int>> =
+        imageDao.observeTagDateBucketCounts(tagId).map { rows -> rows.toBucketCountMap() }
+
     /** 详情页时间线 id 列表（轻量，支撑左右滑动按需加载）；与图库网格使用同一 [sort] */
     suspend fun timelineIds(sort: GallerySort): List<Long> = when (sort) {
         GallerySort.DATE_DESC -> imageDao.timelineIds()

@@ -848,6 +848,22 @@ interface ImageDao {
     suspend fun countActiveImagesByTag(tagId: Long): Int
 
     /**
+     * 某标签下活跃图片的「日期分桶计数」（year*1000 + dayOfYear → 张数），供标签详情页时间线表头显示「（N）」。
+     * 日期口径与 [observeTimelineDateBucketCounts] 完全一致，保证与图库分组对齐。
+     */
+    @Query("""
+        SELECT
+            CAST(strftime('%Y', i.mtime / 1000, 'unixepoch', 'localtime') AS INTEGER) * 1000
+                + CAST(strftime('%j', i.mtime / 1000, 'unixepoch', 'localtime') AS INTEGER) AS bucketKey,
+            COUNT(*) AS count
+        FROM images i
+        INNER JOIN image_tags it ON it.image_id = i.id
+        WHERE it.tag_id = :tagId AND i.status = 'active' AND i.source_type <> 'chatthumb'
+        GROUP BY bucketKey
+    """)
+    fun observeTagDateBucketCounts(tagId: Long): Flow<List<BucketCountRow>>
+
+    /**
      * 某标签下活跃图片的 id，keyset 分块（id 升序，传上一块末尾 id 作 [afterId]）。
      * 「删除该标签下全部图片」时按块取出逐块处理，绝不一次性把整组 id 装载进内存。
      */

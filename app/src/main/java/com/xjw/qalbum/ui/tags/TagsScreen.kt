@@ -2,9 +2,13 @@ package com.xjw.qalbum.ui.tags
 
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,8 +22,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
@@ -27,13 +33,16 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
-import androidx.compose.material.icons.outlined.CheckCircle
-import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.Delete
-import androidx.compose.material.icons.outlined.RadioButtonUnchecked
 import androidx.compose.material.icons.automirrored.outlined.Label
+import androidx.compose.material.icons.automirrored.outlined.LabelOff
+import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Favorite
+import androidx.compose.material.icons.outlined.FavoriteBorder
+import androidx.compose.material.icons.outlined.RadioButtonUnchecked
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -46,6 +55,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -55,13 +65,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
+import androidx.paging.LoadState
 import androidx.paging.compose.collectAsLazyPagingItems
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
@@ -69,16 +81,20 @@ import coil3.request.crossfade
 import com.xjw.qalbum.data.db.dao.TagDao
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.ui.cleanup.PurgeProgressDialog
+import com.xjw.qalbum.ui.cleanup.shareChooser
+import com.xjw.qalbum.ui.components.FullScreenImagePager
+import com.xjw.qalbum.ui.components.PreviewAction
+import com.xjw.qalbum.ui.gallery.GalleryTimelineItem
 import com.xjw.qalbum.ui.imageloading.ImageEntityModel
-import androidx.compose.foundation.layout.statusBarsPadding
 import org.koin.androidx.compose.koinViewModel
 
 /**
  * 标签管理页
  *
- * - 一级：所有「AI 打的标签」列表（带活跃图片数），可按名搜索筛选。
- * - 二级：点某标签 → 该标签下图片分页网格；点选子集后「移入回收站 已选 N」，
- *   未选时「移入回收站·全部 N」（按 tag 分块全删）。删除全程有进度条。
+ * - 一级：所有标签列表（AI 标签 + 「用户保留」），带活跃图片数，可按名搜索筛选。
+ * - 二级：点某标签 → 该标签下图片**按时间分组**的网格（布局与图库页一致：日期表头、共用列数、可捏合调列）；
+ *   长按全屏预览（与审核页一致：左右滑动、缩放、详情、保存、分享），并可「收藏 / 取消标签」。
+ *   点选子集后「移入回收站 已选 N」/批量「取消标签」，未选时「移入回收站·全部 N」（按 tag 分块全删）。
  */
 @Composable
 fun TagsScreen(
@@ -88,8 +104,6 @@ fun TagsScreen(
 ) {
     val tags by viewModel.tags.collectAsState()
     val progress by viewModel.progress.collectAsState()
-    val busy by viewModel.busy.collectAsState()
-    val context = LocalContext.current
     var selected by remember { mutableStateOf<TagDao.TagWithCount?>(null) }
 
     // 列表数据刷新后，同步被选中标签的最新计数（删完一部分后数字会变）
@@ -109,15 +123,9 @@ fun TagsScreen(
     } else {
         TagImagesContent(
             tag = activeTag,
-            busy = busy,
             contentPadding = contentPadding,
-            pager = remember(activeTag.id) { viewModel.pagerFor(activeTag.id) },
+            viewModel = viewModel,
             onBack = { selected = null },
-            onMoveToTrash = { ids ->
-                viewModel.moveToTrash(activeTag, ids) { count ->
-                    Toast.makeText(context, "已移入回收站 $count 张", Toast.LENGTH_SHORT).show()
-                }
-            },
         )
     }
 
@@ -179,7 +187,7 @@ private fun TagListContent(
                         Text("还没有标签", color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Spacer(Modifier.height(4.dp))
                         Text(
-                            "开启并运行「AI 标签」分析后，标签会显示在这里。",
+                            "开启并运行「AI 标签」分析，或在审核时「保留」图片后，标签会显示在这里。",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -229,18 +237,10 @@ private fun TagRow(tag: TagDao.TagWithCount, onClick: () -> Unit) {
                 overflow = TextOverflow.Ellipsis,
             )
             if (tag.type == "risk") {
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(999.dp))
-                        .background(MaterialTheme.colorScheme.errorContainer)
-                        .padding(horizontal = 8.dp, vertical = 2.dp),
-                ) {
-                    Text(
-                        "敏感",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onErrorContainer,
-                    )
-                }
+                TagBadge("敏感", MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.onErrorContainer)
+                Spacer(Modifier.size(8.dp))
+            } else if (tag.type == "user") {
+                TagBadge("保留", MaterialTheme.colorScheme.secondaryContainer, MaterialTheme.colorScheme.onSecondaryContainer)
                 Spacer(Modifier.size(8.dp))
             }
             Text(
@@ -253,15 +253,29 @@ private fun TagRow(tag: TagDao.TagWithCount, onClick: () -> Unit) {
 }
 
 @Composable
+private fun TagBadge(text: String, container: Color, onContainer: Color) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(container)
+            .padding(horizontal = 8.dp, vertical = 2.dp),
+    ) {
+        Text(text, style = MaterialTheme.typography.labelSmall, color = onContainer)
+    }
+}
+
+@Composable
 private fun TagImagesContent(
     tag: TagDao.TagWithCount,
-    busy: Boolean,
     contentPadding: PaddingValues,
-    pager: kotlinx.coroutines.flow.Flow<androidx.paging.PagingData<ImageEntity>>,
+    viewModel: TagsViewModel,
     onBack: () -> Unit,
-    onMoveToTrash: (Set<Long>) -> Unit,
 ) {
-    val images = pager.collectAsLazyPagingItems()
+    val context = LocalContext.current
+    val busy by viewModel.busy.collectAsState()
+    val columns by viewModel.galleryColumns.collectAsState()
+    val exportSubdirs by viewModel.exportSubdirs.collectAsState()
+    val timeline = remember(tag.id) { viewModel.timelineFor(tag.id) }.collectAsLazyPagingItems()
     val gridState = rememberLazyGridState()
     var selectedIds by remember(tag.id) { mutableStateOf(setOf<Long>()) }
     var preview by remember { mutableStateOf<ImageEntity?>(null) }
@@ -274,7 +288,7 @@ private fun TagImagesContent(
                     modifier = Modifier
                         .fillMaxWidth()
                         .statusBarsPadding()
-                        .padding(start = 4.dp, top = 6.dp, end = 12.dp, bottom = 6.dp),
+                        .padding(start = 4.dp, top = 6.dp, end = 8.dp, bottom = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     IconButton(onClick = onBack) {
@@ -294,6 +308,20 @@ private fun TagImagesContent(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
+                    if (selectedIds.isNotEmpty()) {
+                        IconButton(
+                            onClick = {
+                                val ids = selectedIds
+                                selectedIds = emptySet()
+                                viewModel.removeTagBulk(tag, ids) { count ->
+                                    Toast.makeText(context, "已取消标签 $count 张", Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            enabled = !busy,
+                        ) {
+                            Icon(Icons.AutoMirrored.Outlined.LabelOff, contentDescription = "取消标签")
+                        }
+                    }
                     FilledTonalButton(
                         onClick = { showConfirm = true },
                         enabled = !busy && tag.count > 0,
@@ -309,40 +337,106 @@ private fun TagImagesContent(
     ) { topPadding ->
         LazyVerticalGrid(
             state = gridState,
-            columns = GridCells.Fixed(3),
+            columns = GridCells.Fixed(columns),
             modifier = Modifier
                 .fillMaxSize()
-                .padding(top = topPadding.calculateTopPadding()),
+                .padding(top = topPadding.calculateTopPadding())
+                .tagPinchColumns(columns) { viewModel.setColumns(it) },
             contentPadding = PaddingValues(
-                start = 6.dp,
-                end = 6.dp,
-                top = 6.dp,
-                bottom = contentPadding.calculateBottomPadding() + 16.dp,
+                start = 1.5.dp,
+                end = 1.5.dp,
+                top = 2.dp,
+                bottom = contentPadding.calculateBottomPadding() + 12.dp,
             ),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(1.5.dp),
+            verticalArrangement = Arrangement.spacedBy(1.5.dp),
         ) {
             items(
-                count = images.itemCount,
-                key = { index -> images.peek(index)?.id ?: "loading-$index" },
+                count = timeline.itemCount,
+                key = { index ->
+                    when (val item = timeline.peek(index)) {
+                        is GalleryTimelineItem.Header -> item.key
+                        is GalleryTimelineItem.Photo -> item.image.id
+                        null -> "loading-$index"
+                    }
+                },
+                span = { index ->
+                    if (timeline.peek(index) is GalleryTimelineItem.Header) GridItemSpan(maxLineSpan) else GridItemSpan(1)
+                },
             ) { index ->
-                val img = images[index]
-                if (img != null) {
-                    TagImageTile(
-                        image = img,
-                        selected = img.id in selectedIds,
+                when (val item = timeline[index]) {
+                    is GalleryTimelineItem.Header -> TagSectionHeader(item.label)
+                    is GalleryTimelineItem.Photo -> TagImageTile(
+                        image = item.image,
+                        selected = item.image.id in selectedIds,
+                        selectionMode = selectedIds.isNotEmpty(),
                         onToggle = {
-                            selectedIds = if (img.id in selectedIds) selectedIds - img.id else selectedIds + img.id
+                            val id = item.image.id
+                            selectedIds = if (id in selectedIds) selectedIds - id else selectedIds + id
                         },
-                        onPreview = { preview = img },
+                        onPreview = { preview = item.image },
                     )
+                    null -> Unit
+                }
+            }
+
+            if (timeline.loadState.append is LoadState.Loading) {
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    Box(modifier = Modifier.fillMaxWidth().padding(20.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator()
+                    }
                 }
             }
         }
     }
 
-    preview?.let { image ->
-        TagPreviewDialog(image = image, onClose = { preview = null })
+    preview?.let { startImage ->
+        val photos = timeline.itemSnapshotList.items
+            .filterIsInstance<GalleryTimelineItem.Photo>()
+            .map { it.image }
+        val start = photos.indexOfFirst { it.id == startImage.id }
+        if (photos.isEmpty() || start < 0) {
+            LaunchedEffect(startImage.id) { preview = null }
+        } else {
+            FullScreenImagePager(
+                images = photos,
+                startIndex = start,
+                onClose = { preview = null },
+                onShare = { id -> viewModel.shareImage(id) { t -> context.startActivity(shareChooser(t)) } },
+                exportSubdirs = exportSubdirs,
+                onCreateSubdir = viewModel::createSubdir,
+                onSave = { id, subdir, alsoTrash ->
+                    viewModel.saveImage(id, subdir, alsoTrash) { ok ->
+                        Toast.makeText(context, if (ok) "已保存到相册" else "保存失败", Toast.LENGTH_SHORT).show()
+                    }
+                    if (alsoTrash) preview = null
+                },
+                onLoadOcr = viewModel::getOcr,
+            ) { current ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    val isFav = current.isFavorite
+                    PreviewAction(
+                        icon = if (isFav) Icons.Outlined.Favorite else Icons.Outlined.FavoriteBorder,
+                        label = if (isFav) "已收藏" else "收藏",
+                        onClick = { viewModel.setFavorite(current.id, !isFav) },
+                    )
+                    PreviewAction(
+                        icon = Icons.AutoMirrored.Outlined.LabelOff,
+                        label = "取消标签",
+                        onClick = {
+                            viewModel.removeTag(tag, current.id) {
+                                Toast.makeText(context, "已取消标签", Toast.LENGTH_SHORT).show()
+                            }
+                            preview = null
+                        },
+                    )
+                }
+            }
+        }
     }
 
     if (showConfirm) {
@@ -364,7 +458,9 @@ private fun TagImagesContent(
                     showConfirm = false
                     val ids = selectedIds
                     selectedIds = emptySet()
-                    onMoveToTrash(ids)
+                    viewModel.moveToTrash(tag, ids) { moved ->
+                        Toast.makeText(context, "已移入回收站 $moved 张", Toast.LENGTH_SHORT).show()
+                    }
                 }) { Text("移入回收站") }
             },
             dismissButton = {
@@ -375,19 +471,44 @@ private fun TagImagesContent(
 }
 
 @Composable
+private fun TagSectionHeader(label: String) {
+    Text(
+        text = label,
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.background)
+            .padding(start = 16.dp, top = 20.dp, end = 16.dp, bottom = 6.dp),
+        style = MaterialTheme.typography.titleSmall,
+        fontWeight = FontWeight.Medium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+/** 标签图格：与图库时间线一致（Crop、选中缩放圆角、收藏角标）；点击勾选、长按全屏预览。 */
+@Composable
 private fun TagImageTile(
     image: ImageEntity,
     selected: Boolean,
+    selectionMode: Boolean,
     onToggle: () -> Unit,
     onPreview: () -> Unit,
 ) {
     val context = LocalContext.current
+    val selectedScale by animateFloatAsState(
+        targetValue = if (selected) 0.88f else 1f,
+        animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
+        label = "tagSelectScale",
+    )
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .aspectRatio(1f)
-            .clip(RoundedCornerShape(10.dp))
-            .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+            .graphicsLayer {
+                scaleX = selectedScale
+                scaleY = selectedScale
+            }
+            .clip(RoundedCornerShape(if (selected) 8.dp else 0.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
             .combinedClickable(onClick = onToggle, onLongClick = onPreview),
     ) {
         AsyncImage(
@@ -399,55 +520,55 @@ private fun TagImageTile(
             contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize(),
         )
-        if (selected) {
-            Box(
+        if (image.isFavorite && !selectionMode && !selected) {
+            Icon(
+                Icons.Outlined.Favorite,
+                contentDescription = null,
                 modifier = Modifier
-                    .matchParentSize()
-                    .background(MaterialTheme.colorScheme.error.copy(alpha = 0.20f)),
+                    .align(Alignment.TopStart)
+                    .padding(5.dp)
+                    .size(20.dp)
+                    .clip(CircleShape)
+                    .background(Color.Black.copy(alpha = 0.42f))
+                    .padding(3.dp),
+                tint = Color.White,
             )
         }
-        Icon(
-            if (selected) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
-            contentDescription = null,
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(5.dp)
-                .size(22.dp)
-                .clip(CircleShape)
-                .background(if (selected) MaterialTheme.colorScheme.error else Color.Black.copy(alpha = 0.36f)),
-            tint = Color.White,
-        )
+        if (selectionMode || selected) {
+            Icon(
+                if (selected) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
+                contentDescription = null,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(5.dp)
+                    .size(22.dp)
+                    .clip(CircleShape)
+                    .background(if (selected) MaterialTheme.colorScheme.primary else Color.Black.copy(alpha = 0.36f)),
+                tint = Color.White,
+            )
+        }
     }
 }
 
-@Composable
-private fun TagPreviewDialog(image: ImageEntity, onClose: () -> Unit) {
-    val context = LocalContext.current
-    Dialog(
-        onDismissRequest = onClose,
-        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color.Black)
-                .clickable(onClick = onClose),
-        ) {
-            AsyncImage(
-                model = ImageRequest.Builder(context)
-                    .data(ImageEntityModel(image))
-                    .crossfade(true)
-                    .build(),
-                contentDescription = image.filename,
-                contentScale = ContentScale.Fit,
-                modifier = Modifier.fillMaxSize(),
-            )
-            IconButton(
-                onClick = onClose,
-                modifier = Modifier.align(Alignment.TopStart).statusBarsPadding().padding(8.dp),
-            ) {
-                Icon(Icons.Outlined.Close, contentDescription = "关闭", tint = Color.White)
+/** 网格双指捏合调列数（与图库一致）：放大减列、缩小加列，落盘由设置层 clamp 到 2–6 列。 */
+private fun Modifier.tagPinchColumns(columns: Int, onColumns: (Int) -> Unit): Modifier =
+    this.pointerInput(columns) {
+        awaitEachGesture {
+            var startDistance = 0f
+            var changed = false
+            while (true) {
+                val event = awaitPointerEvent(PointerEventPass.Initial)
+                val pressed = event.changes.filter { it.pressed }
+                if (pressed.size < 2) break
+                val distance = (pressed[0].position - pressed[1].position).getDistance()
+                if (startDistance == 0f) startDistance = distance
+                val ratio = if (startDistance == 0f) 1f else distance / startDistance
+                if (!changed) {
+                    when {
+                        ratio > 1.16f -> { onColumns(columns - 1); changed = true }
+                        ratio < 0.86f -> { onColumns(columns + 1); changed = true }
+                    }
+                }
             }
         }
     }
-}

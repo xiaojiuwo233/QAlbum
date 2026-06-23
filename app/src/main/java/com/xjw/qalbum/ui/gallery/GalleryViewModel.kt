@@ -195,7 +195,7 @@ fun isFullyAnalyzed(image: ImageEntity, phases: EnabledPhases): Boolean =
         (!phases.aiTag || image.aiDone || image.isCorrupt) &&
         (!phases.embedding || image.embeddingDone || image.isCorrupt)
 
-private fun Flow<PagingData<ImageEntity>>.withDateHeaders(
+internal fun Flow<PagingData<ImageEntity>>.withDateHeaders(
     bucketCounts: Flow<Map<Long, Int>>,
 ): Flow<PagingData<GalleryTimelineItem>> =
     flowMap { pagingData: PagingData<ImageEntity> ->

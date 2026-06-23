@@ -220,6 +220,8 @@ val appModule = module {
             tagDao = get(),
             imageRepository = get(),
             cleanupController = get(),
+            imageFileManager = get(),
+            settings = get(),
         )
     }
     viewModel { LogViewModel() }
