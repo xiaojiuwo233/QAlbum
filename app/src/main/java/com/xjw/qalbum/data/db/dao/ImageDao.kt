@@ -194,14 +194,27 @@ interface ImageDao {
         WHERE source_type = 'chatthumb' AND status = 'thumbnail_trash'
         ORDER BY mtime DESC, id DESC
     """)
-    fun observeThumbnailTrash(): Flow<List<ImageEntity>>
+    fun pagingThumbnailTrash(): PagingSource<Int, ImageEntity>
 
     @Query("""
-        SELECT * FROM images
+        SELECT COUNT(*) FROM images
         WHERE source_type = 'chatthumb' AND status = 'thumbnail_trash'
-        ORDER BY mtime DESC, id DESC
     """)
-    suspend fun listThumbnailTrash(): List<ImageEntity>
+    suspend fun countThumbnailTrash(): Int
+
+    /**
+     * 缩略图回收站分页拉取（keyset 分页，id 升序游标）：一键清理时逐页取，每页 ≤ [limit] 行，
+     * 单次 cursor 远低于 CursorWindow 2MB 上限，避免早期 `listThumbnailTrash()` 一次性 `SELECT *`
+     * 全量物化导致 `Couldn't read row N, col 0 from CursorWindow` 崩溃。删成功的行 status 改为
+     * 'deleted' 后自然从后续页排除，故固定从 id 升序推进不漏不重。
+     */
+    @Query("""
+        SELECT * FROM images
+        WHERE source_type = 'chatthumb' AND status = 'thumbnail_trash' AND id > :afterId
+        ORDER BY id ASC
+        LIMIT :limit
+    """)
+    suspend fun listThumbnailTrashPaged(afterId: Long, limit: Int): List<ImageEntity>
 
     /** 在给定 id 集合里筛出仍处于缩略图回收站的行（多选删除用）；调用方需分块传入 */
     @Query("""
@@ -284,25 +297,9 @@ interface ImageDao {
         val count: Int,
     )
 
-    /** 详情页左右滑动使用同一套时间线排序。 */
-    @Query("""
-        SELECT * FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb'
-        ORDER BY mtime DESC, id DESC
-    """)
-    suspend fun listActiveTimeline(): List<ImageEntity>
-
-    /** 收藏详情页左右滑动只在收藏时间线内切换。 */
-    @Query("""
-        SELECT * FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb' AND is_protected = 1
-        ORDER BY mtime DESC, id DESC
-    """)
-    suspend fun listFavoriteTimeline(): List<ImageEntity>
-
     /**
      * 详情页时间线：**只取 id**（轻量），用于左右滑动的分页定位。
-     * 绝不能用 listActiveTimeline 那样的 SELECT * 全量装载（会卡死详情页）。
+     * 绝不能用 SELECT * 全量装载完整 ImageEntity（200w 行会撞 CursorWindow 2MB 上限并卡死详情页）。
      */
     @Query("""
         SELECT id FROM images

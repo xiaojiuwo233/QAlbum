@@ -30,11 +30,20 @@ class SemanticIndex(private val dao: EmbeddingDao) {
 
     suspend fun ensureLoaded() = mutex.withLock {
         if (loaded) return@withLock
-        val rows = withContext(Dispatchers.IO) { dao.listAll() }
-        vectors.clear()
-        for (row in rows) {
-            val vec = bytesToFloats(row.vector, row.dim) ?: continue
-            vectors.add(Item(row.imageId, vec, l2norm(vec)))
+        withContext(Dispatchers.IO) {
+            // keyset 分页装载，绝不一次性全表 SELECT *：embedding 每行含向量 BLOB，
+            // 行多时全量物化会撞 CursorWindow 2MB 上限崩。逐页累加进内存索引。
+            vectors.clear()
+            var afterId = 0L
+            while (true) {
+                val rows = dao.listPaged(afterId, LOAD_PAGE)
+                if (rows.isEmpty()) break
+                afterId = rows.last().imageId
+                for (row in rows) {
+                    val vec = bytesToFloats(row.vector, row.dim) ?: continue
+                    vectors.add(Item(row.imageId, vec, l2norm(vec)))
+                }
+            }
         }
         loaded = true
         Timber.i("SemanticIndex: loaded ${vectors.size} vectors")
@@ -115,5 +124,10 @@ class SemanticIndex(private val dao: EmbeddingDao) {
         var s = 0.0
         for (i in a.indices) s += a[i] * b[i]
         return s.toFloat()
+    }
+
+    private companion object {
+        /** 分页装载每页行数：按最坏 1536 维向量（~6KB/行）算，256 行 ~1.5MB，安全低于 CursorWindow 2MB。 */
+        private const val LOAD_PAGE = 256
     }
 }

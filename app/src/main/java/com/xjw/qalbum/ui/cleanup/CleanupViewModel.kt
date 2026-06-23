@@ -2,6 +2,8 @@ package com.xjw.qalbum.ui.cleanup
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.paging.PagingData
+import androidx.paging.cachedIn
 import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.db.dao.TagDao
 import com.xjw.qalbum.data.db.entity.CleanupBatchEntity
@@ -32,6 +34,7 @@ import com.xjw.qalbum.service.cleanup.ImageFileManager
 import com.xjw.qalbum.service.cleanup.ReviewBatchItem
 import com.xjw.qalbum.service.cleanup.ThumbnailTrashManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -90,8 +93,8 @@ class CleanupViewModel(
                 ImageDao.ThumbnailTrashSummary(0, 0L),
             )
 
-    val thumbnailTrash: StateFlow<List<ImageEntity>> = thumbnailTrashManager.observeItems()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    val thumbnailTrash: Flow<PagingData<ImageEntity>> =
+        thumbnailTrashManager.pagingItems().cachedIn(viewModelScope)
 
     private val _lastBatch = MutableStateFlow<CleanupBatch?>(null)
     val lastBatch: StateFlow<CleanupBatch?> = _lastBatch.asStateFlow()

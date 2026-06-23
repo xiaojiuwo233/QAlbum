@@ -77,9 +77,6 @@ class ImageRepository(
     suspend fun imageIdsByTagChunk(tagId: Long, afterId: Long, limit: Int): List<Long> =
         imageDao.imageIdsByTagChunk(tagId, afterId, limit)
 
-    suspend fun timelineSnapshot(): List<ImageEntity> = imageDao.listActiveTimeline()
-    suspend fun favoriteTimelineSnapshot(): List<ImageEntity> = imageDao.listFavoriteTimeline()
-
     fun observeTimelineDateBucketCounts(): Flow<Map<Long, Int>> =
         imageDao.observeTimelineDateBucketCounts().map { rows -> rows.toBucketCountMap() }
 

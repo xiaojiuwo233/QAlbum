@@ -15,8 +15,13 @@ interface EmbeddingDao {
     @Query("SELECT * FROM image_embeddings WHERE image_id = :imageId LIMIT 1")
     suspend fun getByImageId(imageId: Long): ImageEmbeddingEntity?
 
-    @Query("SELECT * FROM image_embeddings")
-    suspend fun listAll(): List<ImageEmbeddingEntity>
+    /**
+     * 分页装载（keyset，image_id 升序）：[com.xjw.qalbum.service.ai.SemanticIndex] 首次构建索引时逐页拉。
+     * 早期 listAll() 全表 `SELECT *` 把所有 embedding（每行含向量 BLOB）一次性物化，行多时会撞
+     * CursorWindow 2MB 上限崩 `Couldn't read row N, col 0`。
+     */
+    @Query("SELECT * FROM image_embeddings WHERE image_id > :afterId ORDER BY image_id ASC LIMIT :limit")
+    suspend fun listPaged(afterId: Long, limit: Int): List<ImageEmbeddingEntity>
 
     @Query("SELECT image_id FROM image_embeddings")
     suspend fun listIds(): List<Long>

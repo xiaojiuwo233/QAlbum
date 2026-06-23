@@ -65,6 +65,8 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.paging.compose.LazyPagingItems
+import androidx.paging.compose.collectAsLazyPagingItems
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import coil3.request.crossfade
@@ -104,13 +106,14 @@ private fun ThumbnailTrashScreen(
     onBack: () -> Unit,
     viewModel: CleanupViewModel = koinViewModel(),
 ) {
-    val items by viewModel.thumbnailTrash.collectAsState()
+    val items = viewModel.thumbnailTrash.collectAsLazyPagingItems()
+    // 计数/总大小走 DB 聚合（summary），不再 items.size/sumOf —— 列表已分页，内存里没有全量项
+    val summary by viewModel.thumbnailTrashSummary.collectAsState()
     val busy by viewModel.busy.collectAsState()
     val purgeProgress by viewModel.purgeProgress.collectAsState()
     var selectedIds by remember { mutableStateOf(setOf<Long>()) }
     var preview by remember { mutableStateOf<ImageEntity?>(null) }
 
-    val totalBytes = items.sumOf { it.size }
     val bottomInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
 
     val clearSelection = { selectedIds = emptySet() }
@@ -122,8 +125,8 @@ private fun ThumbnailTrashScreen(
         topBar = {
             if (selectedIds.isEmpty()) {
                 ThumbnailTopBar(
-                    count = items.size,
-                    bytes = totalBytes,
+                    count = summary.count,
+                    bytes = summary.bytes,
                     busy = busy,
                     onBack = onBack,
                     onPurgeAll = { viewModel.purgeAllThumbnails() },
@@ -147,7 +150,7 @@ private fun ThumbnailTrashScreen(
                 .fillMaxSize()
                 .padding(top = topPadding.calculateTopPadding()),
         ) {
-            if (items.isEmpty()) {
+            if (items.itemCount == 0) {
                 ThumbnailEmptyState()
             } else {
                 ThumbnailTrashGrid(
@@ -241,7 +244,7 @@ private fun ThumbnailSelectionTopBar(
 
 @Composable
 private fun ThumbnailTrashGrid(
-    items: List<ImageEntity>,
+    items: LazyPagingItems<ImageEntity>,
     selectedIds: Set<Long>,
     bottomInset: Dp,
     onToggle: (Long) -> Unit,
@@ -259,14 +262,20 @@ private fun ThumbnailTrashGrid(
         horizontalArrangement = Arrangement.spacedBy(1.5.dp),
         verticalArrangement = Arrangement.spacedBy(1.5.dp),
     ) {
-        items(items, key = { it.id }) { image ->
-            ThumbnailTile(
-                image = image,
-                selected = image.id in selectedIds,
-                selectionMode = selectedIds.isNotEmpty(),
-                onClick = { onToggle(image.id) },
-                onLongPress = { onLongPress(image) },
-            )
+        items(
+            count = items.itemCount,
+            key = { index -> items.peek(index)?.id ?: "loading-$index" },
+        ) { index ->
+            val image = items[index]
+            if (image != null) {
+                ThumbnailTile(
+                    image = image,
+                    selected = image.id in selectedIds,
+                    selectionMode = selectedIds.isNotEmpty(),
+                    onClick = { onToggle(image.id) },
+                    onLongPress = { onLongPress(image) },
+                )
+            }
         }
     }
 }
