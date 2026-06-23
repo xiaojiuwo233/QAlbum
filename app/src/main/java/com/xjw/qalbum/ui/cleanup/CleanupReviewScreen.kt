@@ -175,7 +175,12 @@ internal fun CleanupReviewScreen(
                 modifier = Modifier.fillMaxSize().padding(top = topPadding.calculateTopPadding()),
                 contentAlignment = Alignment.Center,
             ) {
-                Text("没有需要审核的清理项", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                // 装载中（生成批次后台读图）显示加载圈，读完仍为空才提示「无审核项」
+                if (busy) {
+                    CircularProgressIndicator()
+                } else {
+                    Text("没有需要审核的清理项", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
             }
             return@Scaffold
         }
@@ -585,7 +590,9 @@ fun CleanupReviewGroupScreen(
     val keeperId = liveGroup?.keeperId
     val pendingMembers = members.filter { it.id in liveIds }   // 仍待处理（可勾选/预览）
     val pendingIds = pendingMembers.map { it.id }
-    val pendingNonKeeperIds = pendingIds.filter { it != keeperId }
+    // 「仅留 1 张」保留目标：优先系统建议保留图，未知时取第一张待处理图；其余为待删除集合。
+    val keepOneId = keeperId ?: pendingIds.firstOrNull()
+    val keepOneDeleteIds = pendingIds.filter { it != keepOneId }
     val selectedInGroup = pendingMembers.count { it.id in selectedIds }
     val processedCount = members.size - pendingMembers.size
     val allProcessed = pendingMembers.isEmpty()
@@ -634,8 +641,13 @@ fun CleanupReviewGroupScreen(
                         Text("全部保留")
                     }
                     OutlinedButton(
-                        onClick = { viewModel.selectReviewIds(pendingNonKeeperIds) },
-                        enabled = !allProcessed && pendingNonKeeperIds.isNotEmpty(),
+                        onClick = {
+                            // 全选态下也要真正「只留一张」：先勾上其余、再取消保留图的勾选，
+                            // 而非只做并集加法（否则 keeper 仍勾着，点了像没反应）。
+                            viewModel.selectReviewIds(keepOneDeleteIds)
+                            keepOneId?.let { viewModel.deselectReviewIds(listOf(it)) }
+                        },
+                        enabled = !allProcessed && keepOneDeleteIds.isNotEmpty(),
                         modifier = Modifier.weight(1f),
                     ) {
                         Text("仅留 1 张")

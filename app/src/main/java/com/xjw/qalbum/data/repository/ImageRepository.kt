@@ -98,8 +98,27 @@ class ImageRepository(
 
     suspend fun getById(id: Long): ImageEntity? = imageDao.getById(id)
 
+    /** 按 id 取图；分块查询，避免 id 过多触及 SQLite 变量上限（调用方均按 id 重映，不依赖顺序）。 */
     suspend fun getByIds(ids: List<Long>): List<ImageEntity> =
-        if (ids.isEmpty()) emptyList() else imageDao.getByIds(ids)
+        if (ids.isEmpty()) emptyList()
+        else if (ids.size <= SQL_IDS_CHUNK) imageDao.getByIds(ids)
+        else ids.chunked(SQL_IDS_CHUNK).flatMap { imageDao.getByIds(it) }
+
+    /**
+     * 批量取多个重复组的 active 成员，返回 groupId → 成员列表。
+     * 分块走 IN 查询替代逐组 N+1，几千组也只需个位数次查询；组内顺序保留图优先。
+     */
+    suspend fun getActiveByDuplicateGroups(groupIds: List<Long>): Map<Long, List<ImageEntity>> {
+        if (groupIds.isEmpty()) return emptyMap()
+        val byGroup = HashMap<Long, MutableList<ImageEntity>>()
+        groupIds.chunked(SQL_IDS_CHUNK).forEach { chunk ->
+            imageDao.getActiveByDuplicateGroupIds(chunk).forEach { img ->
+                val gid = img.duplicateGroupId ?: return@forEach
+                byGroup.getOrPut(gid) { ArrayList() }.add(img)
+            }
+        }
+        return byGroup
+    }
 
     /** 取若干图的视觉特征（反馈学习用） */
     suspend fun featuresByIds(ids: List<Long>): List<ImageFeatureRow> =

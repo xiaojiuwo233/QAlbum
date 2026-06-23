@@ -6,6 +6,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -201,6 +202,7 @@ private fun MetricsGrid(state: DashboardUiState) {
                 containerColor = MaterialTheme.colorScheme.primaryContainer,
                 contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
                 modifier = Modifier.weight(1f),
+                expandedValue = state.imageCount.toString(),
             )
             MetricCard(
                 icon = Icons.Outlined.Storage,
@@ -209,6 +211,7 @@ private fun MetricsGrid(state: DashboardUiState) {
                 containerColor = MaterialTheme.colorScheme.tertiaryContainer,
                 contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
                 modifier = Modifier.weight(1f),
+                expandedValue = formatExactMb(state.totalSizeBytes),
             )
         }
         Row(
@@ -246,9 +249,14 @@ private fun MetricCard(
     contentColor: Color,
     modifier: Modifier = Modifier,
     subtitle: String? = null,
+    /** 精确值（如 198210 / 1,234,567,890 B）：非空时卡片可点击，在缩写与精确值间切换。 */
+    expandedValue: String? = null,
 ) {
+    var expanded by remember { mutableStateOf(false) }
+    val clickModifier =
+        if (expandedValue != null) Modifier.clickable { expanded = !expanded } else Modifier
     ElevatedCard(
-        modifier = modifier,
+        modifier = modifier.then(clickModifier),
         colors = CardDefaults.elevatedCardColors(containerColor = containerColor),
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -260,7 +268,7 @@ private fun MetricCard(
             )
             Spacer(Modifier.height(8.dp))
             Text(
-                text = value,
+                text = if (expanded && expandedValue != null) expandedValue else value,
                 style = MaterialTheme.typography.headlineMedium,
                 fontWeight = FontWeight.Bold,
                 color = contentColor,
@@ -851,3 +859,7 @@ private fun formatBytes(bytes: Long): String {
     val value = bytes.toDouble() / Math.pow(1024.0, exp.toDouble())
     return String.format("%.1f %s", value, units[exp])
 }
+
+/** 「占用空间」点击展开值：精确到 MB（带千分位），如 1,177 MB。 */
+private fun formatExactMb(bytes: Long): String =
+    if (bytes <= 0) "0 MB" else "%,d MB".format(Math.round(bytes / (1024.0 * 1024.0)))

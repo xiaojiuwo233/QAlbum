@@ -158,8 +158,12 @@ class CleanupViewModel(
                     config, label, maxItems, oldestFirst, allDuplicates, recommendModel, recommendLimit,
                 )
                 _lastBatch.value = batch
-                loadReviewBatch(batch)
+                // 先打开审核页（此时 busy=true、列表为空 → 显示加载中），再后台装载，
+                // 避免「卡片出来后干等几秒才进入审核页」（3w 图装载期间审核页已可见）。
+                _reviewBatch.value = null
+                _selectedReviewDeleteIds.value = emptySet()
                 onReady()
+                loadReviewBatch(batch)
             } finally {
                 _busy.value = false
             }
@@ -499,16 +503,18 @@ class CleanupViewModel(
     }
 
     private suspend fun loadReviewBatch(batch: CleanupBatch) {
-        val singleIds = batch.items.filterIsInstance<ReviewBatchItem.Single>().map { it.imageId }
-        val singleImages = imageRepository.getByIds(singleIds).associateBy { it.id }
+        // 装载与组装全程放后台线程：3w 图的批量查询 + 逐组保留决策不阻塞主线程，
+        // 期间审核页已先行打开并显示「加载中」（见 generateBatch）。
+        val items = withContext(Dispatchers.Default) {
+            val singleIds = batch.items.filterIsInstance<ReviewBatchItem.Single>().map { it.imageId }
+            val singleImages = imageRepository.getByIds(singleIds).associateBy { it.id }
 
-        val groupMembers = HashMap<Long, List<ImageEntity>>()
-        batch.items.filterIsInstance<ReviewBatchItem.Group>().forEach { g ->
-            groupMembers[g.groupId] =
-                imageRepository.getByDuplicateGroup(g.groupId).filter { it.status == "active" }
+            // 重复组成员一次性批量取（IN 分块），替代逐组 N+1 查询——这是 3w 图卡顿的主因。
+            val groupIds = batch.items.filterIsInstance<ReviewBatchItem.Group>().map { it.groupId }
+            val groupMembers = imageRepository.getActiveByDuplicateGroups(groupIds)
+
+            buildReviewItems(batch.items, singleImages) { gid -> groupMembers[gid].orEmpty() }
         }
-
-        val items = buildReviewItems(batch.items, singleImages) { gid -> groupMembers[gid].orEmpty() }
         _reviewBatch.value = CleanupReviewBatch(batch, items)
         _selectedReviewDeleteIds.value = emptySet() // 默认不勾选；由「按推荐勾选」按需触发（避免 5w 图自动勾选卡顿）
     }

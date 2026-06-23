@@ -653,6 +653,18 @@ interface ImageDao {
     """)
     suspend fun getByDuplicateGroup(groupId: Long): List<ImageEntity>
 
+    /**
+     * 批量取多组的 active 成员（审核「全部重复」装载用）：一次 IN 查询替代逐组 N+1，
+     * 调用方需按变量上限分块。组内顺序与 [getByDuplicateGroup] 一致（保留图优先）。
+     */
+    @Query("""
+        SELECT * FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb'
+          AND duplicate_group_id IN (:groupIds)
+        ORDER BY is_duplicate_best DESC, size DESC
+    """)
+    suspend fun getActiveByDuplicateGroupIds(groupIds: List<Long>): List<ImageEntity>
+
     /** 取若干图的视觉特征（反馈学习用） */
     @Query("SELECT id, block_hash AS blockHash, feature_grid AS featureGrid FROM images WHERE id IN (:ids)")
     suspend fun featuresByIds(ids: List<Long>): List<ImageFeatureRow>
