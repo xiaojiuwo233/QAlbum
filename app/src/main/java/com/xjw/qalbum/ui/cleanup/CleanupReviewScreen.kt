@@ -59,6 +59,7 @@ import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.RadioButtonUnchecked
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledTonalButton
@@ -214,6 +215,15 @@ internal fun CleanupReviewScreen(
                 }
             }
         }
+        // 「按推荐勾选」等后台计算时的加载指示（清理进度有自己的对话框，此处仅在无清理进度时显示）
+        if (busy && purgeProgress == null) {
+            Box(
+                modifier = Modifier.fillMaxSize().padding(top = topPadding.calculateTopPadding()),
+                contentAlignment = Alignment.Center,
+            ) {
+                CircularProgressIndicator()
+            }
+        }
     }
 
     previewId?.let { id ->
@@ -332,7 +342,7 @@ private fun ReviewTopBar(
                             onClick = { onSelectAllVisible(); onMenuOpenChange(false) },
                         )
                         DropdownMenuItem(
-                            text = { Text("恢复建议预选") },
+                            text = { Text("按推荐勾选") },
                             onClick = { onRestoreSuggested(); onMenuOpenChange(false) },
                         )
                         DropdownMenuItem(
@@ -963,6 +973,7 @@ internal fun shareChooser(target: ExternalViewTarget): Intent =
 
 /** 审核网格排序方式（类似图库页）。 */
 internal enum class ReviewSort(val label: String) {
+    RECOMMENDED("推荐"),
     DATE_DESC("时间（新→旧）"),
     DATE_ASC("时间（旧→新）"),
     SIZE_DESC("大小（大→小）"),
@@ -970,6 +981,8 @@ internal enum class ReviewSort(val label: String) {
 }
 
 private fun sortReviewItems(items: List<ReviewItem>, sort: ReviewSort): List<ReviewItem> = when (sort) {
+    // 推荐项优先（稳定排序：推荐内部保持模型概率序，其余维持原序）
+    ReviewSort.RECOMMENDED -> items.sortedByDescending { itemReason(it) == CleanupRules.REASON_RECOMMENDED }
     ReviewSort.DATE_DESC -> items.sortedByDescending { itemMtime(it) }
     ReviewSort.DATE_ASC -> items.sortedBy { itemMtime(it) }
     ReviewSort.SIZE_DESC -> items.sortedByDescending { itemSize(it) }

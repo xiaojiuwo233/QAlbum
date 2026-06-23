@@ -95,7 +95,7 @@ fun CleanupScreen(
     val reviewGridState = rememberLazyGridState()
     val reviewBatchId = viewModel.reviewBatch.collectAsState().value?.batch?.id
     var reviewCategory by rememberSaveable(reviewBatchId) { mutableStateOf<String?>(null) }
-    var reviewSort by rememberSaveable(reviewBatchId) { mutableStateOf(ReviewSort.DATE_DESC) }
+    var reviewSort by rememberSaveable(reviewBatchId) { mutableStateOf(ReviewSort.RECOMMENDED) }
     var reviewColumns by rememberSaveable { mutableIntStateOf(3) }
     val slideSpec = MaterialTheme.motionScheme.defaultSpatialSpec<IntOffset>()
     val fadeSpec = MaterialTheme.motionScheme.defaultEffectsSpec<Float>()

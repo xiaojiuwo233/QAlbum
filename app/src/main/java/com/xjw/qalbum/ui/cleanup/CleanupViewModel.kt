@@ -19,6 +19,8 @@ import com.xjw.qalbum.domain.model.DuplicateStrictness
 import com.xjw.qalbum.service.analysis.AnalysisPipeline
 import com.xjw.qalbum.service.analysis.AnalysisProgress
 import com.xjw.qalbum.service.analysis.AnalysisState
+import com.xjw.qalbum.service.analysis.DeleteFeatures
+import com.xjw.qalbum.service.analysis.DeletePreferenceModel
 import com.xjw.qalbum.service.analysis.SimilarityLearner
 import com.xjw.qalbum.service.analysis.SimilarityModel
 import com.xjw.qalbum.service.cleanup.CleanupBatch
@@ -29,6 +31,7 @@ import com.xjw.qalbum.service.cleanup.ExternalViewTarget
 import com.xjw.qalbum.service.cleanup.ImageFileManager
 import com.xjw.qalbum.service.cleanup.ReviewBatchItem
 import com.xjw.qalbum.service.cleanup.ThumbnailTrashManager
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -38,6 +41,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class CleanupViewModel(
     private val cleanupController: CleanupController,
@@ -140,7 +144,11 @@ class CleanupViewModel(
                 val maxItems = settings.reviewLimit.first()
                 val oldestFirst = settings.analysisOldestFirst.first()
                 val allDuplicates = settings.cleanupAllDuplicates.first()
-                val batch = cleanupController.generateBatch(config, label, maxItems, oldestFirst, allDuplicates)
+                val recommendModel = resolveRecommendModel()
+                val recommendLimit = if (recommendModel != null) settings.recommendLimit.first() else 0
+                val batch = cleanupController.generateBatch(
+                    config, label, maxItems, oldestFirst, allDuplicates, recommendModel, recommendLimit,
+                )
                 _lastBatch.value = batch
                 loadReviewBatch(batch)
                 onReady()
@@ -243,9 +251,17 @@ class CleanupViewModel(
     }
 
     /** 恢复系统建议的默认预选（高把握维度 + 重复劣质副本） */
+    /** 「按推荐勾选」：按系统建议（高把握维度 + 推荐分类）勾选；5w 图计算放后台，期间 busy 显示加载中。 */
     fun restoreSuggestedSelection() {
-        val review = _reviewBatch.value ?: return
-        _selectedReviewDeleteIds.value = suggestedSelection(review.items)
+        viewModelScope.launch {
+            val review = _reviewBatch.value ?: return@launch
+            _busy.value = true
+            try {
+                _selectedReviewDeleteIds.value = withContext(Dispatchers.Default) { suggestedSelection(review.items) }
+            } finally {
+                _busy.value = false
+            }
+        }
     }
 
     fun applyReviewSelection(onDone: (Int) -> Unit = {}) {
@@ -262,6 +278,7 @@ class CleanupViewModel(
                 ) { done, total ->
                     _purgeProgress.value = PurgeProgress(done, total, "正在移入回收站…")
                 }
+                learnDeletePreference(selectedIds, emptyList()) // 删=正样本（剔除前学，图还在内存）
                 // 移入回收站不代表审核结束：剔除已处理的图，留在审核页继续筛选
                 _reviewBatch.value = review.copy(
                     items = review.items.mapNotNull { pruneReviewItem(it, selectedIds) },
@@ -340,6 +357,7 @@ class CleanupViewModel(
             tagDao.findByName(TAG_USER_KEEP)?.let { tag ->
                 tagDao.linkTag(ImageTagEntity(imageId = imageId, tagId = tag.id, source = "user"))
             }
+            learnDeletePreference(emptyList(), listOf(imageId)) // 保留=负样本
             removeFromReview(imageId)
         }
     }
@@ -357,6 +375,7 @@ class CleanupViewModel(
                     imageRepository.setUserKeep(id, true)
                     tag?.let { tagDao.linkTag(ImageTagEntity(imageId = id, tagId = it.id, source = "user")) }
                 }
+                learnDeletePreference(emptyList(), ids) // 保留=负样本
                 _reviewBatch.value = _reviewBatch.value?.let { rb ->
                     rb.copy(items = rb.items.mapNotNull { pruneReviewItem(it, ids, keepSingleton = true) })
                 }
@@ -376,10 +395,49 @@ class CleanupViewModel(
             _busy.value = true
             try {
                 cleanupController.moveToTrash(listOf(imageId to reason))
+                learnDeletePreference(listOf(imageId), emptyList()) // 删=正样本（剔除前学）
                 removeFromReview(imageId)
                 onDone()
             } finally {
                 _busy.value = false
+            }
+        }
+    }
+
+    /** 从当前审核批次收集 id → ImageEntity（含 featureGrid 等特征），供删除偏好学习。 */
+    private fun reviewImagesById(): Map<Long, ImageEntity> {
+        val map = HashMap<Long, ImageEntity>()
+        _reviewBatch.value?.items?.forEach { item ->
+            when (item) {
+                is ReviewItem.Single -> map[item.image.id] = item.image
+                is ReviewItem.Group -> item.members.forEach { map[it.id] = it }
+            }
+        }
+        return map
+    }
+
+    /** 用清理/保留行为在线更新删除偏好模型：删=正样本、保留=负样本。失败不影响主流程。 */
+    private suspend fun learnDeletePreference(deletedIds: Collection<Long>, keptIds: Collection<Long>) {
+        if (deletedIds.isEmpty() && keptIds.isEmpty()) return
+        runCatching {
+            val byId = reviewImagesById()
+            var model = DeletePreferenceModel.deserialize(settings.deleteModel.first()) ?: DeletePreferenceModel.DEFAULT
+            val now = System.currentTimeMillis()
+            var n = 0
+            fun learn(id: Long, deleted: Boolean) {
+                val img = byId[id] ?: return
+                val f = DeleteFeatures.extract(
+                    img.featureGrid, img.blurScore, img.width, img.height, img.size,
+                    img.sourceType, img.isAnimated, img.mtime, img.duplicateGroupId != null, now,
+                )
+                model = model.update(f, deleted)
+                n++
+            }
+            deletedIds.forEach { learn(it, true) }
+            keptIds.forEach { learn(it, false) }
+            if (n > 0) {
+                settings.setDeleteModel(model.serialize())
+                settings.addDeleteSamples(n)
             }
         }
     }
@@ -435,7 +493,14 @@ class CleanupViewModel(
 
         val items = buildReviewItems(batch.items, singleImages) { gid -> groupMembers[gid].orEmpty() }
         _reviewBatch.value = CleanupReviewBatch(batch, items)
-        _selectedReviewDeleteIds.value = suggestedSelection(items)
+        _selectedReviewDeleteIds.value = emptySet() // 默认不勾选；由「按推荐勾选」按需触发（避免 5w 图自动勾选卡顿）
+    }
+
+    /** 解析当前应用的删除推荐模型；未开启 / 冷启动样本不足 → null（不推荐，只默默学习）。 */
+    private suspend fun resolveRecommendModel(): DeletePreferenceModel? {
+        if (!settings.recommendEnabled.first()) return null
+        if (settings.deleteSampleCount.first() < SettingsRepository.RECOMMEND_ACTIVATION_SAMPLES) return null
+        return DeletePreferenceModel.deserialize(settings.deleteModel.first()) ?: DeletePreferenceModel.DEFAULT
     }
 }
 
@@ -509,7 +574,7 @@ internal fun buildReviewItems(
             ReviewItem.Single(
                 image = img,
                 reason = item.reason,
-                defaultSelected = item.reason in HIGH_CONFIDENCE_REASONS,
+                defaultSelected = item.reason in HIGH_CONFIDENCE_REASONS || item.reason == CleanupRules.REASON_RECOMMENDED,
             )
         }
 

@@ -559,6 +559,8 @@ fun CleanupSettingsScreen(
     val allDuplicates by viewModel.cleanupAllDuplicates.collectAsState()
     val maxDupGroupSize by viewModel.maxDuplicateGroupSize.collectAsState()
     val duplicateStrictness by viewModel.duplicateStrictness.collectAsState()
+    val recommendEnabled by viewModel.recommendEnabled.collectAsState()
+    val recommendLimit by viewModel.recommendLimit.collectAsState()
     val activePreset = CleanupPreset.match(config)
 
     SettingsDetailScaffold(
@@ -618,6 +620,39 @@ fun CleanupSettingsScreen(
             SettingsBlurb(
                 if (activePreset == null) "已自定义" else "点预设套用一组开关与门限，可在下方逐项微调",
             )
+        }
+
+        SettingsSection(header = "推荐删除（实验）") {
+            SettingsSwitchRow(
+                title = "推荐删除",
+                subtitle = "从你的清理 / 保留行为学习偏好，把可能想删的普通图也纳入审核（显示为「推荐」分类）。需先积累一些清理操作才会生效。",
+                checked = recommendEnabled,
+                onCheckedChange = {
+                    viewModel.setRecommendEnabled(it)
+                    notify(if (it) "已开启推荐删除" else "已关闭")
+                },
+            )
+            if (recommendEnabled) {
+                InstantSaveTextField(
+                    value = recommendLimit.toString(),
+                    label = "每次推荐数量（${SettingsRepository.MIN_RECOMMEND_LIMIT}–${SettingsRepository.MAX_RECOMMEND_LIMIT}）",
+                    keyboardType = KeyboardType.Number,
+                    onSave = { input ->
+                        input.filter { it.isDigit() }.toIntOrNull()?.let {
+                            val v = it.coerceIn(
+                                SettingsRepository.MIN_RECOMMEND_LIMIT,
+                                SettingsRepository.MAX_RECOMMEND_LIMIT,
+                            )
+                            viewModel.setRecommendLimit(v)
+                            notify("已保存推荐数量 $v")
+                        }
+                    },
+                )
+                OutlinedButton(onClick = {
+                    viewModel.resetDeleteModel()
+                    notify("已重置推荐删除的学习记录")
+                }) { Text("重置学习记录") }
+            }
         }
 
         SettingsSection(header = "清理维度") {

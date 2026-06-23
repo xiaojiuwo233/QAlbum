@@ -213,6 +213,45 @@ class SettingsRepository(
         }
     }
 
+    // ---- 推荐删除（删除偏好学习模型）----
+
+    /** 删除偏好模型（序列化字符串）；未学习返回 null。只存原始字符串，不依赖 service 层模型类型。 */
+    val deleteModel: Flow<String?> = ds.data.map { it[Keys.DELETE_MODEL] }
+
+    suspend fun setDeleteModel(serialized: String) {
+        ds.edit { it[Keys.DELETE_MODEL] = serialized }
+    }
+
+    /** 已采集的删除/保留样本数（冷启动激活判断）。 */
+    val deleteSampleCount: Flow<Int> = ds.data.map { it[Keys.DELETE_SAMPLE_COUNT] ?: 0 }
+
+    suspend fun addDeleteSamples(n: Int) {
+        ds.edit { it[Keys.DELETE_SAMPLE_COUNT] = (it[Keys.DELETE_SAMPLE_COUNT] ?: 0) + n }
+    }
+
+    suspend fun resetDeleteModel() {
+        ds.edit {
+            it.remove(Keys.DELETE_MODEL)
+            it.remove(Keys.DELETE_SAMPLE_COUNT)
+        }
+    }
+
+    /** 是否启用「推荐删除」分类。 */
+    val recommendEnabled: Flow<Boolean> = ds.data.map { it[Keys.RECOMMEND_ENABLED] ?: false }
+
+    suspend fun setRecommendEnabled(enabled: Boolean) {
+        ds.edit { it[Keys.RECOMMEND_ENABLED] = enabled }
+    }
+
+    /** 每次「推荐删除」纳入的数量上限。 */
+    val recommendLimit: Flow<Int> = ds.data.map {
+        (it[Keys.RECOMMEND_LIMIT] ?: DEFAULT_RECOMMEND_LIMIT).coerceIn(MIN_RECOMMEND_LIMIT, MAX_RECOMMEND_LIMIT)
+    }
+
+    suspend fun setRecommendLimit(value: Int) {
+        ds.edit { it[Keys.RECOMMEND_LIMIT] = value.coerceIn(MIN_RECOMMEND_LIMIT, MAX_RECOMMEND_LIMIT) }
+    }
+
     // ---- 图库页偏好（列数 / 排序 / 大图标记阈值） ----
 
     /** 图库每行图片数；与捏合缩放共用，范围 [MIN_GALLERY_COLUMNS, MAX_GALLERY_COLUMNS] */
@@ -341,6 +380,13 @@ class SettingsRepository(
         const val DEFAULT_LARGE_THRESHOLD_BYTES = 1L * 1024 * 1024
         const val MIN_LARGE_THRESHOLD_BYTES = 100L * 1024
 
+        const val DEFAULT_RECOMMEND_LIMIT = 50
+        const val MIN_RECOMMEND_LIMIT = 10
+        const val MAX_RECOMMEND_LIMIT = 1000
+
+        /** 冷启动：累计删除/保留样本 ≥ 此值才激活「推荐删除」（之前只默默学习、不推荐）。 */
+        const val RECOMMEND_ACTIVATION_SAMPLES = 50
+
         /** 清洗导出子目录名：去空白、剔除文件系统非法字符、限长；非法或空返回 null */
         fun sanitizeExportSubdir(name: String): String? {
             val cleaned = name.trim().replace(Regex("""[/\\:*?"<>|]"""), "").trim()
@@ -372,6 +418,10 @@ class SettingsRepository(
         val SIM_W_LUMA = doublePreferencesKey("sim_w_luma")
         val SIM_W_EDGE = doublePreferencesKey("sim_w_edge")
         val SIM_THRESHOLD = doublePreferencesKey("sim_threshold")
+        val DELETE_MODEL = stringPreferencesKey("delete_model")
+        val DELETE_SAMPLE_COUNT = intPreferencesKey("delete_sample_count")
+        val RECOMMEND_ENABLED = booleanPreferencesKey("recommend_enabled")
+        val RECOMMEND_LIMIT = intPreferencesKey("recommend_limit")
 
         val GALLERY_COLUMNS = intPreferencesKey("gallery_columns")
         val GALLERY_SORT = stringPreferencesKey("gallery_sort")

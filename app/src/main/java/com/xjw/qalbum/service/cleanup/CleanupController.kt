@@ -5,6 +5,7 @@ import com.xjw.qalbum.data.db.entity.CleanupBatchEntity
 import com.xjw.qalbum.data.db.entity.CleanupCandidateEntity
 import com.xjw.qalbum.data.db.entity.QuarantineEntity
 import com.xjw.qalbum.domain.model.CleanupConfig
+import com.xjw.qalbum.service.analysis.DeletePreferenceModel
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -26,8 +27,10 @@ class CleanupController(
         maxItems: Int = 200,
         oldestFirst: Boolean = true,
         allDuplicates: Boolean = false,
+        recommendModel: DeletePreferenceModel? = null,
+        recommendLimit: Int = 0,
     ): CleanupBatch =
-        recommender.generateBatch(config, label, maxItems, oldestFirst, allDuplicates)
+        recommender.generateBatch(config, label, maxItems, oldestFirst, allDuplicates, recommendModel, recommendLimit)
 
     suspend fun applyBatch(batchId: Long): Int {
         val candidates = cleanupDao.getCandidates(batchId)

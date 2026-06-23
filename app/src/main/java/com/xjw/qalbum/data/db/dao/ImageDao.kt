@@ -660,6 +660,20 @@ interface ImageDao {
     @Query("SELECT id, block_hash AS blockHash, feature_grid AS featureGrid FROM images WHERE id IN (:ids)")
     suspend fun featuresByIds(ids: List<Long>): List<ImageFeatureRow>
 
+    /** 「推荐删除」候选池：活跃非保护、有特征网格的图，按 delete_score 降序粗筛限量（不全库打分，守 20w 约束）。 */
+    @Query("""
+        SELECT id, feature_grid AS featureGrid, blur_score AS blurScore, width, height, size,
+               source_type AS sourceType, is_animated AS isAnimated, mtime,
+               (duplicate_group_id IS NOT NULL) AS inDuplicateGroup
+        FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb'
+          AND is_protected = 0 AND (user_keep IS NULL OR user_keep = 0)
+          AND feature_grid IS NOT NULL
+        ORDER BY delete_score DESC
+        LIMIT :limit
+    """)
+    suspend fun recommendCandidatePool(limit: Int): List<RecommendCandidateRow>
+
     /** 某重复组的全部成员 id（人工拆分用） */
     @Query("SELECT id FROM images WHERE duplicate_group_id = :groupId")
     suspend fun imageIdsInDuplicateGroup(groupId: Long): List<Long>
@@ -892,3 +906,17 @@ data class DuplicateGroupRow(val id: Long, val duplicateGroupId: Long, val size:
 
 /** 一张图的视觉特征投影（反馈学习用） */
 data class ImageFeatureRow(val id: Long, val blockHash: ByteArray?, val featureGrid: ByteArray?)
+
+/** 「推荐删除」候选的特征投影 */
+data class RecommendCandidateRow(
+    val id: Long,
+    val featureGrid: ByteArray?,
+    val blurScore: Float?,
+    val width: Int,
+    val height: Int,
+    val size: Long,
+    val sourceType: String,
+    val isAnimated: Boolean,
+    val mtime: Long,
+    val inDuplicateGroup: Boolean,
+)

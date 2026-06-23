@@ -284,6 +284,27 @@ class SettingsViewModel(
         persist { settings.resetSimilarityWeights() }
     }
 
+    // ---- 推荐删除 ----
+
+    val recommendEnabled: StateFlow<Boolean> = settings.recommendEnabled
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    val recommendLimit: StateFlow<Int> = settings.recommendLimit
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsRepository.DEFAULT_RECOMMEND_LIMIT)
+
+    fun setRecommendEnabled(enabled: Boolean) {
+        persist { settings.setRecommendEnabled(enabled) }
+    }
+
+    fun setRecommendLimit(value: Int) {
+        persist { settings.setRecommendLimit(value) }
+    }
+
+    /** 清除推荐删除的学习成果。 */
+    fun resetDeleteModel() {
+        persist { settings.resetDeleteModel() }
+    }
+
     // ---- 自动收藏配置（分析阶段，默认关闭，规则可自定义）----
 
     val autoFavoriteConfig: StateFlow<AutoFavoriteConfig> = settings.autoFavoriteConfig

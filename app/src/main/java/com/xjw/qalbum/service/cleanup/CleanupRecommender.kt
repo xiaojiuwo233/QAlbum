@@ -1,10 +1,13 @@
 package com.xjw.qalbum.service.cleanup
 
 import com.xjw.qalbum.data.db.dao.CleanupDao
+import com.xjw.qalbum.data.db.dao.CleanupSignalRow
 import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.db.entity.CleanupBatchEntity
 import com.xjw.qalbum.data.db.entity.CleanupCandidateEntity
 import com.xjw.qalbum.domain.model.CleanupConfig
+import com.xjw.qalbum.service.analysis.DeleteFeatures
+import com.xjw.qalbum.service.analysis.DeletePreferenceModel
 import timber.log.Timber
 
 /** 风险报告：本批次按原因分类的概览（计数单位为「审核项」，重复组算 1 项） */
@@ -44,6 +47,8 @@ class CleanupRecommender(
         maxItems: Int = DEFAULT_MAX_ITEMS,
         oldestFirst: Boolean = true,
         allDuplicates: Boolean = false,
+        recommendModel: DeletePreferenceModel? = null,
+        recommendLimit: Int = 0,
     ): CleanupBatch {
         if (allDuplicates && config.duplicateEnabled) {
             return generateAllDuplicatesBatch(config, label, maxItems, oldestFirst)
@@ -78,12 +83,16 @@ class CleanupRecommender(
             .filter { it.first.duplicateGroupId != null }
             .groupBy { it.first.duplicateGroupId!! }
 
-        val items = ReviewAggregator.aggregate(
+        val baseItems = ReviewAggregator.aggregate(
             classified.map { (row, reason) ->
                 ReviewAggregator.Candidate(row.id, row.duplicateGroupId, reason)
             },
             maxItems,
         )
+        // 「推荐删除」通道：额外配额（不占 maxItems），用删除偏好模型给未纳入的图打分排序
+        val recSizeById = HashMap<Long, Long>()
+        val recItems = buildRecommendations(baseItems, rowsByGroup, recommendModel, recommendLimit, recSizeById)
+        val items = baseItems + recItems
 
         // 概览：按原因统计审核项数与估算大小（重复组按组内候选行求和）
         val reasonCount = LinkedHashMap<String, Int>()
@@ -96,7 +105,7 @@ class CleanupRecommender(
         }
         items.forEach { item ->
             when (item) {
-                is ReviewBatchItem.Single -> tally(item.reason, sizeById[item.imageId] ?: 0L)
+                is ReviewBatchItem.Single -> tally(item.reason, sizeById[item.imageId] ?: recSizeById[item.imageId] ?: 0L)
                 is ReviewBatchItem.Group -> tally(
                     CleanupRules.REASON_DUPLICATE,
                     rowsByGroup[item.groupId].orEmpty().sumOf { sizeById[it.first.id] ?: 0L },
@@ -151,6 +160,45 @@ class CleanupRecommender(
         Timber.i("CleanupRecommender: batch $batchId, ${items.size} items / ${candidateEntities.size} candidates ($label)")
 
         return CleanupBatch(batchId, report, items)
+    }
+
+    /**
+     * 「推荐删除」候选：取按 delete_score 粗筛的候选池，排除已被其他维度纳入的图，
+     * 用删除偏好模型打分，概率 ≥ 阈值的按概率降序取前 [limit]。[outSize] 回填候选 size 供概览统计。
+     */
+    private suspend fun buildRecommendations(
+        baseItems: List<ReviewBatchItem>,
+        rowsByGroup: Map<Long, List<Pair<CleanupSignalRow, String>>>,
+        model: DeletePreferenceModel?,
+        limit: Int,
+        outSize: HashMap<Long, Long>,
+    ): List<ReviewBatchItem> {
+        if (model == null || limit <= 0) return emptyList()
+        val usedIds = buildSet {
+            baseItems.forEach { item ->
+                when (item) {
+                    is ReviewBatchItem.Single -> add(item.imageId)
+                    is ReviewBatchItem.Group -> rowsByGroup[item.groupId].orEmpty().forEach { add(it.first.id) }
+                }
+            }
+        }
+        val now = System.currentTimeMillis()
+        return imageDao.recommendCandidatePool(limit * REC_POOL_FACTOR).asSequence()
+            .filter { it.id !in usedIds }
+            .map { row ->
+                outSize[row.id] = row.size
+                row.id to model.probability(
+                    DeleteFeatures.extract(
+                        row.featureGrid, row.blurScore, row.width, row.height, row.size,
+                        row.sourceType, row.isAnimated, row.mtime, row.inDuplicateGroup, now,
+                    ),
+                )
+            }
+            .filter { it.second >= REC_THRESHOLD }
+            .sortedByDescending { it.second }
+            .take(limit)
+            .map { ReviewBatchItem.Single(it.first, CleanupRules.REASON_RECOMMENDED) }
+            .toList()
     }
 
     /**
@@ -274,5 +322,9 @@ class CleanupRecommender(
         const val DEFAULT_MAX_ITEMS = 200
         private const val POOL_FACTOR = 8L
         private const val POOL_HARD_CAP = 50_000L
+
+        /** 推荐删除：概率 ≥ 此值才纳入；候选池粗筛倍数（取 limit×此值 再模型精排）。 */
+        private const val REC_THRESHOLD = 0.5
+        private const val REC_POOL_FACTOR = 4
     }
 }

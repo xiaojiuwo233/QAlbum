@@ -20,6 +20,7 @@ object CleanupRules {
     const val REASON_BLUR = "模糊"
     const val REASON_TINY_FILE = "极小文件"
     const val REASON_EMOJI = "表情包"
+    const val REASON_RECOMMENDED = "推荐"
 
     fun classify(signal: CleanupSignalRow, config: CleanupConfig): String? {
         if (config.corruptEnabled && signal.isCorrupt) return REASON_CORRUPT
