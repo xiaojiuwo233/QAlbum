@@ -1,5 +1,6 @@
 package com.xjw.qalbum.data.db.dao
 
+import androidx.paging.PagingSource
 import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
@@ -39,8 +40,20 @@ interface CleanupDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertQuarantine(item: QuarantineEntity): Long
 
+    /**
+     * 回收站列表分页（UI 用 Paging3）。早期 observeQuarantine() 全量 `SELECT *` 把整张 quarantine
+     * （每行含多个 path 文本，10 列 ~1.2KB/行）一次性物化，积累上千项就撞 CursorWindow 2MB 崩
+     * `Couldn't read row N, col 0`。
+     */
     @Query("SELECT * FROM quarantine ORDER BY quarantined_at DESC")
-    fun observeQuarantine(): Flow<List<QuarantineEntity>>
+    fun pagingQuarantine(): PagingSource<Int, QuarantineEntity>
+
+    @Query("SELECT COUNT(*) FROM quarantine")
+    suspend fun countQuarantine(): Int
+
+    /** keyset 分页遍历（一键清理逐页 purge，避免全量装载）；purge 删行后旧 id ≤ afterId 自然出后续页。 */
+    @Query("SELECT * FROM quarantine WHERE id > :afterId ORDER BY id ASC LIMIT :limit")
+    suspend fun listQuarantinePaged(afterId: Long, limit: Int): List<QuarantineEntity>
 
     @Query("SELECT * FROM quarantine WHERE id = :id LIMIT 1")
     suspend fun getQuarantineById(id: Long): QuarantineEntity?

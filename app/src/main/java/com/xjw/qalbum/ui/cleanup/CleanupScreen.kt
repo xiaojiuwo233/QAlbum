@@ -173,11 +173,12 @@ fun CleanupMainScreen(
     val busy by viewModel.busy.collectAsState()
     val lastBatch by viewModel.lastBatch.collectAsState()
     val selectedReviewDeleteIds by viewModel.selectedReviewDeleteIds.collectAsState()
-    val recycleBinItems by viewModel.quarantine.collectAsState()
+    val quarantineStats by viewModel.quarantineStats.collectAsState()
     val thumbnailTrashSummary by viewModel.thumbnailTrashSummary.collectAsState()
 
-    val recycleBinCount = recycleBinItems.size + thumbnailTrashSummary.count
-    val recycleBinBytes = recycleBinItems.sumOf { it.size } + thumbnailTrashSummary.bytes
+    // 回收站计数/大小走 DB 聚合，不再全量装载 quarantine 列表（项多会撞 CursorWindow）
+    val recycleBinCount = quarantineStats.count + thumbnailTrashSummary.count
+    val recycleBinBytes = quarantineStats.bytes + thumbnailTrashSummary.bytes
 
     Scaffold(
         topBar = {

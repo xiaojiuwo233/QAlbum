@@ -62,6 +62,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.paging.compose.collectAsLazyPagingItems
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import coil3.request.crossfade
@@ -77,13 +78,15 @@ fun CleanupRecycleBinScreen(
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
-    val items by viewModel.quarantine.collectAsState()
+    val items = viewModel.quarantine.collectAsLazyPagingItems()
+    val quarantineStats by viewModel.quarantineStats.collectAsState()
     val thumbnailSummary by viewModel.thumbnailTrashSummary.collectAsState()
     val busy by viewModel.busy.collectAsState()
     val purgeProgress by viewModel.purgeProgress.collectAsState()
 
-    val totalCount = items.size + thumbnailSummary.count
-    val totalBytes = items.sumOf { it.size } + thumbnailSummary.bytes
+    // 计数/总大小走 DB 聚合（stats），不再 items.size/sumOf —— 列表已分页，内存里没有全量项
+    val totalCount = quarantineStats.count + thumbnailSummary.count
+    val totalBytes = quarantineStats.bytes + thumbnailSummary.bytes
     var showClearConfirm by remember { mutableStateOf(false) }
     var preview by remember { mutableStateOf<QuarantineEntity?>(null) }
 
@@ -134,7 +137,7 @@ fun CleanupRecycleBinScreen(
                 )
             }
 
-            if (items.isEmpty()) {
+            if (items.itemCount == 0) {
                 item(span = { GridItemSpan(maxLineSpan) }) {
                     Box(modifier = Modifier.fillMaxWidth().padding(top = 56.dp), contentAlignment = Alignment.Center) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -158,8 +161,14 @@ fun CleanupRecycleBinScreen(
                         modifier = Modifier.padding(top = 8.dp, bottom = 2.dp),
                     )
                 }
-                items(items, key = { it.id }) { record ->
-                    QuarantineTile(record = record, onClick = { preview = record })
+                items(
+                    count = items.itemCount,
+                    key = { index -> items.peek(index)?.id ?: "loading-$index" },
+                ) { index ->
+                    val record = items[index]
+                    if (record != null) {
+                        QuarantineTile(record = record, onClick = { preview = record })
+                    }
                 }
             }
         }

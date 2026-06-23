@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.paging.PagingData
 import androidx.paging.cachedIn
+import com.xjw.qalbum.data.db.dao.CleanupDao
 import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.db.dao.TagDao
 import com.xjw.qalbum.data.db.entity.CleanupBatchEntity
@@ -82,8 +83,12 @@ class CleanupViewModel(
     val recentBatches: StateFlow<List<CleanupBatchEntity>> = cleanupController.observeRecentBatches()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    val quarantine: StateFlow<List<QuarantineEntity>> = cleanupController.observeQuarantine()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    val quarantine: Flow<PagingData<QuarantineEntity>> =
+        cleanupController.pagingQuarantine().cachedIn(viewModelScope)
+
+    val quarantineStats: StateFlow<CleanupDao.QuarantineStatsRow> =
+        cleanupController.observeQuarantineStats()
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CleanupDao.QuarantineStatsRow(0, 0))
 
     val thumbnailTrashSummary: StateFlow<ImageDao.ThumbnailTrashSummary> =
         thumbnailTrashManager.observeSummary()
@@ -173,18 +178,27 @@ class CleanupViewModel(
         viewModelScope.launch {
             _busy.value = true
             // 图片可能多达数万张，逐张删除较慢：上报进度给 UI 展示进度条
-            val quarantineItems = quarantine.value
-            val total = quarantineItems.size + thumbnailTrashSummary.value.count
+            val quarantineCount = cleanupController.countQuarantine()
+            val total = quarantineCount + thumbnailTrashSummary.value.count
             _purgeProgress.value = PurgeProgress(0, total)
             try {
                 var purgedImages = 0
-                quarantineItems.forEachIndexed { index, q ->
-                    if (cleanupController.purge(q.id)) purgedImages++
-                    _purgeProgress.value = PurgeProgress((index + 1).coerceAtMost(total), total)
+                var processed = 0
+                // keyset 分页遍历回收站逐张 purge，绝不一次性全量装载（quarantine 项多会撞 CursorWindow）
+                var afterId = 0L
+                val pageSize = 200
+                while (true) {
+                    val page = cleanupController.listQuarantinePaged(afterId, pageSize)
+                    if (page.isEmpty()) break
+                    afterId = page.last().id
+                    for (q in page) {
+                        if (cleanupController.purge(q.id)) purgedImages++
+                        processed++
+                        _purgeProgress.value = PurgeProgress(processed.coerceAtMost(total), total)
+                    }
                 }
-                val base = quarantineItems.size
                 val purgedThumbnails = thumbnailTrashManager.purgeAll { tDone, _ ->
-                    _purgeProgress.value = PurgeProgress((base + tDone).coerceAtMost(total), total)
+                    _purgeProgress.value = PurgeProgress((quarantineCount + tDone).coerceAtMost(total), total)
                 }
                 onDone(purgedImages + purgedThumbnails)
             } finally {
