@@ -188,18 +188,17 @@ class CleanupViewModel(
             try {
                 var purgedImages = 0
                 var processed = 0
-                // keyset 分页遍历回收站逐张 purge，绝不一次性全量装载（quarantine 项多会撞 CursorWindow）
+                // keyset 分页遍历回收站，按页批量 purge（批删文件 + 批量 DB），避免逐张事务；
+                // 批删物理删除 quarantine 行，afterId 单调推进，已删行 id ≤ afterId 不再被取到
                 var afterId = 0L
                 val pageSize = 200
                 while (true) {
                     val page = cleanupController.listQuarantinePaged(afterId, pageSize)
                     if (page.isEmpty()) break
                     afterId = page.last().id
-                    for (q in page) {
-                        if (cleanupController.purge(q.id)) purgedImages++
-                        processed++
-                        _purgeProgress.value = PurgeProgress(processed.coerceAtMost(total), total)
-                    }
+                    purgedImages += cleanupController.purgeByRecords(page)
+                    processed += page.size
+                    _purgeProgress.value = PurgeProgress(processed.coerceAtMost(total), total)
                 }
                 val purgedThumbnails = thumbnailTrashManager.purgeAll { tDone, _ ->
                     _purgeProgress.value = PurgeProgress((quarantineCount + tDone).coerceAtMost(total), total)

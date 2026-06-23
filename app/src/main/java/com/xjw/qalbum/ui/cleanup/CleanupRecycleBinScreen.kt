@@ -26,7 +26,6 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
-import androidx.compose.material.icons.outlined.BrokenImage
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Inventory2
@@ -215,24 +214,15 @@ private fun QuarantineTile(record: QuarantineEntity, onClick: () -> Unit) {
             .background(MaterialTheme.colorScheme.surfaceContainerHigh)
             .clickable(onClick = onClick),
     ) {
-        val thumb = record.thumbnailPath
-        if (thumb != null) {
-            AsyncImage(
-                model = ImageRequest.Builder(context).data(File(thumb)).crossfade(true).build(),
-                contentDescription = record.reason,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize(),
-            )
-        } else {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Icon(
-                    Icons.Outlined.BrokenImage,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(28.dp),
-                )
-            }
-        }
+        // 新记录不再预生成缩略图，直接用移动后的原图（quarantinePath）；存量记录仍用其缩略图。
+        // 文件缺失时 Coil 加载失败，露出 Box 背景色作占位。
+        val thumb = record.thumbnailPath ?: record.quarantinePath
+        AsyncImage(
+            model = ImageRequest.Builder(context).data(File(thumb)).crossfade(true).build(),
+            contentDescription = record.reason,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.fillMaxSize(),
+        )
         Box(
             modifier = Modifier
                 .align(Alignment.BottomStart)
@@ -262,24 +252,14 @@ private fun QuarantinePreviewDialog(
         properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false, decorFitsSystemWindows = false),
     ) {
         Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
-            val thumb = record.thumbnailPath
-            if (thumb != null) {
-                AsyncImage(
-                    model = ImageRequest.Builder(context).data(File(thumb)).crossfade(true).build(),
-                    contentDescription = record.reason,
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier.fillMaxSize(),
-                )
-            } else {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Icon(
-                        Icons.Outlined.BrokenImage,
-                        contentDescription = null,
-                        tint = Color.White.copy(alpha = 0.5f),
-                        modifier = Modifier.size(72.dp),
-                    )
-                }
-            }
+            // 新记录不再预生成缩略图，直接用移动后的原图（quarantinePath）；存量记录仍用其缩略图。
+            val thumb = record.thumbnailPath ?: record.quarantinePath
+            AsyncImage(
+                model = ImageRequest.Builder(context).data(File(thumb)).crossfade(true).build(),
+                contentDescription = record.reason,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize(),
+            )
 
             Row(
                 modifier = Modifier

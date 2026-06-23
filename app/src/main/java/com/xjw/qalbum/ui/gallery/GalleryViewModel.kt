@@ -124,7 +124,7 @@ class GalleryViewModel(
         viewModelScope.launch {
             val saved = ids.count { imageFileManager.exportToGallery(it, subdir) }
             if (alsoTrash) {
-                ids.forEach { quarantineManager.quarantine(it, "保存后移入回收站") }
+                quarantineManager.quarantineBatch(ids.map { it to "保存后移入回收站" })
             }
             onDone(saved)
         }
@@ -144,14 +144,14 @@ class GalleryViewModel(
 
     fun moveImagesToTrash(ids: Set<Long>, onDone: (Int) -> Unit = {}) {
         viewModelScope.launch {
-            val count = ids.count { quarantineManager.quarantine(it, "用户批量删除") }
+            val count = quarantineManager.quarantineBatch(ids.map { it to "用户批量删除" })
             onDone(count)
         }
     }
 
     fun deleteImagesPermanently(ids: Set<Long>, onDone: (Int) -> Unit = {}) {
         viewModelScope.launch {
-            val count = ids.count { quarantineManager.deletePermanently(it) }
+            val count = quarantineManager.deletePermanentlyBatch(ids.toList())
             onDone(count)
         }
     }

@@ -40,6 +40,10 @@ interface CleanupDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertQuarantine(item: QuarantineEntity): Long
 
+    /** 批量插入回收站记录（移入回收站时一批写入，避免逐条事务各自 fsync）。 */
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertQuarantineAll(items: List<QuarantineEntity>)
+
     /**
      * 回收站列表分页（UI 用 Paging3）。早期 observeQuarantine() 全量 `SELECT *` 把整张 quarantine
      * （每行含多个 path 文本，10 列 ~1.2KB/行）一次性物化，积累上千项就撞 CursorWindow 2MB 崩
@@ -60,6 +64,10 @@ interface CleanupDao {
 
     @Query("DELETE FROM quarantine WHERE id = :id")
     suspend fun deleteQuarantine(id: Long)
+
+    /** 批量删除回收站记录（一键清理逐页批删，避免逐条事务）；调用方分块控制在 SQLite 变量上限内。 */
+    @Query("DELETE FROM quarantine WHERE id IN (:ids)")
+    suspend fun deleteQuarantineByIds(ids: List<Long>)
 
     @Query("SELECT COUNT(*) AS count, IFNULL(SUM(size), 0) AS bytes FROM quarantine")
     fun observeQuarantineStats(): Flow<QuarantineStatsRow>

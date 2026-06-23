@@ -30,6 +30,10 @@ interface ImageDao {
     @Query("UPDATE images SET status = :status WHERE id = :id")
     suspend fun updateStatus(id: Long, status: String)
 
+    /** 批量改状态（移入回收站时一批标记 quarantined，避免逐条事务各自 fsync）；调用方分块控制变量上限。 */
+    @Query("UPDATE images SET status = :status WHERE id IN (:ids)")
+    suspend fun updateStatusByIds(ids: List<Long>, status: String)
+
     @Query("UPDATE images SET status = 'deleted', deleted_at = :deletedAt WHERE id IN (:ids)")
     suspend fun markDeleted(ids: List<Long>, deletedAt: Long)
 

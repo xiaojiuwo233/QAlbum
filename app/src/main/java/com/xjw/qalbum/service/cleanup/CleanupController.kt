@@ -36,36 +36,24 @@ class CleanupController(
         recommender.generateBatch(config, label, maxItems, oldestFirst, allDuplicates, recommendModel, recommendLimit)
 
     suspend fun applyBatch(batchId: Long): Int {
-        val candidates = cleanupDao.getCandidates(batchId)
-        var moved = 0
-        for (candidate in candidates) {
-            // 用户决策为"删除"或未决（默认按建议执行）才隔离
-            if (candidate.userDecision == "keep") continue
-            val ok = quarantineManager.quarantine(candidate.imageId, candidate.reason)
-            if (ok) moved++
-        }
-        return moved
+        // 用户决策为"删除"或未决（默认按建议执行）才隔离；批量并发移入
+        val items = cleanupDao.getCandidates(batchId)
+            .filter { it.userDecision != "keep" }
+            .map { it.imageId to it.reason }
+        return quarantineManager.quarantineBatch(items)
     }
 
     suspend fun listCandidates(batchId: Long): List<CleanupCandidateEntity> =
         cleanupDao.getCandidates(batchId)
 
     /**
-     * 批量移入回收站（逐图 quarantine：读原图→生成缩略图→moveFile）。
-     * [onProgress]（done, total）每处理一张回调一次，供 UI 展示进度条，避免用户干等。
+     * 批量移入回收站：并发移动文件 + 批量写库（见 [QuarantineManager.quarantineBatch]）。
+     * [onProgress]（done, total）随处理进度回调，供 UI 展示进度条。
      */
     suspend fun moveToTrash(
         items: List<Pair<Long, String>>,
         onProgress: (done: Int, total: Int) -> Unit = { _, _ -> },
-    ): Int {
-        var moved = 0
-        val total = items.size
-        items.forEachIndexed { index, (imageId, reason) ->
-            if (quarantineManager.quarantine(imageId, reason)) moved++
-            onProgress(index + 1, total)
-        }
-        return moved
-    }
+    ): Int = quarantineManager.quarantineBatch(items, onProgress)
 
     fun observeRecentBatches(): Flow<List<CleanupBatchEntity>> = cleanupDao.observeRecentBatches()
 
@@ -93,4 +81,8 @@ class CleanupController(
     suspend fun restore(quarantineId: Long): Boolean = quarantineManager.restore(quarantineId)
 
     suspend fun purge(quarantineId: Long): Boolean = quarantineManager.purge(quarantineId)
+
+    /** 批量永久删除回收站记录（一键清理逐页批删）。 */
+    suspend fun purgeByRecords(records: List<QuarantineEntity>): Int =
+        quarantineManager.purgeByRecords(records)
 }
