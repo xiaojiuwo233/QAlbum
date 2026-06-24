@@ -1,6 +1,8 @@
 package com.xjw.qalbum.service.cleanup
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import com.xjw.qalbum.access.AccessManager
 import com.xjw.qalbum.access.FileAccessProvider
 import com.xjw.qalbum.data.db.dao.CleanupDao
@@ -26,10 +28,12 @@ import java.util.concurrent.atomic.AtomicInteger
  * 删除操作的实际语义：把文件从 chatpic 移动到 App 私有目录 `filesDir/quarantine/`（可恢复，
  * 默认 30 天后真正删除，见 [SettingsRepository.quarantineRetentionDays]）。
  *
- * 性能：回收站展示直接用移动后的原图（Coil 按需降采样），不再为每张预生成缩略图——预生成
- * 要「读整张原图 + 解码 + 压缩」，是批量移入的最大瓶颈。批量移入走 [quarantineBatch]：
- * [CONCURRENCY] 路并发处理文件移动 + 一次性批量写库；单张特权 move 失败（如 Shizuku shell
- * 权限写不进 App 私有目录）回退到 App 自行拷贝。
+ * 性能：批量移入走 [quarantineBatch]——[CONCURRENCY] 路并发处理（缩略图生成 + 文件移动）
+ * + 一次性批量写库，远快于逐张串行 + 逐条事务。单张特权 move 失败（如 Shizuku shell 权限
+ * 写不进 App 私有目录）回退到 App 自行拷贝。
+ *
+ * 缩略图必须由 App 自己生成写入（[thumbDir]）：root 特权 move 进来的原图属 root、App 进程读不了，
+ * 不能直接拿移动后的原图展示，故回收站列表/预览都用 App 写的缩略图。
  */
 class QuarantineManager(
     private val context: Context,
@@ -42,6 +46,11 @@ class QuarantineManager(
     /** 回收站根目录 */
     private val rootDir: File by lazy {
         File(context.filesDir, "quarantine").apply { if (!exists()) mkdirs() }
+    }
+
+    /** 缩略图目录（App 自己写入，保证 App 可读，用于回收站展示） */
+    private val thumbDir: File by lazy {
+        File(rootDir, "thumb").apply { if (!exists()) mkdirs() }
     }
 
     /** 把指定图片移到回收站（单张；批量走 [quarantineBatch]）。 */
@@ -110,6 +119,8 @@ class QuarantineManager(
         reason: String,
         expiresAt: Long,
     ): QuarantineEntity? {
+        // 缩略图基于**原位置**图、由 App 自己写入 —— 保证 App 可读（特权 move 进来的原图属 root，App 读不了）
+        val thumbPath = runCatching { generateThumbnail(provider, image.path, image.id) }.getOrNull()
         val dest = File(rootDir, "${image.id}_${image.sourceType}_${image.filename}")
         val moved = runCatching { provider.moveFile(image.path, dest.absolutePath) }.getOrDefault(false)
         if (!moved) {
@@ -121,14 +132,15 @@ class QuarantineManager(
             } catch (t: Throwable) {
                 Timber.e(t, "Quarantine copy fallback failed for ${image.path}")
                 runCatching { dest.delete() } // 清掉可能的半截文件
+                thumbPath?.let { runCatching { File(it).delete() } }
                 return null
             }
         }
         return QuarantineEntity(
             imageId = image.id,
             originalPath = image.path,
-            quarantinePath = dest.absolutePath,   // 存完整文件路径：恢复/删除/展示直接用，无需再查图片行
-            thumbnailPath = null,                  // 不再预生成缩略图，回收站展示用移动后的原图
+            quarantinePath = dest.absolutePath,   // 完整文件路径：恢复/删除直接用，无需再查图片行
+            thumbnailPath = thumbPath,             // App 写的缩略图，回收站展示用
             reason = reason,
             ocrSummary = null,
             size = image.size,
@@ -235,6 +247,36 @@ class QuarantineManager(
         if (byPath.isFile) return byPath
         if (image != null) return File(rootDir, "${image.id}_${image.sourceType}_${image.filename}")
         return byPath
+    }
+
+    /** 缩略图生成：读原图 → 降采样解码到 ≤480px → JPEG 压缩写入 App 私有 [thumbDir]（App 可读）。 */
+    private suspend fun generateThumbnail(
+        provider: FileAccessProvider,
+        path: String,
+        id: Long,
+    ): String? = withContext(Dispatchers.IO) {
+        try {
+            val bytes = provider.readFile(path).use { it.readBytes() }
+            val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+            if (opts.outWidth <= 0) return@withContext null
+            var sample = 1
+            var w = opts.outWidth
+            var h = opts.outHeight
+            while (w > 480 || h > 480) {
+                sample *= 2
+                w /= 2; h /= 2
+            }
+            val opts2 = BitmapFactory.Options().apply { inSampleSize = sample }
+            val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts2) ?: return@withContext null
+            val dest = File(thumbDir, "$id.jpg")
+            dest.outputStream().use { out -> bitmap.compress(Bitmap.CompressFormat.JPEG, 70, out) }
+            bitmap.recycle()
+            dest.absolutePath
+        } catch (t: Throwable) {
+            Timber.w(t, "Thumbnail generation failed for $path")
+            null
+        }
     }
 
     private suspend fun computeExpiry(): Long {
