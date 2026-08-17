@@ -43,13 +43,17 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -76,6 +80,7 @@ import com.xjw.qalbum.ui.cleanup.CleanupViewModel
 import com.xjw.qalbum.ui.cleanup.PurgeProgressDialog
 import com.xjw.qalbum.ui.imageloading.ImageEntityModel
 import com.xjw.qalbum.ui.theme.QAlbumTheme
+import kotlinx.coroutines.launch
 import org.koin.android.ext.android.inject
 import org.koin.androidx.compose.koinViewModel
 
@@ -113,12 +118,35 @@ private fun ThumbnailTrashScreen(
     val purgeProgress by viewModel.purgeProgress.collectAsState()
     var selectedIds by remember { mutableStateOf(setOf<Long>()) }
     var preview by remember { mutableStateOf<ImageEntity?>(null) }
+    val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
 
     val bottomInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
 
     val clearSelection = { selectedIds = emptySet() }
     val toggle: (Long) -> Unit = { id ->
         selectedIds = if (id in selectedIds) selectedIds - id else selectedIds + id
+    }
+
+    // 进程级共享的操作提示（磁盘满等 DB 写失败的可读原因，launchGuarded 统一写入）：
+    // 转 snackbar 展示后消费，否则这些原因只记日志、本页只有张数差异提示
+    val opMessage by viewModel.message.collectAsState()
+    LaunchedEffect(opMessage) {
+        opMessage?.let {
+            snackbarHostState.showSnackbar(it)
+            viewModel.consumeMessage()
+        }
+    }
+
+    // 清理结果反馈：Shizuku/Root 掉线时下游直接返回 0，部分文件也可能删除失败；
+    // 不提示的话用户只看到进度一闪、列表纹丝不动，误以为已清理或反复无效点击
+    val showPurgeResult: (purged: Int, expected: Int) -> Unit = { purged, expected ->
+        val message = when {
+            purged <= 0 -> "未能清理：文件访问未就绪或删除失败，请检查 Shizuku/Root 授权后重试"
+            purged < expected -> "已清理 $purged 张，${expected - purged} 张失败"
+            else -> "已清理 $purged 张"
+        }
+        scope.launch { snackbarHostState.showSnackbar(message) }
     }
 
     Scaffold(
@@ -129,7 +157,10 @@ private fun ThumbnailTrashScreen(
                     bytes = summary.bytes,
                     busy = busy,
                     onBack = onBack,
-                    onPurgeAll = { viewModel.purgeAllThumbnails() },
+                    onPurgeAll = {
+                        val expected = summary.count
+                        viewModel.purgeAllThumbnails { purged -> showPurgeResult(purged, expected) }
+                    },
                 )
             } else {
                 ThumbnailSelectionTopBar(
@@ -137,12 +168,14 @@ private fun ThumbnailTrashScreen(
                     busy = busy,
                     onClose = clearSelection,
                     onDelete = {
-                        viewModel.purgeThumbnails(selectedIds)
+                        val expected = selectedIds.size
+                        viewModel.purgeThumbnails(selectedIds) { purged -> showPurgeResult(purged, expected) }
                         clearSelection()
                     },
                 )
             }
         },
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
     ) { topPadding ->
         Box(

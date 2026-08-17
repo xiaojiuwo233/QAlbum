@@ -12,15 +12,20 @@ import com.xjw.qalbum.data.repository.ImageRepository
 import com.xjw.qalbum.domain.model.GallerySort
 import com.xjw.qalbum.service.cleanup.ImageFileManager
 import com.xjw.qalbum.service.cleanup.QuarantineManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map as flowMap
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -40,6 +45,7 @@ class GalleryViewModel(
     private val imageFileManager: ImageFileManager,
     private val quarantineManager: QuarantineManager,
     private val settings: SettingsRepository,
+    private val appScope: CoroutineScope,
 ) : ViewModel() {
 
     // ---- 图库偏好 ----
@@ -85,23 +91,43 @@ class GalleryViewModel(
 
     // ---- 时间线 ----
 
-    val timeline: Flow<PagingData<GalleryTimelineItem>> =
-        settings.gallerySort.flatMapLatest { sort ->
-            when (sort) {
-                GallerySort.SIZE_DESC -> imageRepository
-                    .timelinePager(sort)
-                    .withSizeHeaders(imageRepository.observeTimelineSizeBucketCounts())
+    // 分桶计数固化为热流缓存：withDateHeaders/withSizeHeaders 每个 PagingData generation
+    // 都要读一次计数，若每次冷订阅 Room Flow，扫描/分析期间的高频失效会让 200 万行聚合
+    // 反复重跑并拖住新 generation 的下发；stateIn 后 generation 读的是最新缓存值（首次
+    // 之后即时返回），刷新频率由仓库层 throttleLatest 统一约束。
+    private val timelineDateBucketCounts: StateFlow<Map<Long, Int>?> =
+        imageRepository.observeTimelineDateBucketCounts()
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
-                GallerySort.DATE_DESC, GallerySort.DATE_ASC -> imageRepository
-                    .timelinePager(sort)
-                    .withDateHeaders(imageRepository.observeTimelineDateBucketCounts())
-            }
-        }.cachedIn(viewModelScope)
+    private val timelineSizeBucketCounts: StateFlow<Map<Long, Int>?> =
+        imageRepository.observeTimelineSizeBucketCounts()
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    private val favoriteDateBucketCounts: StateFlow<Map<Long, Int>?> =
+        imageRepository.observeFavoriteDateBucketCounts()
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    val timeline: Flow<PagingData<GalleryTimelineItem>> =
+        settings.gallerySort
+            // DataStore 任意 key 写入都会重发 gallerySort；等值重发若不去重会经 flatMapLatest
+            // 重建 Pager（滚动位置回顶 + 全量重载），改列数/阈值等无关设置都会触发
+            .distinctUntilChanged()
+            .flatMapLatest { sort ->
+                when (sort) {
+                    GallerySort.SIZE_DESC -> imageRepository
+                        .timelinePager(sort)
+                        .withSizeHeaders(timelineSizeBucketCounts)
+
+                    GallerySort.DATE_DESC, GallerySort.DATE_ASC -> imageRepository
+                        .timelinePager(sort)
+                        .withDateHeaders(timelineDateBucketCounts)
+                }
+            }.cachedIn(viewModelScope)
 
     val favoriteTimeline: Flow<PagingData<GalleryTimelineItem>> =
         imageRepository
             .favoriteTimelinePager()
-            .withDateHeaders(imageRepository.observeFavoriteDateBucketCounts())
+            .withDateHeaders(favoriteDateBucketCounts)
             .cachedIn(viewModelScope)
 
     val favoriteCount: Flow<Int> = imageRepository.observeFavoriteCount()
@@ -117,16 +143,17 @@ class GalleryViewModel(
     fun createSubdir(name: String) = settings.addExportSubdir(name)
 
     /**
-     * 多选「保存」：导出到 Pictures/QAlbum[/子目录]；[alsoTrash] 为真则保存后把这些图一并移入回收站。
-     * 回调返回成功保存的张数。
+     * 多选「保存」：导出到 Pictures/QAlbum[/子目录]；[alsoTrash] 为真则**仅对导出成功的图**
+     * 移入回收站——导出失败的原图绝不进回收站（否则到期自动清理会把从未保存成功的图永久删掉）。
+     * 回调返回成功/失败张数，供 UI 分别告知。
      */
-    fun saveImages(ids: Set<Long>, subdir: String?, alsoTrash: Boolean, onDone: (Int) -> Unit = {}) {
-        viewModelScope.launch {
-            val saved = ids.count { imageFileManager.exportToGallery(it, subdir) }
-            if (alsoTrash) {
-                quarantineManager.quarantineBatch(ids.map { it to "保存后移入回收站" })
+    fun saveImages(ids: Set<Long>, subdir: String?, alsoTrash: Boolean, onDone: (saved: Int, failed: Int) -> Unit = { _, _ -> }) {
+        appScope.launch {
+            val savedIds = ids.filter { imageFileManager.exportToGallery(it, subdir) }
+            if (alsoTrash && savedIds.isNotEmpty()) {
+                quarantineManager.quarantineBatch(savedIds.map { it to "保存后移入回收站" })
             }
-            onDone(saved)
+            withContext(Dispatchers.Main) { onDone(savedIds.size, ids.size - savedIds.size) }
         }
     }
 
@@ -142,31 +169,30 @@ class GalleryViewModel(
         }
     }
 
+    // 批量「文件系统 + DB」不可逆操作跑在 App 级 appScope：分钟级批量若挂在 viewModelScope，
+    // 用户确认后返回上一页（压栈路由弹出）会把协程连同 QuarantineManager 的滚动推进一起取消，
+    // 留下「文件已移动但 DB 未写」的孤儿块；appScope 随进程存活，完成后回主线程通知 UI。
+
     fun moveImagesToTrash(ids: Set<Long>, onDone: (Int) -> Unit = {}) {
-        viewModelScope.launch {
+        appScope.launch {
             val count = quarantineManager.quarantineBatch(ids.map { it to "用户批量删除" })
-            onDone(count)
+            withContext(Dispatchers.Main) { onDone(count) }
         }
     }
 
     fun deleteImagesPermanently(ids: Set<Long>, onDone: (Int) -> Unit = {}) {
-        viewModelScope.launch {
+        appScope.launch {
             val count = quarantineManager.deletePermanentlyBatch(ids.toList())
-            onDone(count)
+            withContext(Dispatchers.Main) { onDone(count) }
         }
     }
 
     private suspend fun setFavoriteState(ids: Set<Long>, favorite: Boolean): Int {
-        val images = imageRepository.getByIds(ids.toList()).associateBy { it.id }
-        var changed = 0
-        ids.forEach { id ->
-            val image = images[id] ?: return@forEach
-            if (image.isFavorite != favorite) {
-                imageRepository.setFavorite(id, favorite)
-                changed++
-            }
-        }
-        return changed
+        val targetIds = imageRepository.getByIds(ids.toList())
+            .filter { it.isFavorite != favorite }
+            .map { it.id }
+        imageRepository.setFavoriteBatch(targetIds, favorite)
+        return targetIds.size
     }
 }
 
@@ -191,15 +217,21 @@ data class EnabledPhases(
  */
 fun isFullyAnalyzed(image: ImageEntity, phases: EnabledPhases): Boolean =
     image.hashDone &&
+        ((image.blockHash != null && image.featureGrid != null) || image.isCorrupt) &&
         (!phases.ocr || image.ocrDone || image.isCorrupt || image.width < 64 || image.height < 64) &&
         (!phases.aiTag || image.aiDone || image.isCorrupt) &&
         (!phases.embedding || image.embeddingDone || image.isCorrupt)
 
+/**
+ * 参数接受可空 map 流：调用方可传 stateIn(初值 null) 固化的热流，首个 generation 等到
+ * 首次查询结果后，后续 generation 即时拿缓存值，不再逐 generation 冷跑全表聚合。
+ * （Flow 协变，直接传非空 map 流也兼容。）
+ */
 internal fun Flow<PagingData<ImageEntity>>.withDateHeaders(
-    bucketCounts: Flow<Map<Long, Int>>,
+    bucketCounts: Flow<Map<Long, Int>?>,
 ): Flow<PagingData<GalleryTimelineItem>> =
     flowMap { pagingData: PagingData<ImageEntity> ->
-        val counts = bucketCounts.first()
+        val counts = bucketCounts.filterNotNull().first()
         pagingData
             .pagingMap { image: ImageEntity -> GalleryTimelineItem.Photo(image) as GalleryTimelineItem }
             .insertSeparators { before: GalleryTimelineItem?, after: GalleryTimelineItem? ->
@@ -218,10 +250,10 @@ internal fun Flow<PagingData<ImageEntity>>.withDateHeaders(
     }
 
 private fun Flow<PagingData<ImageEntity>>.withSizeHeaders(
-    bucketCounts: Flow<Map<Long, Int>>,
+    bucketCounts: Flow<Map<Long, Int>?>,
 ): Flow<PagingData<GalleryTimelineItem>> =
     flowMap { pagingData: PagingData<ImageEntity> ->
-        val counts = bucketCounts.first()
+        val counts = bucketCounts.filterNotNull().first()
         pagingData
             .pagingMap { image: ImageEntity -> GalleryTimelineItem.Photo(image) as GalleryTimelineItem }
             .insertSeparators { before: GalleryTimelineItem?, after: GalleryTimelineItem? ->

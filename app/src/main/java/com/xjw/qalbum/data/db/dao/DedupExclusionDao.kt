@@ -23,4 +23,8 @@ interface DedupExclusionDao {
     /** 下一个 cohort id 的来源（每次拆分用一个新 cohort）。 */
     @Query("SELECT IFNULL(MAX(cohort_id), 0) FROM dedup_exclusions")
     suspend fun maxCohortId(): Long
+
+    /** 永久删除图片时清理其排斥约束（图都没了，约束无意义）；调用方分块。 */
+    @Query("DELETE FROM dedup_exclusions WHERE image_id IN (:ids)")
+    suspend fun deleteByImageIds(ids: List<Long>)
 }

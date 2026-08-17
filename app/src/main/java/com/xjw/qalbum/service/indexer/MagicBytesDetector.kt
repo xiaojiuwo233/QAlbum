@@ -8,7 +8,7 @@ import java.io.InputStream
  * QQ chatpic 中的文件名是 `Cache_{hash}`，**没有扩展名**，
  * 只能通过文件头字节判断是否为图片以及具体格式。
  *
- * 性能：仅读取前 16 字节，每张图开销 < 1ms。
+ * 性能：仅读取前 32 字节，每张图开销 < 1ms。
  */
 object MagicBytesDetector {
 
@@ -20,12 +20,14 @@ object MagicBytesDetector {
         WEBP_ANIM("image/webp", true),
         HEIC("image/heic", false),
         HEIF("image/heif", false),
+        AVIF("image/avif", false),      // 系统解码需 API 31+，低版本设备解码失败不代表文件损坏
+        AVIF_ANIM("image/avif", true),  // avis brand：AVIF 图像序列（动图）
         BMP("image/bmp", false),
     }
 
-    /** 读取流前 16 字节做识别；调用方需自行关闭流 */
+    /** 读取流前 32 字节做识别（含 ftyp 兼容 brand 窗口）；调用方需自行关闭流 */
     fun detect(stream: InputStream): ImageType? {
-        val header = ByteArray(16)
+        val header = ByteArray(32)
         val read = stream.read(header)
         if (read < 4) return null
         return detect(header, read)
@@ -86,11 +88,38 @@ object MagicBytesDetector {
             val brand = String(bytes, 8, 4)
             return when (brand) {
                 "heic", "heix", "hevc", "hevx" -> ImageType.HEIC
-                "mif1", "msf1", "heim", "heis", "hevm", "hevs" -> ImageType.HEIF
+                "avif" -> ImageType.AVIF
+                "avis" -> ImageType.AVIF_ANIM
+                // mif1/msf1 是通用壳 brand（旧版 libheif 编码的 AVIF 也用它）：
+                // 兼容 brand 列表含 avif 时按 AVIF 归类，避免误判 HEIF 后在
+                // 不支持 AVIF 解码的设备上走「损坏」判定链
+                "mif1", "msf1", "heim", "heis", "hevm", "hevs" ->
+                    if (hasCompatibleBrand(bytes, length, "avif")) ImageType.AVIF else ImageType.HEIF
                 else -> null
             }
         }
 
         return null
+    }
+
+    /** ftyp box 的兼容 brand 列表：offset 16 起每 4 字节一项，止于 box 尾（bytes[0..3] 为 box 大小）或已读长度 */
+    private fun hasCompatibleBrand(bytes: ByteArray, length: Int, brand: String): Boolean {
+        val boxSize = ((bytes[0].toInt() and 0xFF) shl 24) or
+            ((bytes[1].toInt() and 0xFF) shl 16) or
+            ((bytes[2].toInt() and 0xFF) shl 8) or
+            (bytes[3].toInt() and 0xFF)
+        val end = if (boxSize in 16..length) boxSize else length
+        var offset = 16
+        while (offset + 4 <= end) {
+            if (bytes[offset] == brand[0].code.toByte() &&
+                bytes[offset + 1] == brand[1].code.toByte() &&
+                bytes[offset + 2] == brand[2].code.toByte() &&
+                bytes[offset + 3] == brand[3].code.toByte()
+            ) {
+                return true
+            }
+            offset += 4
+        }
+        return false
     }
 }

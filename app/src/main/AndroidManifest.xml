@@ -11,18 +11,19 @@
     <!-- 通知权限（Android 13+） -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <!-- 媒体存储权限（用于"导出到系统相册"功能） -->
-    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"
-        tools:ignore="SelectedPhotoAccess" />
+    <!-- 「导出到系统相册」：API 26-28 经 MediaStore insert 写公共目录需要写存储权限；
+         API 29+ 写自有新媒体无需任何存储/媒体权限，故限定 maxSdkVersion=28 -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
 
     <!-- Shizuku 通信权限 -->
     <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
 
-    <!-- 查询其他 App 是否已安装（Android 11+） -->
+    <!-- 查询其他 App 是否已安装（Android 11+）。仅需 Shizuku：QQ/TIM 路径只作为
+         文件系统字符串使用，不依赖包可见性，无需声明 -->
     <queries>
         <package android:name="moe.shizuku.privileged.api" />
-        <package android:name="com.tencent.mobileqq" />
-        <package android:name="com.tencent.tim" />
     </queries>
 
     <application
@@ -76,6 +77,13 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+
+        <!-- WorkManager 前台服务（AnalysisWorker.setForeground 使用）：
+             Android 14+ 强制要求为其声明 foregroundServiceType，dataSync 对应长时分析任务 -->
+        <service
+            android:name="androidx.work.impl.foreground.SystemForegroundService"
+            android:foregroundServiceType="dataSync"
+            tools:node="merge" />
 
         <!-- WorkManager 自定义 Initializer：由 Koin 注入 WorkerFactory -->
         <provider

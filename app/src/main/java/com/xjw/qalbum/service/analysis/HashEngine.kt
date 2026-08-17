@@ -2,6 +2,8 @@ package com.xjw.qalbum.service.analysis
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.media.ExifInterface
 import com.xjw.qalbum.access.FileAccessProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -254,6 +256,82 @@ object HashEngine {
                 provider.readFile(path).use { it.readBytesCapped(MAX_DECODE_BYTES) }
             }.getOrNull()?.takeIf { it.isNotEmpty() }
         }
+
+    /** [decodeScaledOriented] 的结果：已按 EXIF 方向归一的解码 bitmap + 原图显示方向尺寸。 */
+    data class OrientedDecode(
+        val bitmap: Bitmap,
+        /** 原图 bounds 宽（EXIF 旋转 90/270 档位已换边），非采样解码后的缩小尺寸。 */
+        val sourceWidth: Int,
+        val sourceHeight: Int,
+    )
+
+    /**
+     * 解码到不超过 maxSide 的尺寸，并按 EXIF Orientation 旋转 / 镜像到显示方向。
+     * BitmapFactory 从不应用 EXIF：相机竖拍原图（像素横存 + Orientation tag）与其导出副本
+     * （像素已物理旋转、tag 清空）此前在两套像素上各算一套视觉特征，旋转副本重复检测系统性漏检；
+     * 归一到显示方向后特征天然对齐，随附的原图尺寸供入库（宽高比 / 分辨率信号同步对齐）。
+     */
+    fun decodeScaledOriented(bytes: ByteArray, maxSide: Int): OrientedDecode? {
+        if (bytes.isEmpty()) return null
+        val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+        if (opts.outWidth <= 0 || opts.outHeight <= 0) return null
+
+        var sample = 1
+        var w = opts.outWidth
+        var h = opts.outHeight
+        while (w > maxSide || h > maxSide) {
+            sample *= 2
+            w /= 2
+            h /= 2
+        }
+        val opts2 = BitmapFactory.Options().apply {
+            inSampleSize = sample
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
+        val raw = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts2) ?: return null
+        val orientation = readExifOrientation(bytes)
+        val oriented = applyOrientation(raw, orientation)
+        val swap = orientation == ExifInterface.ORIENTATION_ROTATE_90 ||
+            orientation == ExifInterface.ORIENTATION_ROTATE_270 ||
+            orientation == ExifInterface.ORIENTATION_TRANSPOSE ||
+            orientation == ExifInterface.ORIENTATION_TRANSVERSE
+        return OrientedDecode(
+            bitmap = oriented,
+            sourceWidth = if (swap) opts.outHeight else opts.outWidth,
+            sourceHeight = if (swap) opts.outWidth else opts.outHeight,
+        )
+    }
+
+    /** 读 EXIF Orientation；非 JPEG / 无 tag / 解析失败一律按 NORMAL（不旋转）。 */
+    private fun readExifOrientation(bytes: ByteArray): Int = try {
+        ExifInterface(java.io.ByteArrayInputStream(bytes))
+            .getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+    } catch (t: Throwable) {
+        ExifInterface.ORIENTATION_NORMAL
+    }
+
+    /** 按 EXIF Orientation 把 bitmap 变换到显示方向；无需变换或变换失败时返回原 bitmap（保守降级）。 */
+    private fun applyOrientation(src: Bitmap, orientation: Int): Bitmap {
+        val m = Matrix()
+        when (orientation) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> m.postRotate(90f)
+            ExifInterface.ORIENTATION_ROTATE_180 -> m.postRotate(180f)
+            ExifInterface.ORIENTATION_ROTATE_270 -> m.postRotate(270f)
+            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> m.postScale(-1f, 1f)
+            ExifInterface.ORIENTATION_FLIP_VERTICAL -> m.postScale(1f, -1f)
+            ExifInterface.ORIENTATION_TRANSPOSE -> { m.postRotate(90f); m.postScale(-1f, 1f) }
+            ExifInterface.ORIENTATION_TRANSVERSE -> { m.postRotate(270f); m.postScale(-1f, 1f) }
+            else -> return src
+        }
+        val out = try {
+            Bitmap.createBitmap(src, 0, 0, src.width, src.height, m, true)
+        } catch (t: Throwable) {
+            return src
+        }
+        if (out !== src) src.recycle()
+        return out
+    }
 
     /** 解码字节到不超过 maxSide 的尺寸（节省内存）。损坏 / 非图片返回 null。 */
     fun decodeScaledBytes(bytes: ByteArray, maxSide: Int): Bitmap? {

@@ -28,6 +28,23 @@ import kotlin.math.max
 object QuadTextCrop {
     private const val VERTICAL_CROP_RATIO = 1.5
 
+    /**
+     * Estimated width/height ratio of the crop that [crop] would produce, computed from the
+     * quad's edge lengths only (no Mat allocation). Mirrors the vertical-rotation rule so
+     * near-vertical boxes report their post-rotation ratio. Used to group crops of similar
+     * width into the same recognition batch — grouping only, never affects results.
+     */
+    fun estimatedCropRatio(box: OCRBox): Double {
+        val p = box.points
+        val widthTop = hypot((p[0].x - p[1].x).toDouble(), (p[0].y - p[1].y).toDouble())
+        val widthBottom = hypot((p[2].x - p[3].x).toDouble(), (p[2].y - p[3].y).toDouble())
+        val heightLeft = hypot((p[0].x - p[3].x).toDouble(), (p[0].y - p[3].y).toDouble())
+        val heightRight = hypot((p[1].x - p[2].x).toDouble(), (p[1].y - p[2].y).toDouble())
+        val w = max(widthTop, widthBottom).coerceAtLeast(1.0)
+        val h = max(heightLeft, heightRight).coerceAtLeast(1.0)
+        return if (h / w >= VERTICAL_CROP_RATIO) h / w else w / h
+    }
+
     fun crop(src: Mat, box: OCRBox): Mat {
         // Align with PaddleX CropByPolys.get_minarea_rect_crop: recompute minAreaRect
         // from the detected quad before perspective transform.

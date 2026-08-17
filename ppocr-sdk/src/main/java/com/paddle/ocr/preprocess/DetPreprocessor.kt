@@ -85,9 +85,11 @@ object DetPreprocessor {
 
         val channelSize = h * w
         val tensorData = FloatArray(3 * channelSize)
+        // Single scratch buffer shared by all channels: Mat.get needs a heap array, but
+        // allocating one per channel would triple the transient footprint on large inputs.
+        val buf = FloatArray(channelSize)
         for (c in 0..2) {
             val chan = channels[c]
-            val buf = FloatArray(channelSize)
             chan.get(0, 0, buf)
             System.arraycopy(buf, 0, tensorData, c * channelSize, channelSize)
             chan.release()

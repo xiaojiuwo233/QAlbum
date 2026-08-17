@@ -1,6 +1,7 @@
 package com.xjw.qalbum.service.ai
 
-import com.xjw.qalbum.access.FileAccessProvider
+import com.xjw.qalbum.access.AccessException
+import com.xjw.qalbum.access.ImageBytesReader
 import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.preferences.SettingsRepository
@@ -14,7 +15,7 @@ import timber.log.Timber
  *
  * 流程：
  * 1. 将用户查询文本通过 Embedding API 转 1536 维向量
- * 2. 在内存 [SemanticIndex] 中暴力 cosine 检索 Top-K
+ * 2. 通过 [SemanticIndex] 流式 cosine 检索 Top-K
  * 3. 通过 ImageDao 拉对应 ImageEntity 列表返回
  *
  * 对应"以图搜图"：先用 vision 模型给图片生成描述，再做 text embedding（降级方案）。
@@ -34,34 +35,43 @@ class SemanticSearchEngine(
             return emptyList()
         }
         val emb = aiClient.embedding(query) ?: return emptyList()
-        val pairs = semanticIndex.searchTopK(emb, topK)
-        if (pairs.isEmpty()) return emptyList()
-
-        val ids = pairs.map { it.first }
-        val items = imageDao.getByIds(ids).associateBy { it.id }
-        return pairs.mapNotNull { (id, sim) ->
-            val item = items[id] ?: return@mapNotNull null
-            SemanticHit(item, sim)
-        }
+        val pairs = semanticIndex.searchTopK(emb, topK * OVERSAMPLE)
+        return resolveHits(pairs, topK)
     }
 
     /** 以图搜图：用 vision 描述 + text embedding 降级方案 */
-    suspend fun searchByImage(provider: FileAccessProvider, imageId: Long, topK: Int = 50): List<SemanticHit> {
+    suspend fun searchByImage(reader: ImageBytesReader, imageId: Long, topK: Int = 50): List<SemanticHit> {
         val image = imageDao.getById(imageId) ?: return emptyList()
-        val described = describeImage(provider, image) ?: return emptyList()
+        val described = describeImage(reader, image) ?: return emptyList()
         val emb = aiClient.embedding(described) ?: return emptyList()
-        val pairs = semanticIndex.searchTopK(emb, topK)
+        val pairs = semanticIndex.searchTopK(emb, topK * OVERSAMPLE)
             .filter { it.first != imageId }   // 排除自己
-        val items = imageDao.getByIds(pairs.map { it.first }).associateBy { it.id }
-        return pairs.mapNotNull { (id, sim) ->
-            val item = items[id] ?: return@mapNotNull null
-            SemanticHit(item, sim)
-        }
+        return resolveHits(pairs, topK)
     }
 
-    private suspend fun describeImage(provider: FileAccessProvider, image: ImageEntity): String? {
+    /**
+     * 命中 id 回表并按可见性过滤后凑满 topK。
+     *
+     * 超采样 [OVERSAMPLE] 倍是因为向量表可能残留已删除/回收图片的死 id：
+     * getByIds 只回 active 主图，被过滤掉的名额由多取的候选按相似度顺位回补，
+     * 避免大规模清理后 Top-K 结果被死 id 静默削减甚至清零。
+     */
+    private suspend fun resolveHits(pairs: List<Pair<Long, Float>>, topK: Int): List<SemanticHit> {
+        if (pairs.isEmpty()) return emptyList()
+        val items = imageDao.getByIds(pairs.map { it.first }).associateBy { it.id }
+        return pairs.mapNotNull { (id, sim) -> items[id]?.let { SemanticHit(it, sim) } }
+            .take(topK)
+    }
+
+    private suspend fun describeImage(reader: ImageBytesReader, image: ImageEntity): String? {
         // 用 vision 模型给图片生成 50 词中文描述
-        val base64 = AiTaggingShared.encodeImageBase64(provider, image.path) ?: return null
+        val base64 = try {
+            AiTaggingShared.encodeImageBase64(reader, image.path)
+        } catch (ae: AccessException) {
+            // 读取基础设施失败：本次以图搜图放弃即可，不涉及任何落库
+            Timber.w(ae, "describeImage: read infra failed for ${image.path}")
+            null
+        } ?: return null
         val resp = aiClient.chatCompletion(
             messages = listOf(
                 ChatMessage(
@@ -74,6 +84,11 @@ class SemanticSearchEngine(
             temperature = 0.2f,
         ) ?: return null
         return resp.content
+    }
+
+    private companion object {
+        /** Top-K 候选超采样倍数：吸收回表 active 过滤造成的名额损耗。 */
+        private const val OVERSAMPLE = 3
     }
 }
 

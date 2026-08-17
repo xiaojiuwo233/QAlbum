@@ -1,6 +1,7 @@
 package com.xjw.qalbum.data.remote
 
 import com.xjw.qalbum.data.preferences.SettingsRepository
+import com.xjw.qalbum.service.ai.AiPrivacyGuard
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -69,6 +70,15 @@ class OpenAiCompatClient(
         // 本地服务（LM Studio/Ollama 等）通常免鉴权，故 Key 可空，仅 endpoint 必填
         if (endpoint.isBlank()) {
             Timber.w("OpenAiCompatClient: AI endpoint is empty")
+            return@withContext null
+        }
+        // C148 上传链路兜底：带图请求发往公网 endpoint 且用户从未在隐私弹窗确认过时拒绝发送。
+        // UI 侧「启用时确认 + 改公网地址时确认」是第一道闸，这里兜住所有绕过弹窗的路径。
+        if (messages.any { it.imageBase64 != null } &&
+            AiPrivacyGuard.classify(endpoint) == AiPrivacyGuard.Safety.PUBLIC_INTERNET &&
+            !settings.isAiPublicEndpointAcknowledged(endpoint)
+        ) {
+            Timber.w("OpenAiCompatClient: 拒绝向未经隐私确认的公网 endpoint 上传图片")
             return@withContext null
         }
         val disableThinking = settings.aiDisableThinking.first()

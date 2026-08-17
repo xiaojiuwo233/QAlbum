@@ -27,8 +27,8 @@ jobs:
 
     steps:
       # 1. 拉取源码
-      # fetch-depth: 0 拉取完整历史；否则默认浅克隆只有 1 个提交，
-      # versionCode = git 提交总数会退化成 1
+      # versionCode 取 HEAD 提交时间戳分钟数（浅克隆即可得）；fetch-depth: 0 仅让
+      # 「git 时间戳不可用时回退 rev-list --count」的兜底路径拿到真实提交总数
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -49,7 +49,9 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x ./gradlew
 
-      # 5. 还原 release 签名密钥（来自 GitHub Secrets 的 base64；未配置则跳过，构建回退 debug 签名）
+      # 5. 还原 release 签名密钥（来自 GitHub Secrets 的 base64；未配置则跳过，构建回退 debug 签名）。
+      #    Secret 存在时给构建步骤追加 -PrequireReleaseSigning=true：解码失败/密码缺失直接硬失败，
+      #    防止静默产出 debug 签名的「release」APK；fork 无 Secret 时不加该 flag，仍可构建
       - name: Decode keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
@@ -57,24 +59,46 @@ jobs:
           if [ -n "$KEYSTORE_BASE64" ]; then
             echo "$KEYSTORE_BASE64" | base64 -d > "$GITHUB_WORKSPACE/release.keystore"
             echo "已写入 release.keystore（$(stat -c%s "$GITHUB_WORKSPACE/release.keystore") bytes）"
+            echo "GRADLE_SIGNING_FLAG=-PrequireReleaseSigning=true" >> "$GITHUB_ENV"
           else
             echo "未配置 KEYSTORE_BASE64 Secret，本次构建回退使用 debug 签名"
           fi
 
-      # 6. 构建 Release APK（配置了密钥则用正式 release 签名，多次构建签名一致、可覆盖升级）
+      # 6. JVM 单测
+      - name: Run unit tests
+        run: ./gradlew testDebugUnitTest --stacktrace
+
+      # 7. GitHub Linux runner 上启用 KVM，执行 Room 迁移/分页/隐私等设备测试
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run instrumented tests
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: default
+          arch: x86_64
+          profile: pixel_7_pro
+          disable-animations: true
+          script: ./gradlew connectedDebugAndroidTest --stacktrace --no-parallel --max-workers=1
+
+      # 8. 构建 Release APK（配置了密钥则用正式 release 签名，多次构建签名一致、可覆盖升级）
       - name: Build Release APK
         env:
           KEYSTORE_FILE: ${{ github.workspace }}/release.keystore
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: ./gradlew assembleRelease --stacktrace
+        run: ./gradlew assembleRelease --stacktrace $GRADLE_SIGNING_FLAG
 
-      # 7. 输出产物路径与体积，便于在构建日志中确认
+      # 9. 输出产物路径与体积，便于在构建日志中确认
       - name: List APK output
         run: ls -lh app/build/outputs/apk/release/
 
-      # 8. 上传 APK 为可下载产物（在本次 workflow run 的 Artifacts 区下载）
+      # 10. 上传 APK 为可下载产物（在本次 workflow run 的 Artifacts 区下载）
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:

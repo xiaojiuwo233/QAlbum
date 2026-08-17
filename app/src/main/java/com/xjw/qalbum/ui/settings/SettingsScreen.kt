@@ -327,7 +327,16 @@ fun ScanSettingsScreen(
                 value = state.chatpicPath,
                 label = stringResource(R.string.settings_chatpic_path),
                 supporting = "TIM / 国际版 QQ 路径不同，请按需修改。",
-                onSave = { viewModel.setChatpicPath(it.trim()); notify("已保存路径") },
+                onSave = {
+                    // SettingsRepository 对 blank 输入静默拒绝（不落盘），这里前置拦截并如实提示，
+                    // 避免「已保存」但下次进入回弹旧值
+                    if (it.trim().isBlank()) {
+                        notify("路径不能为空，未保存")
+                    } else {
+                        viewModel.setChatpicPath(it.trim())
+                        notify("已保存路径")
+                    }
+                },
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = {
@@ -371,6 +380,7 @@ fun AnalysisSettingsScreen(
     val autoFavorite by viewModel.autoFavoriteConfig.collectAsState()
     val ocrModelStatus by viewModel.ocrModelStatus.collectAsState()
     val ocrDownload by viewModel.ocrModelDownloadState.collectAsState()
+    val analysisResetting by viewModel.analysisResetting.collectAsState()
     var showResetDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(ocrDownload) {
@@ -528,7 +538,17 @@ fun AnalysisSettingsScreen(
 
         SettingsSection(header = "重置分析") {
             SettingsBlurb("清除完成标记后，下次分析会重新处理对应图片。")
-            OutlinedButton(onClick = { showResetDialog = true }) { Text("重置完成标记…") }
+            OutlinedButton(
+                onClick = { showResetDialog = true },
+                enabled = !analysisResetting,
+            ) { Text(if (analysisResetting) "正在重置…" else "重置完成标记…") }
+        }
+
+        // 重置在 appScope 后台跑（约 200 万行 UPDATE 需数十秒）：完成沿状态边沿提示
+        var wasResetting by remember { mutableStateOf(false) }
+        LaunchedEffect(analysisResetting) {
+            if (wasResetting && !analysisResetting) notify("分析标记已重置")
+            wasResetting = analysisResetting
         }
     }
 
@@ -791,6 +811,8 @@ fun AiSettingsScreen(
     val concurrency by viewModel.aiConcurrency.collectAsState()
     val maxTokens by viewModel.aiMaxTokens.collectAsState()
     var showPrivacyDialog by remember { mutableStateOf(false) }
+    // 已启用状态下把 Endpoint 改成公网地址：同样必须走隐私确认，否则「先启用再改地址」可完全绕过警告
+    var showEndpointPrivacyDialog by remember { mutableStateOf(false) }
     var keyVisible by remember { mutableStateOf(false) }
 
     SettingsDetailScaffold(
@@ -831,7 +853,15 @@ fun AiSettingsScreen(
                 label = "Endpoint（OpenAI 兼容）",
                 placeholder = "https://api.openai.com 或 http://192.168.1.100:11434",
                 supporting = "填根地址或带 /v1 都可（如 http://192.168.5.25:1234）。本地服务可不填 Key。",
-                onSave = { viewModel.setAiEndpoint(it); notify("已保存 Endpoint") },
+                onSave = {
+                    viewModel.setAiEndpoint(it)
+                    notify("已保存 Endpoint")
+                    if (state.aiEnabled &&
+                        AiPrivacyGuard.classify(it.trim()) == AiPrivacyGuard.Safety.PUBLIC_INTERNET
+                    ) {
+                        showEndpointPrivacyDialog = true
+                    }
+                },
             )
             InstantSaveTextField(
                 value = state.aiApiKey,
@@ -912,9 +942,25 @@ fun AiSettingsScreen(
         PrivacyWarningDialog(
             onConfirm = {
                 showPrivacyDialog = false
+                // 确认标记持久化：上传链路（OpenAiCompatClient 带图请求）据此放行公网上传
+                viewModel.acknowledgePublicAiEndpoint()
                 viewModel.setAiEnabled(true)
             },
             onDismiss = { showPrivacyDialog = false },
+        )
+    }
+
+    if (showEndpointPrivacyDialog) {
+        // 拒绝（含点外部关闭）按安全侧处理：关闭 AI 分析，公网地址保留但不再被使用
+        PrivacyWarningDialog(
+            onConfirm = {
+                showEndpointPrivacyDialog = false
+                viewModel.acknowledgePublicAiEndpoint()
+            },
+            onDismiss = {
+                showEndpointPrivacyDialog = false
+                viewModel.setAiEnabled(false)
+            },
         )
     }
 }
@@ -1003,6 +1049,12 @@ fun AccessSettingsScreen(
     val accessStatus by viewModel.accessStatus.collectAsState()
     val shizukuStatus by rememberShizukuStatus()
     val context = LocalContext.current
+
+    // Shizuku binder/授权状态变化（授权对话框是异步回调）后刷新连通性结论，
+    // 避免停留在授权前测出的过期「✘」；未测试过则保持「尚未测试」不打扰
+    LaunchedEffect(shizukuStatus.state) {
+        if (accessStatus != AccessStatus.Unknown) viewModel.checkAccess()
+    }
 
     SettingsDetailScaffold(
         title = SettingsCategory.ACCESS.title,

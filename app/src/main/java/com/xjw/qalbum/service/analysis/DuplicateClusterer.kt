@@ -16,6 +16,14 @@ import kotlin.math.max
  *   - dEdge  = 边缘网格归一化距离（文字密度 / 图表 vs 文字）
  *   随后连通分量 > [maxVisualGroupSize] 整组判定误聚丢弃（兜底）。
  *   缺任一视觉特征（pHash/blockHash/featureGrid）或纯色图不参与视觉聚类。
+ *
+ * 候选对生成用 **pHash 多带 LSH**（[BAND_COUNT] 个 [BAND_BITS] bit 带，各带独立分桶，桶内两两）：
+ * 单带高 16 位分桶时，桶键恰落在 DCT 最高频（重压缩最易翻转）的位上，d=3 的真近重对同桶概率仅
+ * 约 41%、d=7 只剩 12%；4×16 带按鸽笼原理保证 d≤3 必有一带完全相同（召回 100%），d=4..7 也有
+ * 多带兜底。8×8 带虽可对 d≤7 全保证，但 8bit 键空间在百万级图上单桶配对量不可行，不取。
+ *
+ * 桶内两两比较**廉价门槛在前**（已连通跳过 → pHash 汉明 → 宽高比 → 人工排斥），全部通过才计算
+ * 三种特征距离并请模型合议——倾斜大桶（聊天截图库常见）里绝大多数配对在第一二步就被淘汰。
  */
 object DuplicateClusterer {
 
@@ -46,6 +54,14 @@ object DuplicateClusterer {
     const val BLOCK_HASH_BITS = 256
     const val GRID_BYTES = 16
 
+    /** pHash 多带 LSH：64bit 拆 [BAND_COUNT] 个 [BAND_BITS] bit 带。 */
+    const val BAND_COUNT = 4
+    const val BAND_BITS = 16
+    const val BAND_KEY_SPACE = 1 shl BAND_BITS
+
+    /** 第 [band] 带的桶键（0 ≤ band < [BAND_COUNT]）。 */
+    fun bandKey(phash: Long, band: Int): Int = ((phash ushr (band * BAND_BITS)) and 0xFFFFL).toInt()
+
     fun cluster(
         items: List<Item>,
         startGroupId: Long,
@@ -65,7 +81,7 @@ object DuplicateClusterer {
             .values
             .forEach { members ->
                 if (members.size <= 1) return@forEach
-                val best = members.maxByOrNull(::qualityKey)!!
+                val best = members.maxByOrNull { qualityKey(it.width, it.height, it.size) }!!
                 members.forEach {
                     assignments += Assignment(it.id, nextGroup, it.id == best.id)
                     assignedExact += it.id
@@ -75,42 +91,18 @@ object DuplicateClusterer {
 
         // 2) 视觉重复：未被精确分组、有 pHash + blockHash + featureGrid、且非纯色的图
         val visualItems = items.filter {
-            it.id !in assignedExact && it.phash != null && it.blockHash != null &&
-                it.featureGrid != null && !it.isBlank
+            it.id !in assignedExact && isVisualEligible(it.phash, it.blockHash, it.featureGrid, it.isBlank)
         }
         if (visualItems.isNotEmpty()) {
             val byId = visualItems.associateBy { it.id }
-            val uf = UnionFind(visualItems.map { it.id })
-            // 共享任一 cohort 的两图已被用户裁定「非重复」，禁止连边（人工拆分的持久化约束）
-            fun sharesCohort(a: Long, b: Long): Boolean {
-                val ca = exclusions[a] ?: return false
-                val cb = exclusions[b] ?: return false
-                return ca.any { it in cb }
-            }
-            // 高 16 位分桶，桶内两两比较，避免 O(N²)
-            visualItems.groupBy { (it.phash!! ushr 48) and 0xFFFF }.values.forEach { bucket ->
-                for (i in bucket.indices) {
-                    for (j in i + 1 until bucket.size) {
-                        val a = bucket[i]
-                        val b = bucket[j]
-                        val dBlock = blockHashDistance(a.blockHash!!, b.blockHash!!) / BLOCK_HASH_BITS.toDouble()
-                        val dLuma = lumaDistance(a.featureGrid!!, b.featureGrid!!)
-                        val dEdge = edgeDistance(a.featureGrid!!, b.featureGrid!!)
-                        if (hamming(a.phash!!, b.phash!!) < visualThreshold &&
-                            model.isSimilar(dBlock, dLuma, dEdge) &&
-                            aspectClose(a, b, aspectTolerance) &&
-                            !sharesCohort(a.id, b.id)
-                        ) {
-                            uf.union(a.id, b.id)
-                        }
-                    }
-                }
-            }
+            val uf = LazyUnionFind()
+            matchAllBands(visualItems, uf, visualThreshold, model, aspectTolerance, exclusions)
             uf.components().values.forEach { ids ->
                 if (ids.size <= 1) return@forEach
                 if (ids.size > maxVisualGroupSize) return@forEach // 超大视觉组 = 误聚，整组丢弃
                 val members = ids.mapNotNull { byId[it] }
-                val best = members.maxByOrNull(::qualityKey) ?: return@forEach
+                if (members.size <= 1) return@forEach
+                val best = members.maxByOrNull { qualityKey(it.width, it.height, it.size) } ?: return@forEach
                 members.forEach { assignments += Assignment(it.id, nextGroup, it.id == best.id) }
                 nextGroup++
             }
@@ -118,24 +110,109 @@ object DuplicateClusterer {
         return assignments
     }
 
-    /** 质量排序键（像素优先、再比文件大小）：用于选组内保留图（best） */
-    private fun qualityKey(item: Item): Long = item.width.toLong() * item.height * 1000 + item.size
+    /** 是否具备参与视觉聚类的全部前提（缺任一特征 / 纯色 → 保守不聚）。 */
+    fun isVisualEligible(phash: Long?, blockHash: ByteArray?, featureGrid: ByteArray?, isBlank: Boolean): Boolean =
+        phash != null && blockHash != null && featureGrid != null && !isBlank
 
-    private class UnionFind(initial: List<Long>) {
-        private val parent = HashMap<Long, Long>().apply { initial.forEach { put(it, it) } }
-        fun find(x: Long): Long {
-            var node = x
-            while (parent[node] != node) {
-                parent[node] = parent[parent[node]] ?: node
-                node = parent[node] ?: node
+    /** 对 [items] 按全部带各建一次桶并做桶内配对，连边累积进 [uf]。 */
+    fun matchAllBands(
+        items: List<Item>,
+        uf: LazyUnionFind,
+        visualThreshold: Int,
+        model: SimilarityModel,
+        aspectTolerance: Double = DEFAULT_ASPECT_TOLERANCE,
+        exclusions: Map<Long, Set<Long>> = emptyMap(),
+    ) {
+        for (band in 0 until BAND_COUNT) {
+            items.groupBy { bandKey(it.phash!!, band) }.values.forEach { bucket ->
+                matchBucket(bucket, uf, visualThreshold, model, aspectTolerance, exclusions)
             }
-            return node
         }
+    }
+
+    /**
+     * 单桶内两两配对判定，通过者 union 进 [uf]。廉价检查在前：已连通（多带重复配对天然去重）、
+     * pHash 汉明门槛、宽高比、人工排斥；全过后才计算 blockHash/亮度/边缘三种距离 + 模型合议。
+     * 要求桶内条目均已通过 [isVisualEligible]。
+     */
+    fun matchBucket(
+        bucket: List<Item>,
+        uf: LazyUnionFind,
+        visualThreshold: Int,
+        model: SimilarityModel,
+        aspectTolerance: Double = DEFAULT_ASPECT_TOLERANCE,
+        exclusions: Map<Long, Set<Long>> = emptyMap(),
+    ) {
+        if (bucket.size <= 1) return
+        for (i in bucket.indices) {
+            val a = bucket[i]
+            for (j in i + 1 until bucket.size) {
+                val b = bucket[j]
+                if (uf.connected(a.id, b.id)) continue
+                if (hamming(a.phash!!, b.phash!!) >= visualThreshold) continue
+                if (!aspectClose(a, b, aspectTolerance)) continue
+                if (sharesCohort(exclusions, a.id, b.id)) continue
+                val dBlock = blockHashDistance(a.blockHash!!, b.blockHash!!) / BLOCK_HASH_BITS.toDouble()
+                val dLuma = lumaDistance(a.featureGrid!!, b.featureGrid!!)
+                val dEdge = edgeDistance(a.featureGrid!!, b.featureGrid!!)
+                if (model.isSimilar(dBlock, dLuma, dEdge)) uf.union(a.id, b.id)
+            }
+        }
+    }
+
+    /** 共享任一 cohort 的两图已被用户裁定「非重复」，禁止连边（人工拆分的持久化约束）。 */
+    fun sharesCohort(exclusions: Map<Long, Set<Long>>, a: Long, b: Long): Boolean {
+        val ca = exclusions[a] ?: return false
+        val cb = exclusions[b] ?: return false
+        return ca.any { it in cb }
+    }
+
+    /** 质量排序键（像素优先、再比文件大小）：用于选组内保留图（best） */
+    fun qualityKey(width: Int, height: Int, size: Long): Long = width.toLong() * height * 1000 + size
+
+    /**
+     * 惰性并查集：只为真正连过边的 id 建条目。全库预注册 200w 个装箱 Long 条目（约 160MB）
+     * 是旧实现 OOM 的来源之一；重复子集远小于全库，惰性建条目后内存与「实际连边的图」成正比。
+     */
+    class LazyUnionFind {
+        private val parent = HashMap<Long, Long>()
+
+        val size: Int get() = parent.size
+
+        fun find(x: Long): Long {
+            var node = parent[x] ?: return x
+            if (node == x) return x
+            // 迭代式路径压缩
+            var root = node
+            while (true) {
+                val p = parent[root] ?: break
+                if (p == root) break
+                root = p
+            }
+            var cur = x
+            while (cur != root) {
+                val next = parent[cur] ?: break
+                parent[cur] = root
+                cur = next
+            }
+            return root
+        }
+
+        /** 两 id 是否已在同一连通分量（任一从未连过边 → false，不建条目）。 */
+        fun connected(a: Long, b: Long): Boolean {
+            if (a !in parent || b !in parent) return false
+            return find(a) == find(b)
+        }
+
         fun union(a: Long, b: Long) {
+            parent.putIfAbsent(a, a)
+            parent.putIfAbsent(b, b)
             val ra = find(a)
             val rb = find(b)
             if (ra != rb) parent[ra] = rb
         }
+
+        /** 根 → 成员列表（仅含连过边的 id；单例天然不出现）。 */
         fun components(): Map<Long, List<Long>> = parent.keys.groupBy { find(it) }
     }
 

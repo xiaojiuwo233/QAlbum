@@ -80,11 +80,15 @@ fun LogScreen(
     var showClearDialog by remember { mutableStateOf(false) }
 
     val listState = rememberLazyListState()
-    // 仅当已在底部附近时才自动跟随，避免用户上滑查看历史时被新日志拽回去
+    // 仅当已在底部附近时才自动跟随，避免用户上滑查看历史时被新日志拽回去。
+    // 判定必须完全基于同一份 layoutInfo 快照（visibleItemsInfo 与 totalItemsCount 同源）：
+    // entries 更新触发 LaunchedEffect 时布局尚未重算，若拿旧可见项对比新 lastIndex，
+    // 一次采样批量进 ≥2 条日志就会误判「不在底部」，跟随从此永久失效
     val nearBottom by remember {
         derivedStateOf {
-            val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
-            last >= ui.entries.lastIndex - 1
+            val info = listState.layoutInfo
+            val last = info.visibleItemsInfo.lastOrNull()?.index ?: -1
+            last >= info.totalItemsCount - 2
         }
     }
     LaunchedEffect(ui.entries) {

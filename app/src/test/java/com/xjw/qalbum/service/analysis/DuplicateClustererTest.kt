@@ -75,6 +75,19 @@ class DuplicateClustererTest {
     }
 
     @Test
+    fun visualSimilarWithHighBandDiffStillClustered() {
+        // pHash 差异全在高 16 位（旧单带分桶会把两图分进不同桶、永远不比较）：
+        // 多带 LSH 下低位带完全相同 → 仍能成为候选并聚类
+        val items = listOf(
+            item(1, phash = 0L, blockHash = blockHash(), featureGrid = feature(), w = 500, h = 500),
+            item(2, phash = 0b111L shl 48, blockHash = blockHash(), featureGrid = feature(), w = 500, h = 500),
+        )
+        val result = DuplicateClusterer.cluster(items, startGroupId = 1)
+        assertEquals(setOf(1L, 2L), result.map { it.id }.toSet())
+        assertEquals(1, result.map { it.groupId }.toSet().size)
+    }
+
+    @Test
     fun visualDistantPhashNotClustered() {
         // 视觉特征近，但 pHash 距离远（16 >= 8）→ 硬门槛挡住，不聚
         val items = listOf(

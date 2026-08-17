@@ -41,6 +41,7 @@ class DashboardViewModel(
         imageRepository.observeThumbnailTrashSummary(),
     ) { core, (breakdown, analysis), health, quarantine, thumbnailTrash ->
         DashboardUiState(
+            loaded = true,
             imageCount = core.imageCount,
             totalSizeBytes = core.totalSize,
             breakdown = breakdown,
@@ -100,6 +101,8 @@ class DashboardViewModel(
 }
 
 data class DashboardUiState(
+    /** 首批 DB 统计是否已到达：区分「真 0 张」与查询未返回的初始占位 0（首启引导卡靠它防闪现） */
+    val loaded: Boolean = false,
     val imageCount: Int = 0,
     val totalSizeBytes: Long = 0L,
     val breakdown: List<ImageDao.SourceBreakdownRow> = emptyList(),

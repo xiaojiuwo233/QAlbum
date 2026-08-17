@@ -120,7 +120,8 @@ internal fun CleanupReviewScreen(
         if (category == null) items else items.filter { itemReason(it) == category }
     }
     val visibleItems = remember(filteredItems, sort) { sortReviewItems(filteredItems, sort) }
-    val selectedBytes = review?.selectedBytes(selectedIds) ?: 0L
+    // selectedBytes 是 O(已选数) 的 map 求和（sizeById 在批次内懒建一次），remember 避免无关重组重复求和
+    val selectedBytes = remember(review, selectedIds) { review?.selectedBytes(selectedIds) ?: 0L }
 
     Scaffold(
         topBar = {
@@ -247,7 +248,8 @@ internal fun CleanupReviewScreen(
             title = { Text("移入回收站？") },
             text = {
                 Text(
-                    "本次将清理 ${selectedIds.size} 张，共 ${formatBytes(selectedBytes)}。移入回收站后仍可恢复。",
+                    "本次将清理 ${selectedIds.size} 张，共 ${formatBytes(selectedBytes)}。移入回收站后仍可恢复。\n\n" +
+                        "注意：回收站保存在应用专属目录，卸载或清除应用数据将永久丢失其中照片。",
                 )
             },
             confirmButton = {
@@ -278,8 +280,7 @@ internal fun CleanupReviewScreen(
             dismissButton = { TextButton(onClick = { showKeepConfirm = false }) { Text("取消") } },
         )
     }
-
-    purgeProgress?.let { PurgeProgressDialog(it) }
+    // 清理进度模态由 CleanupScreen 根部统一展示（重建后落回主页也不丢屏蔽）
 }
 
 @Composable
@@ -448,7 +449,13 @@ private fun SingleTile(
             Box(Modifier.matchParentSize().background(MaterialTheme.colorScheme.error.copy(alpha = 0.20f)))
         }
         TileBadge(text = item.reason, modifier = Modifier.align(Alignment.BottomStart))
-        SelectionCircle(selected = selected, modifier = Modifier.align(Alignment.TopEnd))
+        // 保护图（用户保留 / 已收藏）：明确标识且不可勾选（VM 侧同样拦截勾选）
+        val protection = protectionLabel(item.image)
+        if (protection != null) {
+            TileBadge(text = protection, modifier = Modifier.align(Alignment.TopEnd))
+        } else {
+            SelectionCircle(selected = selected, modifier = Modifier.align(Alignment.TopEnd))
+        }
     }
 }
 
@@ -547,19 +554,21 @@ fun CleanupReviewGroupScreen(
     LaunchedEffect(groupId, liveGroup) {
         if (snapshot == null && liveGroup != null) snapshot = liveGroup.members
     }
-    val members = snapshot ?: liveGroup?.members ?: emptyList()
 
-    // reviewBatch 里仍在审核的 id（无论现在属于 Group 还是已被转成 Single）
-    val liveIds: Set<Long> = remember(review) {
-        buildSet {
+    // reviewBatch 里仍在审核的实体（无论现在属于 Group 还是已被转成 Single）：
+    // 展示用快照要叠加 live 实体，收藏 / 保留状态变更（预览里点收藏）才能即时反映
+    val liveEntities: Map<Long, ImageEntity> = remember(review) {
+        buildMap {
             review?.items?.forEach { item ->
                 when (item) {
-                    is ReviewItem.Single -> add(item.image.id)
-                    is ReviewItem.Group -> item.members.forEach { add(it.id) }
+                    is ReviewItem.Single -> put(item.image.id, item.image)
+                    is ReviewItem.Group -> item.members.forEach { put(it.id, it) }
                 }
             }
         }
     }
+    val liveIds: Set<Long> = liveEntities.keys
+    val members = (snapshot ?: liveGroup?.members ?: emptyList()).map { liveEntities[it.id] ?: it }
 
     var previewId by remember { mutableStateOf<Long?>(null) }
     var showSplitDialog by remember { mutableStateOf(false) }
@@ -667,6 +676,7 @@ fun CleanupReviewGroupScreen(
                     isKeeper = member.id == keeperId,
                     selected = member.id in selectedIds,
                     processed = processed,
+                    protection = protectionLabel(member),
                     onToggle = { viewModel.setReviewItemSelected(member.id, member.id !in selectedIds) },
                     onLongPress = { if (!processed) previewId = member.id },
                 )
@@ -735,6 +745,7 @@ private fun GroupMemberTile(
     isKeeper: Boolean,
     selected: Boolean,
     processed: Boolean,
+    protection: String?,
     onToggle: () -> Unit,
     onLongPress: () -> Unit,
 ) {
@@ -745,7 +756,10 @@ private fun GroupMemberTile(
             .aspectRatio(1f)
             .clip(RoundedCornerShape(12.dp))
             .background(MaterialTheme.colorScheme.surfaceContainerHighest)
-            .combinedClickable(onClick = { if (!processed) onToggle() }, onLongClick = onLongPress),
+            .combinedClickable(
+                onClick = { if (!processed && protection == null) onToggle() },
+                onLongClick = onLongPress,
+            ),
     ) {
         AsyncImage(
             model = ImageRequest.Builder(context).data(ImageEntityModel(image)).crossfade(true).build(),
@@ -757,6 +771,9 @@ private fun GroupMemberTile(
             // 已处理（已清理 / 已保留）：压暗 + 角标，不再参与勾选
             Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.55f)))
             TileBadge(text = "已处理", modifier = Modifier.align(Alignment.TopEnd))
+        } else if (protection != null) {
+            // 保护图（用户保留 / 已收藏）：明确标识且不可勾入删除（VM 侧同样拦截）
+            TileBadge(text = protection, modifier = Modifier.align(Alignment.TopEnd))
         } else {
             if (selected) {
                 Box(Modifier.matchParentSize().background(MaterialTheme.colorScheme.error.copy(alpha = 0.22f)))
@@ -822,14 +839,17 @@ internal fun ReviewPreviewPager(
         ) {
             val isFav = current.isFavorite
             val isSelected = current.id in selectedIds
+            val isProtected = isProtectedImage(current)
             PreviewAction(
                 icon = if (isFav) Icons.Outlined.Favorite else Icons.Outlined.FavoriteBorder,
                 label = if (isFav) "已收藏" else "收藏",
                 onClick = { onFavorite(current.id, !isFav) },
             )
+            // 保护图（用户保留 / 已收藏）不可勾入删除集；取消收藏后恢复可勾选
             PreviewAction(
                 icon = if (isSelected) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
-                label = if (isSelected) "已勾选" else "勾选",
+                label = if (isProtected) "已保护" else if (isSelected) "已勾选" else "勾选",
+                enabled = !isProtected,
                 onClick = { onToggleSelect(current.id) },
             )
             PreviewAction(
@@ -899,11 +919,12 @@ private fun itemReason(item: ReviewItem): String = when (item) {
     is ReviewItem.Group -> CleanupRules.REASON_DUPLICATE
 }
 
-/** 当前可见项里「可删除」的图片 id：单图本身 + 重复组内非保留图。 */
+/** 当前可见项里「可删除」的图片 id：单图本身 + 重复组内非保留图；保护（user_keep/收藏）图排除。 */
 private fun deletableIds(items: List<ReviewItem>): List<Long> = items.flatMap { item ->
     when (item) {
-        is ReviewItem.Single -> listOf(item.image.id)
-        is ReviewItem.Group -> item.members.map { it.id }.filter { it != item.keeperId }
+        is ReviewItem.Single -> if (isProtectedImage(item.image)) emptyList() else listOf(item.image.id)
+        is ReviewItem.Group ->
+            item.members.filter { it.id != item.keeperId && !isProtectedImage(it) }.map { it.id }
     }
 }
 

@@ -35,6 +35,8 @@ import com.xjw.qalbum.ui.logs.LogViewModel
 import com.xjw.qalbum.ui.settings.SettingsViewModel
 import com.xjw.qalbum.worker.AnalysisWorker
 import com.xjw.qalbum.worker.IncrementalScanWorker
+import com.xjw.qalbum.worker.QuarantinePurgeWorker
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -43,6 +45,7 @@ import okhttp3.logging.HttpLoggingInterceptor
 import org.koin.androidx.workmanager.dsl.worker
 import org.koin.core.module.dsl.viewModel
 import org.koin.dsl.module
+import timber.log.Timber
 import java.util.concurrent.TimeUnit
 
 /**
@@ -60,18 +63,32 @@ val appModule = module {
     single { get<AppDatabase>().ocrDao() }
     single { get<AppDatabase>().tagDao() }
     single { get<AppDatabase>().cleanupDao() }
-    single { get<AppDatabase>().matchedMessageDao() }
-    single { get<AppDatabase>().userActionDao() }
     single { get<AppDatabase>().embeddingDao() }
     single { get<AppDatabase>().dirSnapshotDao() }
     single { get<AppDatabase>().dedupExclusionDao() }
 
     single { SettingsRepository(get(), appScope = get()) }
-    single { ImageRepository(imageDao = get(), ocrDao = get(), dedupExclusionDao = get()) }
+    single {
+        ImageRepository(
+            db = get(),
+            imageDao = get(),
+            ocrDao = get(),
+            dedupExclusionDao = get(),
+            tagDao = get(),
+            embeddingDao = get(),
+        )
+    }
 
     // 应用级协程作用域：用于必须脱离 UI / 页面生命周期完成的写入（如设置落盘）。
     // 与 AnalysisPipeline / ScanController 各自持有的 IO 作用域同范式，随进程存活。
-    single { CoroutineScope(SupervisorJob() + Dispatchers.IO) }
+    // 落在此 scope 的写入均为 fire-and-forget（无调用方 try/catch）；磁盘满等 IO 失败
+    // 必须在这里兜住记日志，否则未捕获异常经默认 handler 直接杀进程。
+    single {
+        CoroutineScope(
+            SupervisorJob() + Dispatchers.IO +
+                CoroutineExceptionHandler { _, t -> Timber.e(t, "appScope 后台任务失败") }
+        )
+    }
 
     // ---- 文件访问 ----
 
@@ -95,10 +112,10 @@ val appModule = module {
 
     // ---- 分析 / 清理 / OCR / AI 服务 ----
 
-    single { DuplicateDetector(imageDao = get(), dedupExclusionDao = get()) }
+    single { DuplicateDetector(db = get(), imageDao = get(), dedupExclusionDao = get()) }
     single { FileOcrModelStore(context = get()) }
     single<OcrModelStore> { get<FileOcrModelStore>() }
-    single { OcrModelDownloadService(modelStore = get(), okHttpClient = get(), appScope = get()) }
+    single { OcrModelDownloadService(modelStore = get(), okHttpClient = get(), appScope = get(), runner = get()) }
     single { AndroidPaddleOcrFactory(context = get()) }
     single<PaddleOcrRunner> { PaddleOnnxOcrRunner(factory = get<AndroidPaddleOcrFactory>()) }
     single { PaddleOcrEngine(modelStore = get(), runner = get()) }
@@ -133,18 +150,28 @@ val appModule = module {
         QuarantineManager(
             context = get(),
             accessManager = get(),
+            db = get(),
             imageDao = get(),
             cleanupDao = get(),
             settings = get(),
+            fileOpsClient = get(),
+            imageRepository = get(),
         )
     }
-    single { ThumbnailTrashManager(accessManager = get(), imageDao = get(), fileOpsClient = get()) }
+    single {
+        ThumbnailTrashManager(
+            accessManager = get(),
+            imageDao = get(),
+            fileOpsClient = get(),
+            imageRepository = get(),
+        )
+    }
     single { ImageFileManager(context = get(), accessManager = get(), imageDao = get()) }
     single { CleanupController(recommender = get(), quarantineManager = get(), cleanupDao = get()) }
 
     // ---- Coil ImageLoader（全局单例，通过 Koin 暴露，App.onCreate 安装为 SingletonImageLoader） ----
 
-    single { buildImageLoader(context = get(), accessManager = get()) }
+    single { buildImageLoader(context = get(), accessManager = get(), fileOpsClient = get()) }
 
     // ---- 网络（Phase 4 AI 使用，先初始化好） ----
 
@@ -169,6 +196,7 @@ val appModule = module {
             imageDao = get(),
             ocrDao = get(),
             embeddingDao = get(),
+            db = get(),
             ocrModelDownload = get(),
             appScope = get(),
         )
@@ -187,6 +215,7 @@ val appModule = module {
             imageFileManager = get(),
             quarantineManager = get(),
             settings = get(),
+            appScope = get(),
         )
     }
     viewModel {
@@ -199,6 +228,7 @@ val appModule = module {
     }
     viewModel {
         com.xjw.qalbum.ui.cleanup.CleanupViewModel(
+            app = get(),
             cleanupController = get(),
             analysisPipeline = get(),
             thumbnailTrashManager = get(),
@@ -206,6 +236,7 @@ val appModule = module {
             settings = get(),
             tagDao = get(),
             imageFileManager = get(),
+            appScope = get(),
         )
     }
     viewModel {
@@ -222,6 +253,7 @@ val appModule = module {
             cleanupController = get(),
             imageFileManager = get(),
             settings = get(),
+            appScope = get(),
         )
     }
     viewModel { LogViewModel() }
@@ -230,4 +262,5 @@ val appModule = module {
 
     worker { IncrementalScanWorker(get(), get()) }
     worker { AnalysisWorker(get(), get()) }
+    worker { QuarantinePurgeWorker(get(), get()) }
 }

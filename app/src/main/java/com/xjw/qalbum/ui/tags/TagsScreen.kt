@@ -314,7 +314,8 @@ private fun TagImagesContent(
                                 val ids = selectedIds
                                 selectedIds = emptySet()
                                 viewModel.removeTagBulk(tag, ids) { count ->
-                                    Toast.makeText(context, "已取消标签 $count 张", Toast.LENGTH_SHORT).show()
+                                    val msg = if (count > 0) "已取消标签 $count 张" else "取消标签失败"
+                                    Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                                 }
                             },
                             enabled = !busy,

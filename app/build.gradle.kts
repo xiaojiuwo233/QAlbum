@@ -6,6 +6,7 @@ plugins {
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.ksp)
+    alias(libs.plugins.androidx.room)
 }
 
 // release 签名来源：本地优先 keystore.properties，CI 用环境变量；
@@ -18,12 +19,31 @@ fun signingProp(key: String, env: String): String? =
     (keystoreProps.getProperty(key) ?: System.getenv(env))?.takeIf { it.isNotBlank() }
 
 val releaseStorePath = signingProp("storeFile", "KEYSTORE_FILE")
-val hasReleaseSigning = releaseStorePath != null && rootProject.file(releaseStorePath).exists()
+val hasKeystoreFile = releaseStorePath != null && rootProject.file(releaseStorePath).exists()
+val hasReleaseSigning = hasKeystoreFile && listOf(
+    signingProp("storePassword", "KEYSTORE_PASSWORD"),
+    signingProp("keyAlias", "KEY_ALIAS"),
+    signingProp("keyPassword", "KEY_PASSWORD"),
+).all { it != null }
+
+// keystore 文件在但口令/别名不全：配置期立即失败，避免拖到签名任务晚期报难懂错误
+if (hasKeystoreFile && !hasReleaseSigning) {
+    throw GradleException(
+        "找到 release keystore（$releaseStorePath）但 storePassword/keyAlias/keyPassword 不全，" +
+            "请补齐 keystore.properties 或 KEYSTORE_PASSWORD/KEY_ALIAS/KEY_PASSWORD 环境变量"
+    )
+}
+// CI 配置了签名 Secret 时传 -PrequireReleaseSigning=true：签名信息缺失直接失败，
+// 防止静默产出 debug 签名的「release」APK（真机覆盖安装 INSTALL_FAILED_UPDATE_INCOMPATIBLE）
+if (providers.gradleProperty("requireReleaseSigning").getOrElse("false").toBoolean() && !hasReleaseSigning) {
+    throw GradleException("requireReleaseSigning=true 但未配置完整的 release 签名信息")
+}
 
 // ===== 版本号：基于 git =====
-// versionName = <baseVersionName>.<短hash>（如 0.2.0.a1b2c3d）；versionCode = 提交总数。
+// versionName = <baseVersionName>.<短hash>（如 0.2.0.a1b2c3d）；
+// versionCode = HEAD 提交时间戳的分钟数（%ct/60）。
 // 项目开启了 configuration cache，用 providers.exec 取 git 信息（缓存友好）；
-// 并读取 .git/HEAD 与 reflog 作为配置输入，使每次提交后缓存失效、hash/count 重新计算
+// 并读取 .git/HEAD 与 reflog 作为配置输入，使每次提交后缓存失效、hash/时间戳重新计算
 // （否则命中旧缓存会导致 hash 不刷新）。git worktree/submodule 下 .git 为文件、
 // 此锚点会失效，属可接受退化；CI 全新 checkout 不受影响。
 val baseVersionName = "0.2.0"
@@ -45,7 +65,14 @@ fun gitText(vararg args: String): String? = try {
 }
 
 val gitShortHash: String = gitText("rev-parse", "HEAD")?.take(7) ?: "nogit"
+
+// versionCode 用提交时间戳而非 rev-list count：count 在分支/PR/浅克隆/换机器间不单调，
+// 用户装过分支构建后再装 main 构建会 INSTALL_FAILED_VERSION_DOWNGRADE，被迫卸载重装丢库。
+// 时间戳分钟数跨分支单调且与代码新旧一致，浅克隆下同样可得；
+// git 不可用时回退提交总数（再退 1），仅保住可构建性，不保证单调。
 val gitCommitCount: Int = gitText("rev-list", "--count", "HEAD")?.toIntOrNull() ?: 1
+val gitVersionCode: Int = gitText("log", "-1", "--format=%ct")?.toLongOrNull()
+    ?.let { (it / 60L).toInt() } ?: gitCommitCount
 
 android {
     namespace = "com.xjw.qalbum"
@@ -55,25 +82,14 @@ android {
         applicationId = "com.xjw.qalbum"
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
-        versionCode = gitCommitCount
+        versionCode = gitVersionCode
         versionName = "$baseVersionName.$gitShortHash"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
 
-        // Room schema 导出位置，用于版本迁移
         ksp {
-            arg("room.schemaLocation", "$projectDir/schemas")
             arg("room.incremental", "true")
-        }
-    }
-
-    splits {
-        abi {
-            isEnable = true
-            reset()
-            include("arm64-v8a")
-            isUniversalApk = false
         }
     }
 
@@ -101,8 +117,13 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            // 有正式密钥时用 release 签名（CI 每次签名一致、可覆盖升级）；否则回退 debug
+            // 有正式密钥时用 release 签名（CI 每次签名一致、可覆盖升级）；否则回退 debug，
+            // 并在 versionName 上标注，让产物自证签名来源
             signingConfig = signingConfigs.getByName(if (hasReleaseSigning) "release" else "debug")
+            if (!hasReleaseSigning) versionNameSuffix = "-debugsigned"
+            // 仅 release 收窄到 arm64（面向 Shizuku/Root 真机 sideload，控制包体）；
+            // debug 不过滤 ABI，保证 x86_64 模拟器可安装（onnxruntime/OpenCV AAR 自带全 ABI）
+            ndk { abiFilters += "arm64-v8a" }
         }
     }
 
@@ -150,6 +171,15 @@ android {
         // 后续 Phase 4 引入 sqlite-vec 时把预编译的 .so 放在这里
         jniLibs.srcDirs("src/main/jniLibs")
     }
+    sourceSets.getByName("androidTest") {
+        assets.srcDir("$projectDir/schemas")
+    }
+}
+
+// Room schema 导出目录（写显式 Migration 依赖这些 JSON）。走官方插件把 schemas 注册为
+// 受管任务输出——裸 KSP arg 在 build cache 命中时不会重放导出，DB 升级后新 schema 可能不落盘。
+room {
+    schemaDirectory("$projectDir/schemas")
 }
 
 dependencies {
@@ -230,6 +260,7 @@ dependencies {
 
     // --- 测试 ---
     testImplementation(libs.junit)
+    androidTestImplementation(libs.androidx.room.testing)
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.androidx.test.espresso.core)
     androidTestImplementation(platform(libs.androidx.compose.bom))

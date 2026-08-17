@@ -96,6 +96,44 @@ class FileClassifierTest {
     }
 
     @Test
+    fun `deleted-quarantined 行上出现新内容时释放旧路径并作为新文件入库`() {
+        // QQ 会复用同一 Cache_{hash} 路径；终态记录保留统计，但不能吞掉后来落盘的新一代文件。
+        val rows = listOf(
+            row("Cache_d", 1, status = "deleted"),
+            row("Cache_q", 2, status = "quarantined"),
+        )
+        val fs = listOf(
+            file("Cache_d", size = 999, mtime = 2_000_000),
+            file("Cache_q", size = 888, mtime = 2_000_000),
+        )
+        val r = FileClassifier.classify(fs, rows, collectUnchanged = true)
+        assertTrue(r.changedFiles.isEmpty())
+        assertEquals(listOf("Cache_d", "Cache_q"), r.newFiles.map { it.name })
+        assertEquals(listOf(1L, 2L), r.retireTerminalIds)
+        assertTrue(r.reviveIds.isEmpty())
+        assertTrue(r.missingIds.isEmpty())
+        assertTrue(r.unchangedPairs.isEmpty())
+    }
+
+    @Test
+    fun `文件操作日志进行中时扫描不改写真实路径`() {
+        val rows = listOf(
+            row("Cache_pending", 1, status = "quarantine_pending"),
+            row("Cache_restore", 2, status = "restore_pending"),
+        )
+        val fs = listOf(
+            file("Cache_pending", size = 999),
+            file("Cache_restore", size = 888),
+        )
+
+        val r = FileClassifier.classify(fs, rows)
+
+        assertTrue(r.newFiles.isEmpty())
+        assertTrue(r.changedFiles.isEmpty())
+        assertTrue(r.retireTerminalIds.isEmpty())
+    }
+
+    @Test
     fun `深度校验时收集未变化配对`() {
         val r = FileClassifier.classify(
             listOf(file("Cache_a")),

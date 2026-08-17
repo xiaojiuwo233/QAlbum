@@ -55,5 +55,5 @@
 # --- Coil ---
 -dontwarn coil3.**
 
-# --- Compose ---
--keep class androidx.compose.** { *; }
+# Compose 不需要任何手写 keep（各库自带 consumer 规则、无反射依赖）；
+# 全量 keep 会让 material-icons-extended 的数千个未用图标类无法被 R8 裁剪，dex 膨胀数 MB。

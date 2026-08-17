@@ -29,7 +29,7 @@ class AidlScanTransport(
 
     override suspend fun listSubdirs(root: String): List<DirStat> = withContext(Dispatchers.IO) {
         val out = ArrayList<DirStat>()
-        forEachPaged({ offset -> bound.ops.listSubdirs(root, offset, PAGE_LIMIT) }) { entry ->
+        forEachPaged({ offset -> bound.callWithTimeout { it.listSubdirs(root, offset, PAGE_LIMIT) } }) { entry ->
             // "mtimeMs|name"
             val sep = entry.indexOf('|')
             if (sep > 0) {
@@ -42,7 +42,7 @@ class AidlScanTransport(
 
     override fun listFiles(dirs: List<String>): Flow<FileInfo> = flow {
         for (dir in dirs) {
-            forEachPaged({ offset -> bound.ops.listFiles(dir, offset, PAGE_LIMIT) }) { entry ->
+            forEachPaged({ offset -> bound.callWithTimeout { it.listFiles(dir, offset, PAGE_LIMIT) } }) { entry ->
                 // "size|mtimeMs|name"
                 parseFileEntry(dir, entry)?.let { emit(it) }
             }
@@ -54,7 +54,10 @@ class AidlScanTransport(
         paths.chunked(HEADER_BATCH).map { chunk ->
             async(Dispatchers.IO) {
                 semaphore.withPermit {
-                    val blob = bound.ops.readHeaders(chunk.toTypedArray(), n)
+                    // 批量读盘事务较大，超时按批规模放宽（默认 30s 对慢速存储偏紧）
+                    val blob = bound.callWithTimeout(timeoutMs = HEADER_CALL_TIMEOUT_MS) {
+                        it.readHeaders(chunk.toTypedArray(), n)
+                    }
                     HeaderBatchCodec.unpack(blob, chunk.size)
                 }
             }
@@ -65,7 +68,10 @@ class AidlScanTransport(
 
     /**
      * 分页协议：空数组 = 结束；页末尾的 [FileOpsImpl.MORE_MARKER] = 还有下一页。
-     * 内联保证 [consume] 里可以直接调用 suspend 的 Flow.emit。
+     * 服务端保证同一目录从 offset==0 起的连续翻页基于同一份排序快照
+     * （[FileOpsImpl] 的 DirSnapshot），目录并发增删不会漏项/重项，
+     * 固定步进 offset += PAGE_LIMIT 即为正确用法。
+     * 内联保证 [fetch]/[consume] 里可以直接调用 suspend 函数（callWithTimeout / Flow.emit）。
      */
     private inline fun forEachPaged(
         fetch: (offset: Int) -> Array<String>,
@@ -109,5 +115,8 @@ class AidlScanTransport(
 
         /** header 批次的并发 binder 调用数（服务端 binder 线程池并行读盘） */
         private const val HEADER_CONCURRENCY = 4
+
+        /** header 批量调用的 binder 超时：单批 400 文件读盘在慢速存储上可能超过默认 30s */
+        private const val HEADER_CALL_TIMEOUT_MS = 60_000L
     }
 }

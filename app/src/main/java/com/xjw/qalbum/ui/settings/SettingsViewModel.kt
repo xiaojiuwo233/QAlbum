@@ -2,7 +2,9 @@ package com.xjw.qalbum.ui.settings
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.room.withTransaction
 import com.xjw.qalbum.access.AccessManager
+import com.xjw.qalbum.data.db.AppDatabase
 import com.xjw.qalbum.data.db.dao.EmbeddingDao
 import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.db.dao.OcrDao
@@ -28,6 +30,8 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * 设置页 ViewModel：
@@ -42,6 +46,7 @@ class SettingsViewModel(
     private val imageDao: ImageDao,
     private val ocrDao: OcrDao,
     private val embeddingDao: EmbeddingDao,
+    private val db: AppDatabase,
     private val ocrModelDownload: OcrModelDownloadService,
     private val appScope: CoroutineScope,
 ) : ViewModel() {
@@ -53,9 +58,13 @@ class SettingsViewModel(
      * 的 onDispose 兜底触发保存；但该页对应的 NavBackStackEntry 正随这次返回销毁，
      * viewModelScope 会被一并取消，落在其上的 DataStore 写入会被丢弃（输入退出后仍是旧值）。
      * 用独立于页面生命周期的 appScope 写入，确保离开即落盘。
+     *
+     * 全部写入经 [persistMutex]（公平锁）串行：updateXxxConfig 系列是「first() 读旧 JSON →
+     * copy → 整体写回」，读-改-写落在 DataStore edit 事务之外，快速连续操作若并发执行会
+     * 读到同一旧快照互相覆盖（开关自己弹回）。互斥后每个块都基于前一个块已落盘的最新值。
      */
     private fun persist(block: suspend () -> Unit) {
-        appScope.launch { block() }
+        appScope.launch { persistMutex.withLock { block() } }
     }
 
     val uiState: StateFlow<SettingsUiState> = combine(
@@ -103,7 +112,9 @@ class SettingsViewModel(
 
     fun setAccessMode(mode: AccessMode) {
         persist { settings.setAccessMode(mode) }
-        checkAccess()
+        // 显式传入待测模式：persist 是异步落盘，此刻从 DataStore 读 accessMode 仍是旧值，
+        // 会把连通性测到切换前的 provider 上（切到不可用模式却显示「✔ 就绪」）
+        checkAccess(mode)
     }
 
     fun setChatpicPath(path: String) {
@@ -130,9 +141,10 @@ class SettingsViewModel(
     fun addExportSubdir(name: String) = settings.addExportSubdir(name)
     fun removeExportSubdir(name: String) = settings.removeExportSubdir(name)
 
-    fun checkAccess() {
+    /** @param mode 指定要检测的访问模式；null = 按当前设置项（适用于设置已落盘的常规检测） */
+    fun checkAccess(mode: AccessMode? = null) {
         viewModelScope.launch {
-            val provider = accessManager.current()
+            val provider = if (mode != null) accessManager.providerOf(mode) else accessManager.current()
             val ok = runCatching { provider.isAvailable() }.getOrDefault(false)
             _accessStatus.value = if (ok) AccessStatus.Ready else AccessStatus.NotReady
         }
@@ -147,6 +159,10 @@ class SettingsViewModel(
 
     fun setAiEnabled(enabled: Boolean) {
         persist { settings.setAiEnabled(enabled) }
+    }
+    /** 用户在隐私弹窗确认「向公网 AI 服务上传图片」；上传链路（带图请求）据此放行（C148 兜底闸门） */
+    fun acknowledgePublicAiEndpoint() {
+        persist { settings.setAiPublicEndpointAcknowledged(true) }
     }
     fun setAiEndpoint(endpoint: String) {
         persist { settings.setAiEndpoint(endpoint.trim()) }
@@ -233,11 +249,11 @@ class SettingsViewModel(
 
     val ocrModelDownloadState: StateFlow<OcrModelDownloadState> = ocrModelDownload.downloadState
 
-    private val _ocrModelStatus = MutableStateFlow<OcrModelStatus>(ocrModelDownload.refreshStatus())
-    val ocrModelStatus: StateFlow<OcrModelStatus> = _ocrModelStatus.asStateFlow()
+    /** 模型安装状态直接透传服务侧异步流（磁盘 IO 在 appScope 后台完成，不在 VM 同步读盘） */
+    val ocrModelStatus: StateFlow<OcrModelStatus> = ocrModelDownload.modelStatus
 
     fun refreshOcrModelStatus() {
-        _ocrModelStatus.value = ocrModelDownload.refreshStatus()
+        ocrModelDownload.refreshStatus()
     }
 
     fun downloadOcrModel() {
@@ -245,8 +261,9 @@ class SettingsViewModel(
     }
 
     fun deleteOcrModel() {
+        // clearModel 完成后自动回推 modelStatus/downloadState；此处再并发 refresh 可能
+        // 在删除中途读盘，把删了一半的状态晚一步覆盖回流里
         ocrModelDownload.clearModel()
-        refreshOcrModelStatus()
     }
 
     // ---- 每次审核数量 ----
@@ -323,22 +340,53 @@ class SettingsViewModel(
     fun setAutoFavoritePhone(enabled: Boolean) = updateAutoFavoriteConfig { it.copy(phone = enabled) }
     fun setAutoFavoriteAddress(enabled: Boolean) = updateAutoFavoriteConfig { it.copy(address = enabled) }
 
-    /** 仅重置本地分析（hash/质量/重复/评分），重新分析时只重跑这些免费的本地阶段 */
-    fun resetLocalAnalysis(onDone: () -> Unit = {}) {
-        viewModelScope.launch {
-            imageDao.resetLocalAnalysis()
-            onDone()
+    /**
+     * 重置任务进行中标志。任务挂在 [appScope]、跨设置页进出存活，故用进程级状态，
+     * 任意 ViewModel 实例（每个二级页各一个）都能观察到同一次任务的进行/完成。
+     */
+    val analysisResetting: StateFlow<Boolean> = analysisResetRunning.asStateFlow()
+
+    /**
+     * 仅重置本地分析（hash/质量/重复/评分），重新分析时只重跑这些免费的本地阶段。
+     *
+     * 约 200 万行的全表 UPDATE 需数十秒，必须挂 [appScope]：本 ViewModel 随二级页
+     * NavBackStackEntry 销毁，落在 viewModelScope 会在用户返回时被静默取消（点了没生效）。
+     */
+    fun resetLocalAnalysis() {
+        if (!analysisResetRunning.compareAndSet(expect = false, update = true)) return
+        appScope.launch {
+            try {
+                db.withTransaction { imageDao.resetLocalAnalysis() }
+            } finally {
+                analysisResetRunning.value = false
+            }
         }
     }
 
     /** 重置全部分析标记（含 OCR/AI/向量），并清空 OCR 文本与向量数据 */
-    fun resetAllAnalysis(onDone: () -> Unit = {}) {
-        viewModelScope.launch {
-            imageDao.resetAllAnalysis()
-            ocrDao.clearAllOcr()
-            embeddingDao.deleteAll()
-            onDone()
+    fun resetAllAnalysis() {
+        if (!analysisResetRunning.compareAndSet(expect = false, update = true)) return
+        appScope.launch {
+            try {
+                // 单事务：标记清零与 OCR/向量清空要么同时生效要么都不生效，
+                // 避免中断留下「ocr_done 已清但 ocr_text/FTS 与向量残留」的半套状态
+                db.withTransaction {
+                    imageDao.resetAllAnalysis()
+                    ocrDao.clearAllOcr()
+                    embeddingDao.deleteAll()
+                }
+            } finally {
+                analysisResetRunning.value = false
+            }
         }
+    }
+
+    companion object {
+        /** 设置写串行锁（公平）：见 [persist]；跨页面 ViewModel 实例共用，防先后两页的写乱序覆盖 */
+        private val persistMutex = Mutex()
+
+        /** 重置分析任务的进程级进行中标志（任务在 appScope 上跑，寿命长于任何页面实例） */
+        private val analysisResetRunning = MutableStateFlow(false)
     }
 }
 

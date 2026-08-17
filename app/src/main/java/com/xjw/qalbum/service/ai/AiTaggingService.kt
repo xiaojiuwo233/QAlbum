@@ -1,8 +1,5 @@
 package com.xjw.qalbum.service.ai
 
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.util.Base64
 import com.xjw.qalbum.access.ImageBytesReader
 import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.db.dao.TagDao
@@ -10,20 +7,17 @@ import com.xjw.qalbum.data.db.entity.ImageTagEntity
 import com.xjw.qalbum.data.db.entity.TagEntity
 import com.xjw.qalbum.data.remote.ChatMessage
 import com.xjw.qalbum.data.remote.OpenAiCompatClient
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import timber.log.Timber
-import java.io.ByteArrayOutputStream
 
 /**
  * AI 打标签服务
  *
  * 流程：
- * 1. 读取图片 → 缩放到 ≤ 512px → JPEG 60% → Base64
+ * 1. 读取图片 → 缩放到 ≤ 512px → JPEG 60% → Base64（共用 [AiTaggingShared.encodeImageBase64]）
  * 2. 调用 OpenAI 兼容 chat completion，要求按 JSON 格式返回结构化标签
  * 3. 解析 JSON，写入 tags 字典 + image_tags 关联表 + 在 images.ai_done 上置位
  */
@@ -37,7 +31,8 @@ class AiTaggingService(
 
     suspend fun tagImage(reader: ImageBytesReader, imageId: Long): Result {
         val image = imageDao.getById(imageId) ?: return Result.Failed("图片不存在")
-        val base64 = encodeImage(reader, image.path) ?: return Result.Failed("图片编码失败")
+        val base64 = AiTaggingShared.encodeImageBase64(reader, image.path)
+            ?: return Result.Failed("图片编码失败")
 
         val resp = aiClient.chatCompletion(
             messages = listOf(
@@ -68,44 +63,8 @@ class AiTaggingService(
         return tagDao.findByName(name) ?: TagEntity(id = 0, name = name, type = type)
     }
 
-    private suspend fun encodeImage(reader: ImageBytesReader, path: String): String? =
-        withContext(Dispatchers.IO) {
-            try {
-                val bytes = reader.read(path, MAX_IMAGE_BYTES) ?: return@withContext null
-                val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
-                if (opts.outWidth <= 0) return@withContext null
-
-                var sample = 1
-                var w = opts.outWidth
-                var h = opts.outHeight
-                while (w > 512 || h > 512) {
-                    sample *= 2
-                    w /= 2; h /= 2
-                }
-                val bitmap = BitmapFactory.decodeByteArray(
-                    bytes, 0, bytes.size,
-                    BitmapFactory.Options().apply { inSampleSize = sample },
-                ) ?: return@withContext null
-
-                val out = ByteArrayOutputStream()
-                bitmap.compress(Bitmap.CompressFormat.JPEG, 60, out)
-                bitmap.recycle()
-
-                Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
-            } catch (t: Throwable) {
-                Timber.w(t, "encodeImage failed for $path")
-                null
-            }
-        }
-
     private fun parseResponse(content: String): TagResult? {
-        // 容错：剥离 Markdown ``` 代码块
-        val cleaned = content
-            .substringAfter("```json", content)
-            .substringAfter("```", content)
-            .substringBeforeLast("```")
-            .trim()
+        val cleaned = stripCodeFence(content)
         return try {
             val root = json.parseToJsonElement(cleaned).jsonObject
             val content_tags = (root["content_tags"]?.jsonArray ?: emptyList())
@@ -128,6 +87,21 @@ class AiTaggingService(
         }
     }
 
+    /**
+     * 剥离 Markdown 代码围栏：命中首个 ```(json)? … ``` 时取围栏内正文，否则原样返回。
+     * 单一正则一次提取，不做链式二次剥离（链式 substringAfter 会把 ```json 围栏的
+     * 闭合围栏误当作起始围栏，丢掉整个 JSON 正文）。
+     *
+     * 自测推演（三种输入 → 输出）：
+     * 1. 裸 JSON：      `{"a":1}`                              → 无匹配 → `{"a":1}`
+     * 2. 围栏：         "```json\n{\"a\":1}\n```"              → group(1) → `{"a":1}`
+     * 3. 带前后缀：     "好的：```json\n{\"a\":1}\n``` 供参考"  → group(1) → `{"a":1}`
+     */
+    private fun stripCodeFence(content: String): String {
+        val body = FENCE_REGEX.find(content)?.groupValues?.get(1)
+        return (body ?: content).trim()
+    }
+
     sealed class Result {
         data class Success(val tags: TagResult) : Result()
         data class Failed(val reason: String) : Result()
@@ -142,8 +116,11 @@ class AiTaggingService(
     )
 
     companion object {
-        /** 单图读取字节上限（兜底罕见超大图）。 */
-        private const val MAX_IMAGE_BYTES = 32 * 1024 * 1024
+        /** 惰性匹配首个 ``` 围栏（可带 json 语言标注），DOT_MATCHES_ALL 允许正文跨行。 */
+        private val FENCE_REGEX = Regex(
+            "```(?:json)?\\s*(.*?)\\s*```",
+            setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE),
+        )
 
         const val SYSTEM_PROMPT = """你是一个图片分析引擎，专门分析 QQ 聊天中的图片。请只返回 JSON，不要包含任何额外说明：
 

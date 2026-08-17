@@ -28,10 +28,9 @@ class PaddleOcrEngine(
      */
     suspend fun recognize(imageBytes: ByteArray): OcrResult =
         withContext(Dispatchers.IO) {
+            // modelPaths 非 null 已蕴含 Ready,不再二次 currentStatus(那会对整个模型目录 walk 求和,逐图放大)
             val modelPaths = modelStore.modelPaths()
-            if (modelPaths == null || modelStore.currentStatus() !is OcrModelStatus.Ready) {
-                return@withContext OcrResult.Unavailable
-            }
+                ?: return@withContext OcrResult.Unavailable
             if (imageBytes.isEmpty()) return@withContext OcrResult.Empty
 
             try {
@@ -76,7 +75,8 @@ sealed class OcrResult {
 
 private object SensitivePatterns {
     val Phone = Regex("""(?<!\d)1[3-9]\d{9}(?!\d)""")
-    val Amount = Regex("""[¥￥$]\s*\d+(?:[.,]\d+)?|(?<!\d)\d+\.\d{2}(?:元|块|RMB|CNY)?""")
+    // 第二分支要求「恰好两位小数」:尾部 (?!\d) 与兄弟正则同款,否则 "3.14159"/GPS 坐标等任意长小数都会截前两位误报
+    val Amount = Regex("""[¥￥$]\s*\d+(?:[.,]\d+)?|(?<!\d)\d+\.\d{2}(?:元|块|RMB|CNY)?(?!\d)""")
     val Address = Regex("""[\u4e00-\u9fa5]{2,}(省|市|区|县|镇|乡|村|街道|路|街|号|栋|楼|室|单元)""")
     val IdNumber = Regex("""(?<!\d)\d{17}[\dXx](?!\d)""")
     val OrderNo = Regex("""(?<!\d)\d{15,30}(?!\d)""")

@@ -29,6 +29,7 @@ class ScanTransportFactory(
             AccessMode.ROOT -> RootStreamingShell()
             AccessMode.SHIZUKU -> ShizukuStreamingShell()
         }
-        return ShellScanTransport(mode, shell) { path, n -> provider.readHeader(path, n) }
+        // 批量委托：provider.readHeaders 每约 200 文件一次进程/命令，禁止退回逐文件 fork
+        return ShellScanTransport(mode, shell, provider::readHeaders)
     }
 }

@@ -1,5 +1,6 @@
 package com.xjw.qalbum.service.indexer
 
+import android.os.RemoteException
 import androidx.room.withTransaction
 import com.xjw.qalbum.data.db.AppDatabase
 import com.xjw.qalbum.data.db.dao.DirSnapshotDao
@@ -18,6 +19,7 @@ import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import timber.log.Timber
+import java.io.IOException
 
 /** 扫描档位 */
 enum class ScanMode {
@@ -64,35 +66,83 @@ class ScanPipeline(
         mode: ScanMode,
     ) {
         val startedAt = System.currentTimeMillis()
-        val transport = transportFactory.create()
-        if (transport == null) {
+        // 双保险规范化（落盘侧 setChatpicPath 已规范化，这里兜历史坏值/其他调用路径）：
+        // 末尾 '/' 会让拼出的 path 带双斜杠，与库中已有单斜杠 path 全部不匹配，
+        // 200w 行会被判为新增全量重复插入且旧行永久脱离扫描范围
+        val root = chatpicRoot.trim().trimEnd('/')
+        if (root.isBlank()) {
+            send(ScanProgress.Failed("扫描路径为空，请先在设置页配置 chatpic 路径"))
+            return
+        }
+        val initialTransport = transportFactory.create()
+        if (initialTransport == null) {
             send(ScanProgress.Failed("文件访问未就绪：请先在设置页授权 Shizuku 或 Root"))
             return
         }
+        // var：传输瞬时故障时按批重建热切换（见 Step 4），finally 关闭的是最新通道
+        var transport: ScanTransport = initialTransport
         try {
             // ---- Step 1: 目录层枚举 ----
             send(ScanProgress.Enumerating(0))
             val fsDirs = ArrayList<DirStat>(4096)
             for (src in SOURCE_DIRS) {
-                fsDirs += transport.listSubdirs("$chatpicRoot/$src")
+                fsDirs += transport.listSubdirs("$root/$src")
                 send(ScanProgress.Enumerating(fsDirs.size))
             }
 
             // ---- Step 2: 目录级 diff（快照按当前根路径隔离） ----
-            val rootPrefix = "$chatpicRoot/"
+            val rootPrefix = "$root/"
             val snapshots = dirSnapshotDao.listAll().filter { it.dirPath.startsWith(rootPrefix) }
+
+            // 枚举结果为空 ≠ 目录真消失：传输层对「不可访问」与「空目录」都返回空列表
+            // （存储未挂载、特权进程 namespace 缺 /storage、路径配错均命中）。直接往下走
+            // 会把全部快照判为消失目录、全库 active 行误标 missing。先做根目录存在性
+            // 校验区分场景，不可判定时中止本轮并保留快照与索引。
+            if (fsDirs.isEmpty()) {
+                val rootChildren = transport.listSubdirs(root)
+                when {
+                    rootChildren.isEmpty() -> {
+                        send(ScanProgress.Failed("扫描根目录不可访问或为空：$root（已保留现有索引）"))
+                        return
+                    }
+                    rootChildren.none { it.path.substringAfterLast('/') in SOURCE_DIRS } -> {
+                        send(ScanProgress.Failed("该路径不包含 chatimg/chatraw/chatthumb/temp 子目录，请检查扫描路径设置"))
+                        return
+                    }
+                    snapshots.isNotEmpty() -> {
+                        send(ScanProgress.Failed("源目录本轮枚举为空但存在历史索引，疑似枚举异常，已中止（保留现有索引）"))
+                        return
+                    }
+                    // else：源目录存在但尚无内容且无历史快照 —— 正常空库，继续走完 Done(0)
+                }
+            }
             val dirDiff = DirDiffer.diff(fsDirs, snapshots)
             val toScan = if (mode == ScanMode.INCREMENTAL) dirDiff.toScan else fsDirs
 
             // ---- Step 3: 消失目录 → 行转 missing + 快照删除 ----
             if (dirDiff.deletedDirPaths.isNotEmpty()) {
-                db.withTransaction {
-                    for (dir in dirDiff.deletedDirPaths) {
-                        imageDao.markMissingInPathRange("$dir/", "${dir}0")
+                // 熔断：大量目录同时「消失」更可能是枚举异常（个别源列举静默失败/存储抖动）
+                // 而非真删。中止并保留快照，绝不冒全库误标 missing 的风险；小规模真实删除
+                // 不受影响。确认已大量清理缓存的用户可等目录 mtime 变化后由文件级 diff 收敛。
+                val vanished = dirDiff.deletedDirPaths.size
+                if (vanished >= VANISH_FUSE_MIN_DIRS && vanished * 2 > snapshots.size) {
+                    send(
+                        ScanProgress.Failed(
+                            "$vanished/${snapshots.size} 个已索引目录本轮不可见，疑似枚举异常，已中止（保留现有索引）",
+                        ),
+                    )
+                    return
+                }
+                // 分块提交：块内行变更与快照删除原子一致（中断可自愈），块间释放写锁 ——
+                // 消失目录可达 1.6w 个 × path 范围 UPDATE，单事务会持写锁分钟级、WAL 膨胀数百 MB
+                for (chunk in dirDiff.deletedDirPaths.chunked(VANISHED_DIR_TX_CHUNK)) {
+                    db.withTransaction {
+                        for (dir in chunk) {
+                            imageDao.markMissingInPathRange("$dir/", "${dir}0", startedAt)
+                        }
+                        dirSnapshotDao.deleteByPaths(chunk)
                     }
-                    dirDiff.deletedDirPaths.chunked(DB_VAR_LIMIT).forEach {
-                        dirSnapshotDao.deleteByPaths(it)
-                    }
+                    send(ScanProgress.Enumerating(fsDirs.size)) // 心跳：让 UI 感知长回收仍在推进
                 }
                 Timber.i("ScanPipeline: ${dirDiff.deletedDirPaths.size} dirs vanished, rows marked missing")
             }
@@ -105,7 +155,16 @@ class ScanPipeline(
             if (toScan.isNotEmpty()) {
                 send(ScanProgress.Indexing(0, toScan.size))
                 for (dirBatch in toScan.chunked(DIR_BATCH)) {
-                    val r = processDirBatch(transport, dirBatch, deepVerify)
+                    val r = try {
+                        processDirBatch(transport, dirBatch, deepVerify, startedAt)
+                    } catch (e: Exception) {
+                        if (e !is RemoteException && e !is IOException) throw e
+                        // 传输瞬时故障（binder 死亡/超时、shell 进程被杀）：重建传输
+                        // （优先回到 AIDL）重试当前批一次，仍失败才让整场失败；
+                        // 批事务未提交即失败，重试幂等
+                        transport = rebuildTransport(transport, e)
+                        processDirBatch(transport, dirBatch, deepVerify, startedAt)
+                    }
                     updatedFiles += r.updated
                     missingFiles += r.missing
                     processedDirs += dirBatch.size
@@ -130,6 +189,13 @@ class ScanPipeline(
         }
     }
 
+    /** 传输故障后的重建：关闭旧通道再走工厂（会先重试 AIDL 绑定），重建失败原样抛出触发整场失败 */
+    private suspend fun rebuildTransport(old: ScanTransport, cause: Exception): ScanTransport {
+        Timber.w(cause, "ScanPipeline: transport failure, rebuilding to retry current batch")
+        old.close()
+        return transportFactory.create() ?: throw cause
+    }
+
     // ---- 单批目录处理 ----
 
     private data class BatchResult(val updated: Int, val missing: Int)
@@ -138,6 +204,7 @@ class ScanPipeline(
         transport: ScanTransport,
         dirBatch: List<DirStat>,
         deepVerify: Boolean,
+        scanStart: Long,
     ): BatchResult {
         // 1. 枚举批内所有文件，按父目录分组
         val filesByDir = HashMap<String, MutableList<FileInfo>>(dirBatch.size * 2)
@@ -149,6 +216,7 @@ class ScanPipeline(
         val newFiles = ArrayList<FileInfo>()
         val changedFiles = ArrayList<FileInfo>()
         val reviveIds = ArrayList<Long>()
+        val retireTerminalIds = ArrayList<Long>()
         val missingIds = ArrayList<Long>()
         val unchangedPairs = ArrayList<Pair<FileInfo, ImageDao.ScanRow>>()
         for (dir in dirBatch) {
@@ -161,27 +229,39 @@ class ScanPipeline(
             newFiles += cls.newFiles
             changedFiles += cls.changedFiles
             reviveIds += cls.reviveIds
+            retireTerminalIds += cls.retireTerminalIds
             missingIds += cls.missingIds
             if (deepVerify) unchangedPairs += cls.unchangedPairs
         }
 
         // 3. 仅对需要的文件读 header 识别
         val now = System.currentTimeMillis()
-        val newEntities = detectAndBuild(transport, newFiles, now)
-        val changedEntities = detectAndBuild(transport, changedFiles, now)
+        val headerFailedDirs = HashSet<String>()
+        val newEntities = detectAndBuild(transport, newFiles, now, headerFailedDirs)
+        val changedEntities = detectAndBuild(transport, changedFiles, now, headerFailedDirs)
         val mimeFixes = verifyMime(transport, unchangedPairs)
+        if (headerFailedDirs.isNotEmpty()) {
+            Timber.w(
+                "ScanPipeline: header read failed for files in ${headerFailedDirs.size} dirs " +
+                    "(e.g. ${headerFailedDirs.first()}), snapshots withheld for rescan",
+            )
+        }
 
         // 4. 行变更 + 本批目录快照原子提交（崩溃安全：未提交目录下次重扫）
         db.withTransaction {
+            retireTerminalIds.chunked(DB_VAR_LIMIT).forEach { imageDao.retireTerminalPaths(it) }
             newEntities.chunked(INSERT_CHUNK).forEach { imageDao.insertAll(it) }
             if (changedEntities.isNotEmpty()) imageDao.updateBatchFromScan(changedEntities)
             reviveIds.chunked(DB_VAR_LIMIT).forEach { imageDao.reviveByIds(it) }
-            missingIds.chunked(DB_VAR_LIMIT).forEach { imageDao.markMissingByIds(it) }
+            missingIds.chunked(DB_VAR_LIMIT).forEach { imageDao.markMissingByIds(it, scanStart) }
             for (fix in mimeFixes) {
                 imageDao.fixMimeType(fix.id, fix.mime, fix.isAnimated)
             }
+            // 存在 header 读失败文件的目录本轮不写快照：下次增量自然重扫补回，
+            // 否则瞬时读失败的新增/变化文件会被目录剪枝永久漏掉
             dirSnapshotDao.upsertAll(
-                dirBatch.map { DirSnapshotEntity(dirPath = it.path, mtime = it.mtimeMs, scannedAt = now) },
+                dirBatch.filter { it.path !in headerFailedDirs }
+                    .map { DirSnapshotEntity(dirPath = it.path, mtime = it.mtimeMs, scannedAt = now) },
             )
         }
         return BatchResult(
@@ -190,17 +270,28 @@ class ScanPipeline(
         )
     }
 
-    /** 批量读 header → magic bytes 识别 → 构造 entity；识别失败的文件被跳过 */
+    /**
+     * 批量读 header → magic bytes 识别 → 构造 entity。
+     *
+     * 两种「跳过」必须区分：header 为 null 是读取失败（瞬时 IO/权限/翻页间隙被删），
+     * 记入 [failedDirs] 让所在目录本轮不写快照、下次重扫补回；识别返回 null 才是
+     * 「确认非图片」，静默跳过且快照照常提交。
+     */
     private suspend fun detectAndBuild(
         transport: ScanTransport,
         files: List<FileInfo>,
         now: Long,
+        failedDirs: MutableSet<String>,
     ): List<ImageEntity> {
         if (files.isEmpty()) return emptyList()
         val headers = transport.readHeaders(files.map { it.path }, HEADER_BYTES)
         val out = ArrayList<ImageEntity>(files.size)
         for (i in files.indices) {
-            val header = headers[i] ?: continue
+            val header = headers[i]
+            if (header == null) {
+                failedDirs.add(files[i].path.substringBeforeLast('/'))
+                continue
+            }
             val type = MagicBytesDetector.detect(header, header.size) ?: continue
             out.add(buildEntity(files[i], type, now))
         }
@@ -271,7 +362,13 @@ class ScanPipeline(
         /** SQLite 单语句变量上限（999）下的安全分批大小 */
         private const val DB_VAR_LIMIT = 900
 
-        /** magic bytes 检测读取的头部字节数（覆盖 JPEG/PNG/GIF/WebP-VP8X/HEIC 判定） */
+        /** 消失目录回收的单事务目录数：块内行+快照原子一致，块间释放写锁并发心跳 */
+        private const val VANISHED_DIR_TX_CHUNK = 256
+
+        /** 消失目录熔断下限：低于该数的真实删除不触发比例熔断，正常回收 */
+        private const val VANISH_FUSE_MIN_DIRS = 64
+
+        /** magic bytes 检测读取的头部字节数（覆盖 JPEG/PNG/GIF/WebP-VP8X/HEIC 判定与 ftyp 兼容 brand 窗口） */
         private const val HEADER_BYTES = 32
     }
 }

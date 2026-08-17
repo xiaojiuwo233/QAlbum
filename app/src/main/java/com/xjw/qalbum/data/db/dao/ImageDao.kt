@@ -34,11 +34,88 @@ interface ImageDao {
     @Query("UPDATE images SET status = :status WHERE id IN (:ids)")
     suspend fun updateStatusByIds(ids: List<Long>, status: String)
 
-    @Query("UPDATE images SET status = 'deleted', deleted_at = :deletedAt WHERE id IN (:ids)")
+    /**
+     * 守卫版批量改状态：仅迁移仍处于 [fromStatus] 的行，拒绝改写 deleted/quarantined 等
+     * 已被其他路径迁走的行（并发场景下用装载快照回写必须走此版本）。返回生效行数。
+     */
+    @Query("UPDATE images SET status = :status WHERE id IN (:ids) AND status = :fromStatus")
+    suspend fun updateStatusByIdsFrom(ids: List<Long>, status: String, fromStatus: String): Int
+
+    /** 直接永久删除路径（原位删除，行必为 active/missing）用的无守卫标记。回收站/缩略图清空必须走 [markDeletedFromStatus]。 */
+    @Query("""
+        UPDATE images
+        SET status = 'deleted', deleted_at = :deletedAt,
+            path = 'qalbum-internal://deleted/' || id
+        WHERE id IN (:ids)
+    """)
     suspend fun markDeleted(ids: List<Long>, deletedAt: Long)
+
+    /**
+     * 守卫版批量标记 deleted：仅当行仍处于 [fromStatus]（'quarantined' / 'thumbnail_trash'）时生效。
+     * 清空回收站逐页 purge 期间用户点了恢复时，已恢复为 active 的行不会被拿着旧页快照的
+     * purge 误标 deleted（否则文件存在但从图库永久消失，且虚增「已清理」统计）。返回生效行数。
+     */
+    @Query("""
+        UPDATE images
+        SET status = 'deleted', deleted_at = :deletedAt,
+            path = 'qalbum-internal://deleted/' || id
+        WHERE id IN (:ids) AND status = :fromStatus
+    """)
+    suspend fun markDeletedFromStatus(ids: List<Long>, deletedAt: Long, fromStatus: String): Int
+
+    /** 文件移动前的原子 claim：同时重验收藏/用户保留，真实 path 暂时保留以阻止扫描重复插入。 */
+    @Query("""
+        UPDATE images SET status = 'quarantine_pending'
+        WHERE id IN (:ids) AND status = 'active'
+          AND is_protected = 0 AND (user_keep IS NULL OR user_keep = 0)
+    """)
+    suspend fun markQuarantinePending(ids: List<Long>): Int
+
+    /** 文件已安置后释放真实 path，让相同 Cache 路径的新内容可作为新图片入库。 */
+    @Query("""
+        UPDATE images
+        SET status = 'quarantined', path = 'qalbum-internal://quarantine/' || id
+        WHERE id IN (:ids) AND status = 'quarantine_pending'
+    """)
+    suspend fun finalizeQuarantine(ids: List<Long>): Int
+
+    @Query("UPDATE images SET status = 'active' WHERE id IN (:ids) AND status = 'quarantine_pending'")
+    suspend fun rollbackQuarantinePending(ids: List<Long>): Int
+
+    /** 恢复前先在唯一索引中占住目标 path；失败/进程中断可由持久化日志回滚或完成。 */
+    @Query("""
+        UPDATE images SET status = 'restore_pending', path = :targetPath
+        WHERE id = :id AND status = 'quarantined'
+    """)
+    suspend fun markRestorePending(id: Long, targetPath: String): Int
+
+    @Query("""
+        UPDATE images SET status = 'active', last_seen = :lastSeen
+        WHERE id = :id AND status = 'restore_pending'
+    """)
+    suspend fun finalizeRestore(id: Long, lastSeen: Long): Int
+
+    @Query("""
+        UPDATE images
+        SET status = 'quarantined', path = 'qalbum-internal://quarantine/' || id
+        WHERE id = :id AND status = 'restore_pending'
+    """)
+    suspend fun rollbackRestorePending(id: Long): Int
+
+    /** 旧版本终态行仍占真实路径时先迁到内部命名空间，随后扫描才能插入当前文件。 */
+    @Query("""
+        UPDATE images
+        SET path = 'qalbum-internal://' || status || '/' || id
+        WHERE id IN (:ids) AND status IN ('deleted', 'quarantined')
+    """)
+    suspend fun retireTerminalPaths(ids: List<Long>): Int
 
     @Query("UPDATE images SET last_seen = :ts WHERE id = :id")
     suspend fun touchLastSeen(id: Long, ts: Long)
+
+    /** keyset 分页取 status='deleted' 行 id：存量派生数据（OCR/标签/向量/排斥）的一次性清理用。 */
+    @Query("SELECT id FROM images WHERE status = 'deleted' AND id > :afterId ORDER BY id LIMIT :limit")
+    suspend fun deletedIdsPaged(afterId: Long, limit: Int): List<Long>
 
     // ---- 扫描（目录剪枝管线）----
 
@@ -64,13 +141,17 @@ interface ImageDao {
         val isAnimated: Boolean,
     )
 
-    /** 磁盘上已消失的活跃图片 → missing（图库查询只认 active，幽灵记录自动从图库消失） */
-    @Query("UPDATE images SET status = 'missing' WHERE id IN (:ids) AND status = 'active'")
-    suspend fun markMissingByIds(ids: List<Long>)
+    /**
+     * 磁盘上已消失的活跃图片 → missing（图库查询只认 active，幽灵记录自动从图库消失）。
+     * `last_seen < :scanStart` 守卫：回收站恢复会在成功事务内 touchLastSeen（恢复时刻），
+     * 进行中的扫描批次拿的是恢复前的文件快照，不得把刚恢复的行覆盖成 missing。
+     */
+    @Query("UPDATE images SET status = 'missing' WHERE id IN (:ids) AND status = 'active' AND last_seen < :scanStart")
+    suspend fun markMissingByIds(ids: List<Long>, scanStart: Long)
 
-    /** 整个三字符目录消失时按 path 范围批量标记 missing */
-    @Query("UPDATE images SET status = 'missing' WHERE path >= :low AND path < :high AND status = 'active'")
-    suspend fun markMissingInPathRange(low: String, high: String)
+    /** 整个三字符目录消失时按 path 范围批量标记 missing（last_seen 守卫同 [markMissingByIds]） */
+    @Query("UPDATE images SET status = 'missing' WHERE path >= :low AND path < :high AND status = 'active' AND last_seen < :scanStart")
+    suspend fun markMissingInPathRange(low: String, high: String, scanStart: Long)
 
     /** 文件以相同 size/mtime 重新出现：仅恢复 missing → active，不重置分析状态 */
     @Query("UPDATE images SET status = 'active' WHERE id IN (:ids) AND status = 'missing'")
@@ -80,6 +161,11 @@ interface ImageDao {
     @Query("UPDATE images SET mime = :mime, is_animated = :isAnimated WHERE id = :id")
     suspend fun fixMimeType(id: Long, mime: String, isAnimated: Boolean)
 
+    /**
+     * WHERE 的 status 守卫是硬约束：status='deleted' 是「已清理」统计的纯净数据源、quarantined 行
+     * 的原路径文件归回收站流程自管——同路径上重新出现的新文件（如 QQ 重新下载同名缓存）绝不能
+     * 让扫描改写这两类行的 size/mtime，否则统计被污染且该文件永远不可见。
+     */
     @Query("""
         UPDATE images
         SET filename = :filename,
@@ -88,11 +174,13 @@ interface ImageDao {
             cache_key = :cacheKey,
             size = :size,
             mtime = :mtime,
+            date_bucket = CAST(strftime('%Y', :mtime / 1000, 'unixepoch', 'localtime') AS INTEGER) * 1000
+                + CAST(strftime('%j', :mtime / 1000, 'unixepoch', 'localtime') AS INTEGER),
             last_seen = :lastSeen,
             mime = :mime,
             is_animated = :isAnimated,
             status = CASE
-                WHEN :sourceType = 'chatthumb' AND status != 'deleted' THEN 'thumbnail_trash'
+                WHEN :sourceType = 'chatthumb' THEN 'thumbnail_trash'
                 WHEN status = 'missing' THEN 'active'
                 ELSE status
             END,
@@ -111,7 +199,7 @@ interface ImageDao {
             embedding_done = CASE WHEN size != :size OR mtime != :mtime THEN 0 ELSE embedding_done END,
             duplicate_group_id = CASE WHEN size != :size OR mtime != :mtime THEN NULL ELSE duplicate_group_id END,
             is_duplicate_best = CASE WHEN size != :size OR mtime != :mtime THEN 0 ELSE is_duplicate_best END
-        WHERE path = :path
+        WHERE path = :path AND status IN ('active', 'missing', 'thumbnail_trash')
     """)
     suspend fun updateFromScanByPath(
         path: String,
@@ -170,7 +258,7 @@ interface ImageDao {
             blur_score = NULL, width = 0, height = 0, is_blank = 0, is_corrupt = 0,
             duplicate_group_id = NULL, is_duplicate_best = 0,
             delete_score = 0, info_score = 0
-        WHERE source_type <> 'chatthumb' AND status NOT IN ('deleted', 'quarantined')
+        WHERE source_type <> 'chatthumb' AND status IN ('active', 'missing')
     """)
     suspend fun resetLocalAnalysis()
 
@@ -182,7 +270,7 @@ interface ImageDao {
             duplicate_group_id = NULL, is_duplicate_best = 0,
             delete_score = 0, info_score = 0,
             ocr_done = 0, ai_done = 0, embedding_done = 0
-        WHERE source_type <> 'chatthumb' AND status NOT IN ('deleted', 'quarantined')
+        WHERE source_type <> 'chatthumb' AND status IN ('active', 'missing')
     """)
     suspend fun resetAllAnalysis()
 
@@ -258,14 +346,16 @@ interface ImageDao {
     """)
     fun pagingActiveTimelineBySize(): PagingSource<Int, ImageEntity>
 
+    /**
+     * 日期分桶计数：bucketKey = year*1000 + dayOfYear（预计算列 date_bucket，入库时写好）。
+     * 对预计算整列 GROUP BY 走 (status, source_type, date_bucket, is_protected) 覆盖索引，
+     * 免去早期版本 200w 行逐行 2 次 strftime 的全表聚合（单次 3-10s、扫描期间背靠背重跑）。
+     */
     @Query("""
-        SELECT
-            CAST(strftime('%Y', mtime / 1000, 'unixepoch', 'localtime') AS INTEGER) * 1000
-                + CAST(strftime('%j', mtime / 1000, 'unixepoch', 'localtime') AS INTEGER) AS bucketKey,
-            COUNT(*) AS count
+        SELECT date_bucket AS bucketKey, COUNT(*) AS count
         FROM images
         WHERE status = 'active' AND source_type <> 'chatthumb'
-        GROUP BY bucketKey
+        GROUP BY date_bucket
     """)
     fun observeTimelineDateBucketCounts(): Flow<List<BucketCountRow>>
 
@@ -286,13 +376,10 @@ interface ImageDao {
     fun observeTimelineSizeBucketCounts(): Flow<List<BucketCountRow>>
 
     @Query("""
-        SELECT
-            CAST(strftime('%Y', mtime / 1000, 'unixepoch', 'localtime') AS INTEGER) * 1000
-                + CAST(strftime('%j', mtime / 1000, 'unixepoch', 'localtime') AS INTEGER) AS bucketKey,
-            COUNT(*) AS count
+        SELECT date_bucket AS bucketKey, COUNT(*) AS count
         FROM images
         WHERE status = 'active' AND source_type <> 'chatthumb' AND is_protected = 1
-        GROUP BY bucketKey
+        GROUP BY date_bucket
     """)
     fun observeFavoriteDateBucketCounts(): Flow<List<BucketCountRow>>
 
@@ -301,32 +388,8 @@ interface ImageDao {
         val count: Int,
     )
 
-    /**
-     * 详情页时间线：**只取 id**（轻量），用于左右滑动的分页定位。
-     * 绝不能用 SELECT * 全量装载完整 ImageEntity（200w 行会撞 CursorWindow 2MB 上限并卡死详情页）。
-     */
-    @Query("""
-        SELECT id FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb'
-        ORDER BY mtime DESC, id DESC
-    """)
-    suspend fun timelineIds(): List<Long>
-
-    /** 详情页时间线 id（旧到新），与 [pagingActiveTimelineByDateAsc] 排序一致。 */
-    @Query("""
-        SELECT id FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb'
-        ORDER BY mtime ASC, id ASC
-    """)
-    suspend fun timelineIdsByDateAsc(): List<Long>
-
-    /** 详情页时间线 id（大到小），与 [pagingActiveTimelineBySize] 排序一致。 */
-    @Query("""
-        SELECT id FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb'
-        ORDER BY size DESC, id DESC
-    """)
-    suspend fun timelineIdsBySize(): List<Long>
+    // 详情页时间线已迁窗口 API（timelineRank* + timelineIdsBefore/After*）：
+    // 200w 行全量 id 装载（旧 timelineIds 系列）会阻塞详情页数秒并常驻数十 MB 装箱内存，已删除。
 
     /** 收藏详情页时间线：只取 id。 */
     @Query("""
@@ -335,6 +398,81 @@ interface ImageDao {
         ORDER BY mtime DESC, id DESC
     """)
     suspend fun favoriteTimelineIds(): List<Long>
+
+    // ---- 时间线定位 / 窗口（keyset，替代全量 id 装载）----
+    //
+    // 详情页左右滑动的定位范式：先用 timelineRank* 拿当前图的序号（COUNT，走覆盖索引），
+    // 再用 timelineIds{After,Before}* 按排序键取邻域窗口页，滑动到窗口边缘时续取下一页。
+    // DATE_ASC 排序无需独立方法：after(asc) 即 [timelineIdsBeforeDateDesc]、before(asc) 即
+    // [timelineIdsAfterDateDesc]，rank(asc) = 总数 - rankDesc - 1 或直接用 [timelineRankDateAsc]。
+
+    /** 主时间线总数（suspend 一次性查询；Flow 版见 [observeImageCount]） */
+    @Query("SELECT COUNT(*) FROM images WHERE status = 'active' AND source_type <> 'chatthumb'")
+    suspend fun countActiveTimeline(): Int
+
+    /** 「新到旧」时间线中给定排序键的 rank（0-based，= 排在它前面的行数） */
+    @Query("""
+        SELECT COUNT(*) FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb'
+          AND (mtime > :mtime OR (mtime = :mtime AND id > :id))
+    """)
+    suspend fun timelineRankDateDesc(mtime: Long, id: Long): Int
+
+    /** 「旧到新」时间线中给定排序键的 rank（0-based） */
+    @Query("""
+        SELECT COUNT(*) FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb'
+          AND (mtime < :mtime OR (mtime = :mtime AND id < :id))
+    """)
+    suspend fun timelineRankDateAsc(mtime: Long, id: Long): Int
+
+    /** 「大到小」时间线中给定排序键的 rank（0-based） */
+    @Query("""
+        SELECT COUNT(*) FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb'
+          AND (size > :size OR (size = :size AND id > :id))
+    """)
+    suspend fun timelineRankSizeDesc(size: Long, id: Long): Int
+
+    /** 「新到旧」时间线中排序键之后（更旧方向）的一页 id，不含键自身 */
+    @Query("""
+        SELECT id FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb'
+          AND (mtime < :mtime OR (mtime = :mtime AND id < :id))
+        ORDER BY mtime DESC, id DESC
+        LIMIT :limit
+    """)
+    suspend fun timelineIdsAfterDateDesc(mtime: Long, id: Long, limit: Int): List<Long>
+
+    /** 「新到旧」时间线中排序键之前（更新方向）的一页 id：返回序为离键近→远，调用方按需 reverse */
+    @Query("""
+        SELECT id FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb'
+          AND (mtime > :mtime OR (mtime = :mtime AND id > :id))
+        ORDER BY mtime ASC, id ASC
+        LIMIT :limit
+    """)
+    suspend fun timelineIdsBeforeDateDesc(mtime: Long, id: Long, limit: Int): List<Long>
+
+    /** 「大到小」时间线中排序键之后（更小方向）的一页 id，不含键自身 */
+    @Query("""
+        SELECT id FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb'
+          AND (size < :size OR (size = :size AND id < :id))
+        ORDER BY size DESC, id DESC
+        LIMIT :limit
+    """)
+    suspend fun timelineIdsAfterSizeDesc(size: Long, id: Long, limit: Int): List<Long>
+
+    /** 「大到小」时间线中排序键之前（更大方向）的一页 id：返回序为离键近→远，调用方按需 reverse */
+    @Query("""
+        SELECT id FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb'
+          AND (size > :size OR (size = :size AND id > :id))
+        ORDER BY size ASC, id ASC
+        LIMIT :limit
+    """)
+    suspend fun timelineIdsBeforeSizeDesc(size: Long, id: Long, limit: Int): List<Long>
 
     @Query("""
         SELECT * FROM images
@@ -394,6 +532,7 @@ interface ImageDao {
             IFNULL(SUM(CASE WHEN ai_done = 1 THEN 1 ELSE 0 END), 0) AS aiDone,
             IFNULL(SUM(CASE WHEN embedding_done = 1 THEN 1 ELSE 0 END), 0) AS embeddingDone,
             IFNULL(SUM(CASE WHEN hash_done = 0
+                            OR ((block_hash IS NULL OR feature_grid IS NULL) AND is_corrupt = 0)
                             OR (ocr_done = 0 AND is_corrupt = 0 AND width >= 64 AND height >= 64)
                        THEN 1 ELSE 0 END), 0) AS pendingBase
         FROM images
@@ -418,6 +557,8 @@ interface ImageDao {
     /**
      * 「已分析」= 已完成全部**当前需要**的分析阶段的图片数（与图库左下角完成角标同口径）。
      * 入参为各阶段是否「需要」（由调用方按设置开关 + AI 服务可用性算好）。
+     * hash 判定必须与 [pendingHashIds] 完全一致（含 block_hash/feature_grid 回填条件），
+     * 否则 v8/v9 升级用户的存量回填永远不会被「继续分析」按钮触发。
      * 对损坏 / 过小图宽容：这些图本就被对应阶段跳过（见 pendingOcr/AiTag/Embedding 的筛选），
      * 视作该阶段「无需再做」，否则进度永远到不了 100%、按钮也永远点不亮「已全部分析」。
      */
@@ -425,6 +566,7 @@ interface ImageDao {
         SELECT COUNT(*) FROM images
         WHERE status = 'active' AND source_type <> 'chatthumb'
           AND hash_done = 1
+          AND ((block_hash IS NOT NULL AND feature_grid IS NOT NULL) OR is_corrupt = 1)
           AND (:ocrRequired = 0 OR ocr_done = 1 OR is_corrupt = 1 OR width < 64 OR height < 64)
           AND (:aiRequired = 0 OR ai_done = 1 OR is_corrupt = 1)
           AND (:embRequired = 0 OR embedding_done = 1 OR is_corrupt = 1)
@@ -463,15 +605,41 @@ interface ImageDao {
      * 待 hash（含质量）阶段的图片 **id**，按分析顺序排序、取前 [limit] 个（仅 id，轻量）。
      * 管线先取 id 列表（一次排序），再用 [getByIds] 按块装载实体处理——内存恒定、不重排、
      * 不会因失败图反复重查（与 [timelineIds] 的「只取 id」轻量范式一致）。
+     *
+     * 各 pending 查询均拆成 ASC/DESC 两个常量排序版本：`ORDER BY (CASE …)` 表达式排序会让
+     * SQLite 无法用 mtime 索引按序扫描并在凑满 LIMIT 后提前终止，退化成 200w 行全表扫描
+     * + temp B-tree 排序（每轮 4 个阶段各付一次 10~40s）。
      */
+    suspend fun pendingHashPage(
+        limit: Int,
+        oldestFirst: Boolean,
+        afterMtime: Long,
+        afterId: Long,
+    ): List<PendingAnalysisRow> = if (oldestFirst) {
+        pendingHashPageAsc(limit, afterMtime, afterId)
+    } else {
+        pendingHashPageDesc(limit, afterMtime, afterId)
+    }
+
     @Query("""
-        SELECT id FROM images
+        SELECT id, mtime FROM images
         WHERE status = 'active' AND source_type <> 'chatthumb'
           AND (hash_done = 0 OR ((block_hash IS NULL OR feature_grid IS NULL) AND is_corrupt = 0))
-        ORDER BY (CASE WHEN :oldestFirst THEN mtime ELSE -mtime END) ASC
+          AND (mtime > :afterMtime OR (mtime = :afterMtime AND id > :afterId))
+        ORDER BY mtime ASC, id ASC
         LIMIT :limit
     """)
-    suspend fun pendingHashIds(limit: Int, oldestFirst: Boolean): List<Long>
+    suspend fun pendingHashPageAsc(limit: Int, afterMtime: Long, afterId: Long): List<PendingAnalysisRow>
+
+    @Query("""
+        SELECT id, mtime FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb'
+          AND (hash_done = 0 OR ((block_hash IS NULL OR feature_grid IS NULL) AND is_corrupt = 0))
+          AND (mtime < :afterMtime OR (mtime = :afterMtime AND id < :afterId))
+        ORDER BY mtime DESC, id DESC
+        LIMIT :limit
+    """)
+    suspend fun pendingHashPageDesc(limit: Int, afterMtime: Long, afterId: Long): List<PendingAnalysisRow>
 
     /** 待 hash（即待「hash+质量」合并分析）的总数，用于进度条总量；含待回填 block_hash 的存量图 */
     @Query("""
@@ -506,13 +674,19 @@ interface ImageDao {
     """)
     suspend fun saveQuality(id: Long, w: Int, h: Int, blur: Float?, blank: Boolean, corrupt: Boolean)
 
-    /** 合并 hash + 质量为单条 UPDATE：每图一次写（原是 saveHash + saveQuality 两次写两个事务）。 */
+    /**
+     * 合并 hash + 质量为单条 UPDATE：每图一次写（原是 saveHash + saveQuality 两次写两个事务）。
+     * WHERE 带乐观校验（size/mtime 取自装载实体时的快照）：文件在「装载 → 读字节计算 → 写回」的
+     * 块级窗口内被重写（聊天缓存重新下载是常态）、扫描已重置分析字段时，本条陈旧结果直接落空
+     * （不匹配 0 行），该图留在 pendingHashIds 待下轮重算——否则旧内容的 hash 会永久挂到新文件上，
+     * 喂给去重聚类可能把非重复图聚成重复组进而被清理误删。
+     */
     @Query("""
         UPDATE images
         SET xxhash = :xxhash, phash = :phash, block_hash = :blockHash, feature_grid = :featureGrid, hash_done = 1,
             width = :w, height = :h,
             blur_score = :blur, is_blank = :blank, is_corrupt = :corrupt
-        WHERE id = :id
+        WHERE id = :id AND size = :expectedSize AND mtime = :expectedMtime
     """)
     suspend fun saveHashQuality(
         id: Long,
@@ -525,6 +699,8 @@ interface ImageDao {
         blur: Float?,
         blank: Boolean,
         corrupt: Boolean,
+        expectedSize: Long,
+        expectedMtime: Long,
     )
 
     /**
@@ -535,7 +711,10 @@ interface ImageDao {
     @Transaction
     suspend fun saveHashQualityBatch(rows: List<HashQualityWrite>) {
         for (r in rows) {
-            saveHashQuality(r.id, r.xxhash, r.phash, r.blockHash, r.featureGrid, r.width, r.height, r.blur, r.blank, r.corrupt)
+            saveHashQuality(
+                r.id, r.xxhash, r.phash, r.blockHash, r.featureGrid, r.width, r.height, r.blur, r.blank, r.corrupt,
+                r.expectedSize, r.expectedMtime,
+            )
         }
     }
 
@@ -583,13 +762,20 @@ interface ImageDao {
         val phash: Long?,
     )
 
-    /** 重复聚类投影：一次取齐 xxHash / pHash / blockHash / 尺寸 / 纯色标记，避免逐个 getById（窄投影，内存可控） */
+    /**
+     * 重复聚类投影的 keyset 分页变体（id 升序游标）：聚类器逐页拉、按 phash 前缀桶分片进内存，
+     * 峰值内存 = 单页 + 活跃桶，替代全量装载。精确重复（同 xxhash）另有 SQL 侧 [xxhashGroups]
+     * 只装载冲突组，无需经过本投影。
+     */
     @Query("""
         SELECT id, xxhash, phash, block_hash AS blockHash, feature_grid AS featureGrid, width, height, size, is_blank AS isBlank FROM images
         WHERE status = 'active' AND source_type <> 'chatthumb'
           AND (xxhash IS NOT NULL OR phash IS NOT NULL)
+          AND id > :afterId
+        ORDER BY id
+        LIMIT :limit
     """)
-    suspend fun dedupProjection(): List<DedupRow>
+    suspend fun dedupProjectionPaged(afterId: Long, limit: Int): List<DedupRow>
 
     /** 批量写回重复分配（一个事务，避免逐图 update 各起一次写锁） */
     @Transaction
@@ -597,16 +783,42 @@ interface ImageDao {
         items.forEach { assignDuplicate(it.id, it.groupId, it.isBest) }
     }
 
-    /** 所有 active 重复图（属于某重复组）；「审核全部重复」一次性纳入用，窄投影、无 LIMIT。 */
+    /**
+     * 原子替换全部重复分配：清空旧分配 + 写入新分配在**同一事务**，
+     * 避免查重写回窗口内其他读者看到「已清空未重写」的半旧半新状态。
+     */
+    @Transaction
+    suspend fun replaceDuplicateAssignments(items: List<DuplicateAssignment>) {
+        clearDuplicateAssignments()
+        assignDuplicates(items)
+    }
+
+    /**
+     * 所有 active 重复图（属于某重复组）；「审核全部重复」一次性纳入用，窄投影、无 LIMIT。
+     * 拆 ASC/DESC 常量排序（同 [pendingHashIds]），避免 CASE 表达式排序失去 mtime 索引。
+     */
+    suspend fun allDuplicateRows(oldestFirst: Boolean): List<DuplicateGroupRow> =
+        if (oldestFirst) allDuplicateRowsAsc() else allDuplicateRowsDesc()
+
     @Query("""
         SELECT id, duplicate_group_id AS duplicateGroupId, size
         FROM images
         WHERE status = 'active' AND source_type <> 'chatthumb'
           AND is_protected = 0 AND (user_keep IS NULL OR user_keep = 0)
           AND duplicate_group_id IS NOT NULL
-        ORDER BY (CASE WHEN :oldestFirst THEN mtime ELSE -mtime END) ASC
+        ORDER BY mtime ASC, id ASC
     """)
-    suspend fun allDuplicateRows(oldestFirst: Boolean): List<DuplicateGroupRow>
+    suspend fun allDuplicateRowsAsc(): List<DuplicateGroupRow>
+
+    @Query("""
+        SELECT id, duplicate_group_id AS duplicateGroupId, size
+        FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb'
+          AND is_protected = 0 AND (user_keep IS NULL OR user_keep = 0)
+          AND duplicate_group_id IS NOT NULL
+        ORDER BY mtime DESC, id DESC
+    """)
+    suspend fun allDuplicateRowsDesc(): List<DuplicateGroupRow>
 
     @Query("UPDATE images SET delete_score = :score WHERE id = :id")
     suspend fun updateDeleteScore(id: Long, score: Float)
@@ -698,8 +910,19 @@ interface ImageDao {
     @Query("UPDATE images SET user_keep = :keep WHERE id = :id")
     suspend fun setUserKeep(id: Long, keep: Boolean?)
 
+    /** 批量设置/清除用户保留（IN 更新）：调用方按 SQLite 变量上限分块并包进外层事务 */
+    @Query("UPDATE images SET user_keep = :keep WHERE id IN (:ids)")
+    suspend fun setUserKeepByIds(ids: List<Long>, keep: Boolean?)
+
     @Query("UPDATE images SET is_protected = :isFavorite WHERE id = :id")
     suspend fun setFavorite(id: Long, isFavorite: Boolean)
+
+    /** 批量收藏 / 取消收藏（IN 更新）：调用方按 SQLite 变量上限分块并包进外层事务 */
+    @Query("UPDATE images SET is_protected = :isFavorite WHERE id IN (:ids)")
+    suspend fun setFavoriteByIds(ids: List<Long>, isFavorite: Boolean)
+
+    /** 自动收藏批量写入（仅置收藏，不取消）：评分页末命中集合一次 IN 更新 */
+    suspend fun favoriteByIds(ids: List<Long>) = setFavoriteByIds(ids, true)
 
     @Query("""
         SELECT * FROM images
@@ -726,45 +949,131 @@ interface ImageDao {
 
     // ---- Phase 3：OCR ----
 
-    /** 待 OCR 的图片 **id**（排除损坏 / 过小图），按分析顺序取前 [limit] 个 */
+    /** 待 OCR 的图片 **id**（排除损坏 / 过小图），按分析顺序取前 [limit] 个；ASC/DESC 拆分同 [pendingHashIds] */
+    suspend fun pendingOcrPage(
+        limit: Int,
+        oldestFirst: Boolean,
+        afterMtime: Long,
+        afterId: Long,
+    ): List<PendingAnalysisRow> = if (oldestFirst) {
+        pendingOcrPageAsc(limit, afterMtime, afterId)
+    } else {
+        pendingOcrPageDesc(limit, afterMtime, afterId)
+    }
+
     @Query("""
-        SELECT id FROM images
+        SELECT id, mtime FROM images
         WHERE status = 'active' AND source_type <> 'chatthumb' AND ocr_done = 0
           AND is_corrupt = 0
           AND width >= 64 AND height >= 64
-        ORDER BY (CASE WHEN :oldestFirst THEN mtime ELSE -mtime END) ASC
+          AND (mtime > :afterMtime OR (mtime = :afterMtime AND id > :afterId))
+        ORDER BY mtime ASC, id ASC
         LIMIT :limit
     """)
-    suspend fun pendingOcrIds(limit: Int, oldestFirst: Boolean): List<Long>
+    suspend fun pendingOcrPageAsc(limit: Int, afterMtime: Long, afterId: Long): List<PendingAnalysisRow>
+
+    @Query("""
+        SELECT id, mtime FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND ocr_done = 0
+          AND is_corrupt = 0
+          AND width >= 64 AND height >= 64
+          AND (mtime < :afterMtime OR (mtime = :afterMtime AND id < :afterId))
+        ORDER BY mtime DESC, id DESC
+        LIMIT :limit
+    """)
+    suspend fun pendingOcrPageDesc(limit: Int, afterMtime: Long, afterId: Long): List<PendingAnalysisRow>
 
     /** 待 AI 打标签的图片 **id**：已 hash、未 ai_done、未损坏，按分析顺序取前 [limit] 个 */
+    suspend fun pendingAiTagPage(
+        limit: Int,
+        oldestFirst: Boolean,
+        afterMtime: Long,
+        afterId: Long,
+    ): List<PendingAnalysisRow> = if (oldestFirst) {
+        pendingAiTagPageAsc(limit, afterMtime, afterId)
+    } else {
+        pendingAiTagPageDesc(limit, afterMtime, afterId)
+    }
+
     @Query("""
-        SELECT id FROM images
+        SELECT id, mtime FROM images
         WHERE status = 'active' AND source_type <> 'chatthumb'
           AND hash_done = 1 AND ai_done = 0 AND is_corrupt = 0
-        ORDER BY (CASE WHEN :oldestFirst THEN mtime ELSE -mtime END) ASC
+          AND (mtime > :afterMtime OR (mtime = :afterMtime AND id > :afterId))
+        ORDER BY mtime ASC, id ASC
         LIMIT :limit
     """)
-    suspend fun pendingAiTagIds(limit: Int, oldestFirst: Boolean): List<Long>
+    suspend fun pendingAiTagPageAsc(limit: Int, afterMtime: Long, afterId: Long): List<PendingAnalysisRow>
+
+    @Query("""
+        SELECT id, mtime FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb'
+          AND hash_done = 1 AND ai_done = 0 AND is_corrupt = 0
+          AND (mtime < :afterMtime OR (mtime = :afterMtime AND id < :afterId))
+        ORDER BY mtime DESC, id DESC
+        LIMIT :limit
+    """)
+    suspend fun pendingAiTagPageDesc(limit: Int, afterMtime: Long, afterId: Long): List<PendingAnalysisRow>
 
     /** 待生成向量的图片 **id**：已 hash、未 embedding_done、未损坏，按分析顺序取前 [limit] 个 */
+    suspend fun pendingEmbeddingPage(
+        limit: Int,
+        oldestFirst: Boolean,
+        afterMtime: Long,
+        afterId: Long,
+    ): List<PendingAnalysisRow> = if (oldestFirst) {
+        pendingEmbeddingPageAsc(limit, afterMtime, afterId)
+    } else {
+        pendingEmbeddingPageDesc(limit, afterMtime, afterId)
+    }
+
     @Query("""
-        SELECT id FROM images
+        SELECT id, mtime FROM images
         WHERE status = 'active' AND source_type <> 'chatthumb'
           AND hash_done = 1 AND embedding_done = 0 AND is_corrupt = 0
-        ORDER BY (CASE WHEN :oldestFirst THEN mtime ELSE -mtime END) ASC
+          AND (mtime > :afterMtime OR (mtime = :afterMtime AND id > :afterId))
+        ORDER BY mtime ASC, id ASC
         LIMIT :limit
     """)
-    suspend fun pendingEmbeddingIds(limit: Int, oldestFirst: Boolean): List<Long>
+    suspend fun pendingEmbeddingPageAsc(limit: Int, afterMtime: Long, afterId: Long): List<PendingAnalysisRow>
 
-    @Query("UPDATE images SET ocr_done = 1 WHERE id = :id")
-    suspend fun markOcrDone(id: Long)
+    @Query("""
+        SELECT id, mtime FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb'
+          AND hash_done = 1 AND embedding_done = 0 AND is_corrupt = 0
+          AND (mtime < :afterMtime OR (mtime = :afterMtime AND id < :afterId))
+        ORDER BY mtime DESC, id DESC
+        LIMIT :limit
+    """)
+    suspend fun pendingEmbeddingPageDesc(limit: Int, afterMtime: Long, afterId: Long): List<PendingAnalysisRow>
+
+    // ocr_done 标记已并入 OcrDao.saveOcrResultsBatch（带乐观校验 + 按块事务提交），
+    // 不再提供无守卫的单条 markOcrDone：OCR 期间文件被重写时会把陈旧内容标成已完成。
+
+    /**
+     * 定向标记 AI 打标完成（带 size/mtime 乐观守卫）：文件在打标窗口内被重写则守卫不命中、
+     * 不落陈旧完成标记；只置 ai_done，不整行回写 chunk 装载时的陈旧快照。
+     */
+    @Query("UPDATE images SET ai_done = 1 WHERE id = :id AND size = :size AND mtime = :mtime")
+    suspend fun markAiTagDone(id: Long, size: Long, mtime: Long): Int
+
+    /** 定向标记 embedding 完成：只置 embedding_done，不整行回写陈旧快照 */
+    @Query("UPDATE images SET embedding_done = 1 WHERE id = :id")
+    suspend fun markEmbeddingDone(id: Long)
 
     @Query("""
         SELECT * FROM images
         WHERE status = 'active' AND source_type <> 'chatthumb' AND id IN (:ids)
     """)
     suspend fun getByIds(ids: List<Long>): List<ImageEntity>
+
+    /** 隔离事务内重验最终保护状态；与 markQuarantinePending 同一事务使用。 */
+    @Query("""
+        SELECT * FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND id IN (:ids)
+          AND is_protected = 0 AND (user_keep IS NULL OR user_keep = 0)
+    """)
+    suspend fun getCleanupEligibleByIds(ids: List<Long>): List<ImageEntity>
 
     /** 求给定 id 集合的原始字节总和；调用方需分块传入，避免触及 SQLite 变量上限 */
     @Query("SELECT IFNULL(SUM(size), 0) FROM images WHERE id IN (:ids)")
@@ -779,7 +1088,41 @@ interface ImageDao {
      *
      * 按分析顺序（mtime 升/降序）排序，让「生成审核清理」遵守与分析一致的早到晚/晚到早顺序，
      * 从而每次只纳入对应方向的前 N 张候选。
+     *
+     * 拆 ASC/DESC 常量排序：`ORDER BY (CASE …)` 表达式排序会让 SQLite 放弃 mtime 索引，
+     * 每次生成审核都付 200w 行全表扫描 + 数十万命中行 temp B-tree 排序（数秒到十几秒）；
+     * 常量排序可按索引序扫描并在凑满 LIMIT 后提前终止。
      */
+    suspend fun cleanupCandidatePool(
+        corruptEnabled: Boolean,
+        blankEnabled: Boolean,
+        duplicateEnabled: Boolean,
+        lowResEnabled: Boolean,
+        lowResMaxPixels: Long,
+        blurEnabled: Boolean,
+        blurMaxScore: Float,
+        tinyEnabled: Boolean,
+        tinyMaxBytes: Long,
+        emojiEnabled: Boolean,
+        emojiSquareRatio: Float,
+        emojiMaxSide: Int,
+        emojiMinSide: Int,
+        oldestFirst: Boolean,
+        poolLimit: Int,
+    ): List<CleanupSignalRow> = if (oldestFirst) {
+        cleanupCandidatePoolAsc(
+            corruptEnabled, blankEnabled, duplicateEnabled, lowResEnabled, lowResMaxPixels,
+            blurEnabled, blurMaxScore, tinyEnabled, tinyMaxBytes,
+            emojiEnabled, emojiSquareRatio, emojiMaxSide, emojiMinSide, poolLimit,
+        )
+    } else {
+        cleanupCandidatePoolDesc(
+            corruptEnabled, blankEnabled, duplicateEnabled, lowResEnabled, lowResMaxPixels,
+            blurEnabled, blurMaxScore, tinyEnabled, tinyMaxBytes,
+            emojiEnabled, emojiSquareRatio, emojiMaxSide, emojiMinSide, poolLimit,
+        )
+    }
+
     @Query("""
         SELECT id,
                width,
@@ -807,10 +1150,10 @@ interface ImageDao {
                               AND MAX(width, height) <= :emojiMaxSide
                               AND MIN(width, height) >= :emojiMinSide)
           )
-        ORDER BY (CASE WHEN :oldestFirst THEN mtime ELSE -mtime END) ASC
+        ORDER BY mtime ASC, id ASC
         LIMIT :poolLimit
     """)
-    suspend fun cleanupCandidatePool(
+    suspend fun cleanupCandidatePoolAsc(
         corruptEnabled: Boolean,
         blankEnabled: Boolean,
         duplicateEnabled: Boolean,
@@ -824,7 +1167,53 @@ interface ImageDao {
         emojiSquareRatio: Float,
         emojiMaxSide: Int,
         emojiMinSide: Int,
-        oldestFirst: Boolean,
+        poolLimit: Int,
+    ): List<CleanupSignalRow>
+
+    @Query("""
+        SELECT id,
+               width,
+               height,
+               blur_score AS blurScore,
+               size,
+               mtime,
+               is_blank AS isBlank,
+               is_corrupt AS isCorrupt,
+               duplicate_group_id AS duplicateGroupId,
+               is_duplicate_best AS isDuplicateBest,
+               delete_score AS deleteScore
+        FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb'
+          AND is_protected = 0 AND (user_keep IS NULL OR user_keep = 0)
+          AND (
+                (:corruptEnabled AND is_corrupt = 1)
+             OR (:blankEnabled AND is_blank = 1)
+             OR (:duplicateEnabled AND duplicate_group_id IS NOT NULL)
+             OR (:lowResEnabled AND width > 0 AND height > 0 AND width * height < :lowResMaxPixels)
+             OR (:blurEnabled AND blur_score IS NOT NULL AND blur_score < :blurMaxScore)
+             OR (:tinyEnabled AND size >= 1 AND size < :tinyMaxBytes)
+             OR (:emojiEnabled AND width > 0 AND height > 0
+                              AND CAST(MIN(width, height) AS REAL) / MAX(width, height) >= :emojiSquareRatio
+                              AND MAX(width, height) <= :emojiMaxSide
+                              AND MIN(width, height) >= :emojiMinSide)
+          )
+        ORDER BY mtime DESC, id DESC
+        LIMIT :poolLimit
+    """)
+    suspend fun cleanupCandidatePoolDesc(
+        corruptEnabled: Boolean,
+        blankEnabled: Boolean,
+        duplicateEnabled: Boolean,
+        lowResEnabled: Boolean,
+        lowResMaxPixels: Long,
+        blurEnabled: Boolean,
+        blurMaxScore: Float,
+        tinyEnabled: Boolean,
+        tinyMaxBytes: Long,
+        emojiEnabled: Boolean,
+        emojiSquareRatio: Float,
+        emojiMaxSide: Int,
+        emojiMinSide: Int,
         poolLimit: Int,
     ): List<CleanupSignalRow>
 
@@ -852,14 +1241,11 @@ interface ImageDao {
      * 日期口径与 [observeTimelineDateBucketCounts] 完全一致，保证与图库分组对齐。
      */
     @Query("""
-        SELECT
-            CAST(strftime('%Y', i.mtime / 1000, 'unixepoch', 'localtime') AS INTEGER) * 1000
-                + CAST(strftime('%j', i.mtime / 1000, 'unixepoch', 'localtime') AS INTEGER) AS bucketKey,
-            COUNT(*) AS count
+        SELECT i.date_bucket AS bucketKey, COUNT(*) AS count
         FROM images i
         INNER JOIN image_tags it ON it.image_id = i.id
         WHERE it.tag_id = :tagId AND i.status = 'active' AND i.source_type <> 'chatthumb'
-        GROUP BY bucketKey
+        GROUP BY i.date_bucket
     """)
     fun observeTagDateBucketCounts(tagId: Long): Flow<List<BucketCountRow>>
 
@@ -885,7 +1271,10 @@ data class ScoreWrite(
     val del: Float,
 )
 
-/** 一张图的 hash+质量分析结果，供 [ImageDao.saveHashQualityBatch] 整块事务写回 */
+/**
+ * 一张图的 hash+质量分析结果，供 [ImageDao.saveHashQualityBatch] 整块事务写回。
+ * [expectedSize]/[expectedMtime] 取自读文件前装载的实体快照，写回时作乐观校验（见 saveHashQuality）。
+ */
 data class HashQualityWrite(
     val id: Long,
     val xxhash: String?,
@@ -897,6 +1286,14 @@ data class HashQualityWrite(
     val blur: Float?,
     val blank: Boolean,
     val corrupt: Boolean,
+    val expectedSize: Long,
+    val expectedMtime: Long,
+)
+
+/** 分析待办 keyset 页的稳定排序键；失败项也推进游标，避免首屏饥饿。 */
+data class PendingAnalysisRow(
+    val id: Long,
+    val mtime: Long,
 )
 
 /** 清理判定所需的最小图片信号投影（由 [ImageDao.cleanupCandidatePool] 用列别名填充） */

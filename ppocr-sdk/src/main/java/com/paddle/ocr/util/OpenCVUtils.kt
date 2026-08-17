@@ -21,13 +21,25 @@ object OpenCVUtils {
 
     private var initialized = false
 
+    /**
+     * Root cause of the most recent failed load. dlopen details (missing symbol names etc.)
+     * only live here — callers should attach it as the cause of their own exception so the
+     * failure reaches structured logging instead of a bare boolean.
+     */
+    @Volatile
+    var lastError: Throwable? = null
+        private set
+
+    @Synchronized
     fun init(context: Context): Boolean {
         if (initialized) return true
         try {
             System.loadLibrary("opencv_java4")
             initialized = true
+            lastError = null
         } catch (e: UnsatisfiedLinkError) {
-            Log.e("OpenCVUtils", "Failed to initialize OpenCV: ${e.message}")
+            lastError = e
+            Log.e("OpenCVUtils", "Failed to initialize OpenCV", e)
         }
         return initialized
     }

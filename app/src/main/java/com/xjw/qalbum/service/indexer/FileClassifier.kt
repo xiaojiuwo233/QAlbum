@@ -16,6 +16,8 @@ object FileClassifier {
         val changedFiles: List<FileInfo>,
         /** 文件以相同 size/mtime 重新出现且行是 missing → 仅恢复 active */
         val reviveIds: List<Long>,
+        /** 旧版 deleted/quarantined 行仍占真实 path：事务内先迁走该 path，再把当前文件作为新增插入。 */
+        val retireTerminalIds: List<Long>,
         /** 行是 active 但磁盘上已不存在 → 标记 missing */
         val missingIds: List<Long>,
         /** 未变化的 (文件, 行) 配对 —— 深度校验时用来复核 mime */
@@ -35,6 +37,7 @@ object FileClassifier {
         val newFiles = ArrayList<FileInfo>()
         val changedFiles = ArrayList<FileInfo>()
         val reviveIds = ArrayList<Long>()
+        val retireTerminalIds = ArrayList<Long>()
         val unchangedPairs = if (collectUnchanged) ArrayList<Pair<FileInfo, ScanRow>>() else null
         var unchangedCount = 0
 
@@ -44,6 +47,14 @@ object FileClassifier {
             val row = rowByPath[f.path]
             when {
                 row == null -> newFiles.add(f)
+                // v11 起终态行会使用 qalbum-internal:// path；这里兼容升级/异常中仍占真实 path 的旧行：
+                // 先在提交事务中迁走旧 path，再把磁盘上的当前内容作为独立新行插入。
+                row.status == STATUS_DELETED || row.status == STATUS_QUARANTINED -> {
+                    retireTerminalIds.add(row.id)
+                    newFiles.add(f)
+                }
+                // 文件操作日志进行中时真实 path 用作互斥锁，扫描不可改写或重复插入。
+                row.status == STATUS_QUARANTINE_PENDING || row.status == STATUS_RESTORE_PENDING -> Unit
                 row.size != f.size || row.mtime != f.lastModified -> changedFiles.add(f)
                 else -> {
                     unchangedCount++
@@ -65,6 +76,7 @@ object FileClassifier {
             newFiles = newFiles,
             changedFiles = changedFiles,
             reviveIds = reviveIds,
+            retireTerminalIds = retireTerminalIds,
             missingIds = missingIds,
             unchangedPairs = unchangedPairs.orEmpty(),
             unchangedCount = unchangedCount,
@@ -73,4 +85,8 @@ object FileClassifier {
 
     private const val STATUS_ACTIVE = "active"
     private const val STATUS_MISSING = "missing"
+    private const val STATUS_DELETED = "deleted"
+    private const val STATUS_QUARANTINED = "quarantined"
+    private const val STATUS_QUARANTINE_PENDING = "quarantine_pending"
+    private const val STATUS_RESTORE_PENDING = "restore_pending"
 }

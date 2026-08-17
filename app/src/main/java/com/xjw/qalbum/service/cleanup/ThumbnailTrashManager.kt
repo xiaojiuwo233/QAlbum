@@ -7,9 +7,12 @@ import com.xjw.qalbum.access.AccessManager
 import com.xjw.qalbum.access.FileAccessProvider
 import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.db.entity.ImageEntity
+import com.xjw.qalbum.data.repository.ImageRepository
 import com.xjw.qalbum.fileops.BoundFileOps
 import com.xjw.qalbum.fileops.FileOpsClient
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
 import timber.log.Timber
@@ -28,6 +31,7 @@ class ThumbnailTrashManager(
     private val accessManager: AccessManager,
     private val imageDao: ImageDao,
     private val fileOpsClient: FileOpsClient,
+    private val imageRepository: ImageRepository,
 ) {
 
     fun observeSummary(): Flow<ImageDao.ThumbnailTrashSummary> =
@@ -54,6 +58,8 @@ class ThumbnailTrashManager(
         var deleted = 0
         try {
             for (idChunk in imageIds.chunked(FILE_CHUNK)) {
+                // 取消只在块间生效：单块内「删文件 → 落库」不可分割（见 purgeChunk）
+                ensureActive()
                 // 以 DB 为准筛出仍是 thumbnail_trash 的 chatthumb，避免误标 deleted 污染统计；
                 // 逐块查（单次 cursor ≤ FILE_CHUNK 行）而非一次性 flatMap 收集，控住内存。
                 val chunk = imageDao.getThumbnailTrashByIds(idChunk)
@@ -102,6 +108,8 @@ class ThumbnailTrashManager(
                 // 故固定从 id 升序推进，既不漏不重也不会死循环。
                 var afterId = 0L
                 while (true) {
+                    // 取消只在块间生效：单块内「删文件 → 落库」不可分割（见 purgeChunk）
+                    ensureActive()
                     val page = imageDao.listThumbnailTrashPaged(afterId, FILE_CHUNK)
                     if (page.isEmpty()) break
                     afterId = page.last().id
@@ -136,29 +144,42 @@ class ThumbnailTrashManager(
         if (chunk.isEmpty()) return ChunkOutcome(0, aidlAlive)
         val paths = chunk.map { it.path }
         var alive = aidlAlive
-        val results: BooleanArray = if (alive && bound != null) {
-            runCatching { bound.ops.deleteFiles(paths.toTypedArray()) }
-                .getOrElse {
-                    // binder 死亡等异常：本块及后续都落到 shell
+        // 文件批删一旦发起就会执行完（binder 同步事务 / shell 批删都不可中断）：结果必须落库。
+        // 取消若打断在「删文件」与「标记 deleted」之间，会留下永远加载失败的幻影行且漏计统计，
+        // 故整块置于 NonCancellable，取消只在块间生效（调用方循环里 ensureActive）。
+        return withContext(NonCancellable) {
+            val results: BooleanArray = if (alive && bound != null) {
+                runCatching {
+                    // 批量大事务放宽超时；超时（BinderCallTimeoutException）走同一 shell 降级路径
+                    bound.callWithTimeout(timeoutMs = AIDL_DELETE_TIMEOUT_MS) {
+                        it.deleteFiles(paths.toTypedArray())
+                    }
+                }.getOrElse {
+                    // binder 死亡 / 卡死等异常：本块及后续都落到 shell
                     Timber.w(it, "AIDL deleteFiles failed, fallback to shell")
                     alive = false
                     provider.deleteFiles(paths)
                 }
-        } else {
-            provider.deleteFiles(paths)
-        }
-        val okIds = ArrayList<Long>(chunk.size)
-        for (i in chunk.indices) {
-            if (results.getOrNull(i) == true) {
-                okIds.add(chunk[i].id)
             } else {
-                Timber.w("ThumbnailTrash purge failed for ${chunk[i].path}")
+                provider.deleteFiles(paths)
             }
+            val okIds = ArrayList<Long>(chunk.size)
+            for (i in chunk.indices) {
+                if (results.getOrNull(i) == true) {
+                    okIds.add(chunk[i].id)
+                } else {
+                    Timber.w("ThumbnailTrash purge failed for ${chunk[i].path}")
+                }
+            }
+            if (okIds.isNotEmpty()) {
+                // 守卫 from='thumbnail_trash'：清空期间被其他路径迁走的行不被误标 deleted
+                imageDao.markDeletedFromStatus(okIds, System.currentTimeMillis(), "thumbnail_trash")
+                // 级联清理派生数据：缩略图常规上不进分析，但防御性清掉可能存在的
+                // OCR/标签/向量/排斥残留（死向量会占据语义搜索 TopK 名额）；幂等
+                imageRepository.purgeDerivedData(okIds)
+            }
+            ChunkOutcome(okIds.size, alive)
         }
-        if (okIds.isNotEmpty()) {
-            imageDao.markDeleted(okIds, System.currentTimeMillis())
-        }
-        return ChunkOutcome(okIds.size, alive)
     }
 
     companion object {
@@ -167,5 +188,8 @@ class ThumbnailTrashManager(
 
         /** 达到该量级才值得绑定 AIDL 特权服务（绑定有约秒级启动成本） */
         private const val AIDL_MIN_BATCH = 2000
+
+        /** AIDL 批删单次事务超时：一批 ≤ [FILE_CHUNK] 个 unlink，60s 覆盖坏卡/FUSE 卡顿场景 */
+        private const val AIDL_DELETE_TIMEOUT_MS = 60_000L
     }
 }

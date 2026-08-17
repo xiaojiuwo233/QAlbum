@@ -21,11 +21,19 @@ import android.content.Context
 import com.paddle.ocr.EngineConfig
 import com.paddle.ocr.model.OCRError
 import java.nio.FloatBuffer
+import java.util.concurrent.locks.ReentrantReadWriteLock
+import kotlin.concurrent.read
+import kotlin.concurrent.write
 
 class ORTSessionManager(
     private val context: Context,
     private val config: EngineConfig,
 ) {
+    // Guards the session fields: inference holds the read lock for the whole native run,
+    // loadModels/release hold the write lock. OrtSession.close() racing an in-flight run()
+    // frees the native handle under the running kernel (use-after-free → SIGSEGV), so
+    // release must wait for in-flight inference instead of closing concurrently.
+    private val sessionLock = ReentrantReadWriteLock()
     private var env: OrtEnvironment? = null
     private var detSession: OrtSession? = null
     private var recSession: OrtSession? = null
@@ -34,7 +42,7 @@ class ORTSessionManager(
     var coldLoadTimeMs: Long = 0
         private set
 
-    fun loadModels(detAssetPath: String, recAssetPath: String) {
+    fun loadModels(detAssetPath: String, recAssetPath: String) = sessionLock.write {
         val loadStart = System.currentTimeMillis()
         env = OrtEnvironment.getEnvironment()
         val opts = OrtSession.SessionOptions().apply {
@@ -74,23 +82,23 @@ class ORTSessionManager(
         }
     }
 
-    fun runDetection(input: FloatArray, shape: LongArray): Pair<FloatArray, LongArray> {
+    fun runDetection(input: FloatArray, shape: LongArray): Pair<FloatArray, LongArray> = sessionLock.read {
         val session = detSession
             ?: throw OCRError.ModelLoadFailed("detection", Exception("Session not initialized"))
         val ortEnv = env
             ?: throw OCRError.ModelLoadFailed("detection", Exception("Environment not initialized"))
-        return runSession(ortEnv, session, detInputName, input, shape, "detection")
+        runSession(ortEnv, session, detInputName, input, shape, "detection")
     }
 
-    fun runRecognition(input: FloatArray, shape: LongArray): Pair<FloatArray, LongArray> {
+    fun runRecognition(input: FloatArray, shape: LongArray): Pair<FloatArray, LongArray> = sessionLock.read {
         val session = recSession
             ?: throw OCRError.ModelLoadFailed("recognition", Exception("Session not initialized"))
         val ortEnv = env
             ?: throw OCRError.ModelLoadFailed("recognition", Exception("Environment not initialized"))
-        return runSession(ortEnv, session, recInputName, input, shape, "recognition")
+        runSession(ortEnv, session, recInputName, input, shape, "recognition")
     }
 
-    fun release() {
+    fun release() = sessionLock.write {
         try {
             detSession?.close()
         } finally {

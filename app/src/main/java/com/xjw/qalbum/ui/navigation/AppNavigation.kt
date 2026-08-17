@@ -178,7 +178,10 @@ fun AppNavigation() {
                 },
             ) {
                 composable(NavDestination.Dashboard.route) {
-                    DashboardScreen(contentPadding = contentPadding)
+                    DashboardScreen(
+                        contentPadding = contentPadding,
+                        onOpenAccessSettings = { navController.navigate(SettingsCategory.ACCESS.route) },
+                    )
                 }
                 composable(NavDestination.Gallery.route) {
                     GalleryScreen(

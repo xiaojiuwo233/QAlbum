@@ -80,6 +80,7 @@ import org.koin.androidx.compose.koinViewModel
 @Composable
 fun DashboardScreen(
     contentPadding: PaddingValues,
+    onOpenAccessSettings: () -> Unit = {},
     viewModel: DashboardViewModel = koinViewModel(),
 ) {
     val state by viewModel.uiState.collectAsState()
@@ -111,6 +112,9 @@ fun DashboardScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
+            if (state.loaded && state.imageCount == 0 && !running) {
+                FirstRunGuideCard(onOpenAccessSettings = onOpenAccessSettings)
+            }
             MetricsGrid(state)
             StorageBreakdownCard(state.breakdown, state.totalSizeBytes)
             ScanCard(
@@ -126,6 +130,43 @@ fun DashboardScreen(
                 running = analysisRunning,
             )
             ImageHealthCard(state)
+        }
+    }
+}
+
+// ── First Run Guide（库为空时的首启引导卡）────────────────────────────
+
+/**
+ * 首启引导：库为空时页面全是 0，而「先授权 Shizuku / 确认路径」的提示原本只在
+ * 用户主动点扫描失败后才以小字出现——不点扫描永远看不到。这里主动给出配置路径，
+ * 点击直达「权限与访问」设置页。扫描进行中隐藏（索引正在建立，不再需要引导）。
+ */
+@Composable
+private fun FirstRunGuideCard(onOpenAccessSettings: () -> Unit) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                "开始使用",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+            )
+            Text(
+                "还没有建立图片索引，首次使用请先完成：\n" +
+                    "1. 在「权限与访问」安装并授权 Shizuku（或选择 Root）\n" +
+                    "2. 在「设置 → 扫描」确认图片路径（默认为 QQ 聊天图片目录）\n" +
+                    "3. 回到本页点击「全量扫描」建立索引",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+            )
+            FilledTonalButton(onClick = onOpenAccessSettings) { Text("去授权与设置") }
         }
     }
 }

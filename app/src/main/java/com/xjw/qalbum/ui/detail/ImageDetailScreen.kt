@@ -52,18 +52,21 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -204,23 +207,36 @@ private fun ImmersivePhotoViewer(
     LaunchedEffect(pagerState) {
         snapshotFlow { pagerState.settledPage }
             .distinctUntilChanged()
-            .collect { page -> onPageSelected(page) }
+            .collect { page ->
+                // 新落定页初始未缩放；该页真实缩放会经 onZoomChanged 再上报
+                currentZoom = 1f
+                onPageSelected(page)
+            }
     }
 
-    val effectiveOffsetY = if (draggingClose) dismissOffsetY else springBack.value
-    val closeProgress = (effectiveOffsetY / 400f).coerceIn(0f, 1f)
+    // 组合期只订阅「是否处于下滑位移中」的布尔翻转（derivedStateOf 只在翻转时失效）；
+    // 逐帧变化的偏移量本体延迟到绘制阶段读取，下滑关闭/回弹期间不会逐帧重组整个 viewer
+    val notDismissing by remember {
+        derivedStateOf { (if (draggingClose) dismissOffsetY else springBack.value) < 1f }
+    }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.Black.copy(alpha = 1f - closeProgress * 0.7f))
+            .drawBehind {
+                val offsetY = if (draggingClose) dismissOffsetY else springBack.value
+                val progress = (offsetY / 400f).coerceIn(0f, 1f)
+                drawRect(Color.Black.copy(alpha = 1f - progress * 0.7f))
+            }
             .pointerInput(Unit) {
                 detectTapGestures {
                     chromeVisible = !chromeVisible
                     if (!chromeVisible) detailsVisible = false
                 }
             }
-            .pointerInput(detailsVisible, currentZoom) {
+            // 手势 lambda 内对 detailsVisible/currentZoom 的读取都是经 state 委托的实时读，
+            // 无需作为 key —— 以 currentZoom 作 key 会让捏合的每一帧都重启拖拽手势协程
+            .pointerInput(Unit) {
                 detectVerticalDragGestures(
                     onDragStart = {
                         dragDirectionDecided = false
@@ -279,12 +295,13 @@ private fun ImmersivePhotoViewer(
                         val canDismiss = !detailsVisible && currentZoom <= 1.05f
                         draggingClose = canDismiss && dragAmount > 0f
                     }
-                    if (draggingClose && dragAmount > 0f) {
+                    if (draggingClose) {
+                        // 双向都累加并采样速度：往回拖能实时抵消偏移，拖回原位松手不会误关闭
                         change.consume()
                         chromeVisible = false
                         velocityTracker.addPosition(change.uptimeMillis, change.position)
                         dismissOffsetY = (dismissOffsetY + dragAmount).coerceAtLeast(0f)
-                    } else if (dragAmount < -8f && !detailsVisible && !draggingClose) {
+                    } else if (dragAmount < -8f && !detailsVisible) {
                         change.consume()
                         chromeVisible = true
                         detailsVisible = true
@@ -299,12 +316,15 @@ private fun ImmersivePhotoViewer(
             modifier = Modifier
                 .fillMaxSize()
                 .graphicsLayer {
-                    translationY = effectiveOffsetY
-                    val dismissScale = 1f - closeProgress * 0.15f
+                    // 偏移/进度在图层 lambda 内读取：状态逐帧变化只更新图层，不触发重组
+                    val offsetY = if (draggingClose) dismissOffsetY else springBack.value
+                    val progress = (offsetY / 400f).coerceIn(0f, 1f)
+                    translationY = offsetY
+                    val dismissScale = 1f - progress * 0.15f
                     scaleX = dismissScale
                     scaleY = dismissScale
-                    alpha = 1f - closeProgress * 0.2f
-                    val radius = closeProgress * 24.dp.toPx()
+                    alpha = 1f - progress * 0.2f
+                    val radius = progress * 24.dp.toPx()
                     if (radius > 0f) {
                         shape = RoundedCornerShape(radius)
                         clip = true
@@ -329,22 +349,24 @@ private fun ImmersivePhotoViewer(
             }
 
             AnimatedVisibility(
-                visible = chromeVisible && effectiveOffsetY < 1f,
+                visible = chromeVisible && notDismissing,
                 enter = fadeIn(),
                 exit = fadeOut(),
                 modifier = Modifier.align(Alignment.TopCenter),
             ) {
                 TopChrome(
                     image = state.current,
-                    index = state.currentIndex,
-                    total = state.ids.size,
+                    // 窗口化后 ids 只是时间线片段：序号 = 窗口首元素全序 rank + 窗口内下标
+                    index = (state.rankOffset + state.currentIndex)
+                        .coerceIn(0, (state.totalCount - 1).coerceAtLeast(0)),
+                    total = state.totalCount,
                     onBack = onBack,
                     onOpenExternal = onOpenExternal,
                 )
             }
 
             AnimatedVisibility(
-                visible = chromeVisible && !detailsVisible && effectiveOffsetY < 1f,
+                visible = chromeVisible && !detailsVisible && notDismissing,
                 enter = fadeIn(),
                 exit = fadeOut(),
                 modifier = Modifier.align(Alignment.BottomCenter),
@@ -407,7 +429,12 @@ private fun FullscreenPhoto(
     }
     var scale by remember(id) { mutableFloatStateOf(1f) }
     var offset by remember(id) { mutableStateOf(Offset.Zero) }
-    LaunchedEffect(scale) { onZoomChanged(scale) }
+    // 缩放经 snapshotFlow 上报（以 scale 为 key 的 effect 会在捏合的每一帧被取消重启）；
+    // rememberUpdatedState 保证翻页后收集到的是携带最新 currentIndex 的回调
+    val latestOnZoomChanged by rememberUpdatedState(onZoomChanged)
+    LaunchedEffect(id) {
+        snapshotFlow { scale }.collect { latestOnZoomChanged(it) }
+    }
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         val entity = image
         if (entity == null) {

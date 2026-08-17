@@ -18,7 +18,13 @@ data class PaddleOCRConfig(
     val detImgMode: String = "BGR",
     val detLimitSideLen: Int = 64,
     val detLimitType: String = "min",
-    val detMaxSideLimit: Int = 4000,
+    // Hard cap on the longer side of the det input. With limitType="min" ordinary photos are
+    // never scaled down, so this cap is the only bound on tensor size: a 4000px cap means a
+    // single ~144MB Java FloatArray (3*4000*3008 floats) plus native copies — enough to OOM a
+    // default 256MB Android heap. 1600px bounds the det tensor to ~30MB worst case; mobile
+    // callers should additionally pass limitType="max" with limitSideLen=960 (see PP-OCR
+    // mobile deployment defaults).
+    val detMaxSideLimit: Int = 1600,
     val detThresh: Float = 0.3f,
     val detBoxThresh: Float = 0.6f,
     val detUnclipRatio: Float = 1.5f,

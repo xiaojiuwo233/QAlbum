@@ -28,20 +28,34 @@ object LogcatCapture {
     private fun runLoop() {
         val pid = Process.myPid().toString()
         var attempts = 0
+        // 最近一条成功镜像行的 threadtime 时间戳：重启 logcat 时作为 -T 起点。
+        // 不带 -T 的重启会把系统缓冲区里该 pid 的历史整段重放，而 AppLog 无去重。
+        var sinceTime: String? = null
         while (attempts < MAX_ATTEMPTS && !Thread.currentThread().isInterrupted) {
             try {
-                val process = ProcessBuilder(
-                    "logcat", "-v", "threadtime", "--pid", pid, "*:V",
-                ).redirectErrorStream(true).start()
+                val cmd = mutableListOf("logcat", "-v", "threadtime")
+                val since = sinceTime
+                when {
+                    // 首次启动不加 -T：dump 缓冲区历史是期望行为
+                    since != null -> { cmd += "-T"; cmd += since }
+                    attempts > 0 -> { cmd += "-T"; cmd += "1" }
+                }
+                cmd += listOf("--pid", pid, "*:V")
+                val process = ProcessBuilder(cmd).redirectErrorStream(true).start()
 
+                val startedAt = System.currentTimeMillis()
                 process.inputStream.bufferedReader().useLines { lines ->
                     for (line in lines) {
                         if (line.isEmpty() || line.startsWith("---------")) continue
                         AppLog.ingestLogcatLine(line)
+                        if (line.length >= TIMESTAMP_LEN && line[2] == '-' && line[5] == ' ') {
+                            sinceTime = line.substring(0, TIMESTAMP_LEN)
+                        }
                     }
                 }
-                // 走到这里说明 logcat 进程结束了（被系统回收 / 出错），退避后重试
-                attempts++
+                // 走到这里说明 logcat 进程结束了（被系统回收 / 出错），退避后重试；
+                // 已正常运行足够久的结束不算失败，重置计数以免长生命周期进程耗尽重试额度后镜像永久静默
+                if (System.currentTimeMillis() - startedAt >= HEALTHY_RUN_MS) attempts = 0 else attempts++
             } catch (ie: InterruptedException) {
                 return
             } catch (_: Throwable) {
@@ -57,4 +71,10 @@ object LogcatCapture {
 
     private const val MAX_ATTEMPTS = 8
     private const val RETRY_DELAY_MS = 1500L
+
+    /** 单次 logcat 存活超过此时长即视为健康运行，其结束不计入失败重试次数 */
+    private const val HEALTHY_RUN_MS = 60_000L
+
+    /** threadtime 行首时间戳 "MM-dd HH:mm:ss.SSS" 的长度（同为 logcat -T 接受的格式） */
+    private const val TIMESTAMP_LEN = 18
 }

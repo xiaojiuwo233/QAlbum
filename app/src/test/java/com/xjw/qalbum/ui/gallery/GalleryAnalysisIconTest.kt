@@ -28,6 +28,10 @@ class GalleryAnalysisIconTest {
         ocrDone = ocr,
         aiDone = ai,
         embeddingDone = emb,
+        // C039：视觉指纹（blockHash + featureGrid）已回填是「已分析」的必要条件，
+        // 默认给非空值代表正常完成分析的图；缺失场景由专门测试覆盖。
+        blockHash = ByteArray(32) { 1 },
+        featureGrid = ByteArray(32) { 1 },
     )
 
     @Test
@@ -52,6 +56,21 @@ class GalleryAnalysisIconTest {
         val phases = EnabledPhases(ocr = false, aiTag = false, embedding = false)
         assertTrue(isFullyAnalyzed(img(true, false, false, false), phases))
         assertFalse(isFullyAnalyzed(img(false, false, false, false), phases))
+    }
+
+    @Test
+    fun visualFingerprintRequired_unlessCorrupt() {
+        // C039：blockHash / featureGrid 任一缺失都不算已分析（hashDone 为旧口径，可能没回填指纹）；
+        // 损坏图被指纹回填跳过，故豁免。
+        val phases = EnabledPhases(ocr = false, aiTag = false, embedding = false)
+        assertFalse(isFullyAnalyzed(img(true, false, false, false).copy(blockHash = null), phases))
+        assertFalse(isFullyAnalyzed(img(true, false, false, false).copy(featureGrid = null), phases))
+        assertTrue(
+            isFullyAnalyzed(
+                img(true, false, false, false).copy(blockHash = null, featureGrid = null, isCorrupt = true),
+                phases,
+            ),
+        )
     }
 
     @Test

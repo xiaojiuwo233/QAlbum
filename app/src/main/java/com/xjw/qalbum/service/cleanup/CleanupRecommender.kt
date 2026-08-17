@@ -85,7 +85,13 @@ class CleanupRecommender(
 
         val baseItems = ReviewAggregator.aggregate(
             classified.map { (row, reason) ->
-                ReviewAggregator.Candidate(row.id, row.duplicateGroupId, reason)
+                // 关闭「重复」维度时不携带组 id：命中其他维度（模糊/低分辨率等）的组员按
+                // 单图原因入项，不折叠成重复组（否则整组连未命中成员一起被展示并默认勾选）
+                ReviewAggregator.Candidate(
+                    row.id,
+                    if (config.duplicateEnabled) row.duplicateGroupId else null,
+                    reason,
+                )
             },
             maxItems,
         )
@@ -164,7 +170,7 @@ class CleanupRecommender(
 
     /**
      * 「推荐删除」候选：取按 delete_score 粗筛的候选池，排除已被其他维度纳入的图，
-     * 用删除偏好模型打分，概率 ≥ 阈值的按概率降序取前 [limit]。[outSize] 回填候选 size 供概览统计。
+     * 用删除偏好模型打分，概率严格大于阈值的按概率降序取前 [limit]。[outSize] 回填候选 size 供概览统计。
      */
     private suspend fun buildRecommendations(
         baseItems: List<ReviewBatchItem>,
@@ -184,7 +190,9 @@ class CleanupRecommender(
         }
         val now = System.currentTimeMillis()
         return imageDao.recommendCandidatePool(limit * REC_POOL_FACTOR).asSequence()
-            .filter { it.id !in usedIds }
+            // 重复组成员（含组内保留图 is_duplicate_best）一律排除：组的去留由重复审核项
+            // 整组决策，推荐通道再把保留图默认勾选会导致「按推荐勾选」后整组全删
+            .filter { !it.inDuplicateGroup && it.id !in usedIds }
             .map { row ->
                 outSize[row.id] = row.size
                 row.id to model.probability(
@@ -194,7 +202,9 @@ class CleanupRecommender(
                     ),
                 )
             }
-            .filter { it.second >= REC_THRESHOLD }
+            // 严格大于：全零冷模型对任何特征 σ(0)=0.5 恰好压线，若用 >= 会让候选池全体并列
+            // 命中、按 delete_score 硬凑出「推荐」；真实学习过的模型输出不会恰为 0.5，不受影响
+            .filter { it.second > REC_THRESHOLD }
             .sortedByDescending { it.second }
             .take(limit)
             .map { ReviewBatchItem.Single(it.first, CleanupRules.REASON_RECOMMENDED) }
@@ -202,8 +212,9 @@ class CleanupRecommender(
     }
 
     /**
-     * 「审核全部重复」：所有重复组一次性纳入（不受 [maxItems] 限制），避免同种重复图分多批、清完又冒出来；
-     * 其它维度（低分/模糊/表情包等）仍按 [maxItems] 限量。
+     * 「审核全部重复」：重复组不受 [maxItems] 限制、但按 [MAX_DUP_GROUPS] 分波——本波组员
+     * 处理后离开 active，下次生成自然轮到后续组。一次性全量纳入会让审核页把 10w+ 组员的
+     * 完整实体物化进内存（数百 MB 直接 OOM）。其它维度（低分/模糊/表情包等）仍按 [maxItems] 限量。
      */
     private suspend fun generateAllDuplicatesBatch(
         config: CleanupConfig,
@@ -211,13 +222,17 @@ class CleanupRecommender(
         maxItems: Int,
         oldestFirst: Boolean,
     ): CleanupBatch {
-        // 1) 所有重复组（全量，保持组首次出现顺序）
+        // 1) 重复组（保持组首次出现顺序，最多 MAX_DUP_GROUPS 组/波；组一旦入选则统计其全部成员）
         val dupRows = imageDao.allDuplicateRows(oldestFirst)
         val seenGroups = LinkedHashSet<Long>()
         val dupGroupSize = HashMap<Long, Long>()
-        dupRows.forEach {
-            seenGroups.add(it.duplicateGroupId)
-            dupGroupSize[it.duplicateGroupId] = (dupGroupSize[it.duplicateGroupId] ?: 0L) + it.size
+        for (row in dupRows) {
+            if (row.duplicateGroupId in seenGroups) {
+                dupGroupSize[row.duplicateGroupId] = (dupGroupSize[row.duplicateGroupId] ?: 0L) + row.size
+            } else if (seenGroups.size < MAX_DUP_GROUPS) {
+                seenGroups.add(row.duplicateGroupId)
+                dupGroupSize[row.duplicateGroupId] = row.size
+            }
         }
         val dupItems = seenGroups.map { ReviewBatchItem.Group(it) }
 
@@ -278,10 +293,12 @@ class CleanupRecommender(
                 createdAt = System.currentTimeMillis(),
             )
         )
-        // 落库候选（历史）：每个重复组留一个代表（避免几万条），其它维度单图各一条
+        // 落库候选（历史）：每个入选的重复组留一个代表（避免几万条），其它维度单图各一条
         val candidateEntities = buildList {
             val groupSeed = HashMap<Long, Long>()
-            dupRows.forEach { row -> groupSeed.getOrPut(row.duplicateGroupId) { row.id } }
+            dupRows.forEach { row ->
+                if (row.duplicateGroupId in seenGroups) groupSeed.getOrPut(row.duplicateGroupId) { row.id }
+            }
             groupSeed.values.forEach { id ->
                 add(
                     CleanupCandidateEntity(
@@ -322,6 +339,12 @@ class CleanupRecommender(
         const val DEFAULT_MAX_ITEMS = 200
         private const val POOL_FACTOR = 8L
         private const val POOL_HARD_CAP = 50_000L
+
+        /**
+         * 「审核全部重复」单波组数上限：审核页会按组装载全部成员实体（约 0.5~1KB/张），
+         * 2000 组 × 平均几张成员是几十 MB 量级的可控上限；超出的组留给下一波。
+         */
+        private const val MAX_DUP_GROUPS = 2000
 
         /** 推荐删除：概率 ≥ 此值才纳入；候选池粗筛倍数（取 limit×此值 再模型精排）。 */
         private const val REC_THRESHOLD = 0.5

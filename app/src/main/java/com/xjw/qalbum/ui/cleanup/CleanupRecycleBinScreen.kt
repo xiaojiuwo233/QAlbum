@@ -81,7 +81,6 @@ fun CleanupRecycleBinScreen(
     val quarantineStats by viewModel.quarantineStats.collectAsState()
     val thumbnailSummary by viewModel.thumbnailTrashSummary.collectAsState()
     val busy by viewModel.busy.collectAsState()
-    val purgeProgress by viewModel.purgeProgress.collectAsState()
 
     // 计数/总大小走 DB 聚合（stats），不再 items.size/sumOf —— 列表已分页，内存里没有全量项
     val totalCount = quarantineStats.count + thumbnailSummary.count
@@ -129,6 +128,16 @@ fun CleanupRecycleBinScreen(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
+            // 常驻告知：回收站在应用专属目录，数据随 App 数据一起消亡，用户须知
+            item(span = { GridItemSpan(maxLineSpan) }) {
+                Text(
+                    "回收站保存在应用专属目录：卸载或清除应用数据将永久丢失其中照片",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 2.dp, vertical = 6.dp),
+                )
+            }
+
             item(span = { GridItemSpan(maxLineSpan) }) {
                 ThumbnailEntryCard(
                     summary = thumbnailSummary,
@@ -199,8 +208,7 @@ fun CleanupRecycleBinScreen(
             dismissButton = { TextButton(onClick = { showClearConfirm = false }) { Text("取消") } },
         )
     }
-
-    purgeProgress?.let { PurgeProgressDialog(it) }
+    // 清理进度模态由 CleanupScreen 根部统一展示（重建后落回主页也不丢屏蔽）
 }
 
 @Composable

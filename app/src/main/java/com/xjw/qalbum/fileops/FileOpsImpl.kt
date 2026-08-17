@@ -20,7 +20,8 @@ import java.io.FileInputStream
  * 分页约定（规避 binder 1MB 事务上限）：
  * 对排序后的目录项按 [offset, offset+limit) 取窗口；窗口内不符合类型的项被
  * 过滤掉（所以单页返回数可能小于 limit）；若窗口之后还有原始项，结果末尾
- * 追加哨兵 [MORE_MARKER]，客户端据此继续翻页。
+ * 追加哨兵 [MORE_MARKER]，客户端据此继续翻页。同一目录从 offset==0 开始的
+ * 连续翻页保证基于同一份快照（见 [DirSnapshot]），目录并发变动不会漏项/重项。
  */
 internal object FileOpsImpl {
 
@@ -72,11 +73,37 @@ internal object FileOpsImpl {
 
     // ---- 内部实现 ----
 
+    /**
+     * 目录列举快照：同一目录的所有分页基于同一份不可变的排序名单。
+     *
+     * 早期实现每页都重新 list+sort 再按 offset 取窗——目录被其他 app 并发增删时
+     * 排序数组整体位移，窗口边界的条目会被漏掉（在架图片被误标 missing）或重复发出；
+     * 大目录（>limit 条）还要付 O(页数 × m·log m) 的重复 readdir+排序。
+     * 现在 offset==0 时构建一次快照并缓存，后续页直接切片：既根除窗口漂移，
+     * 也把大目录列举降为一次 O(m·log m)。扫描按目录串行翻页，单槽足够；
+     * 未命中（特权进程重启 / 交叉调用）时退回临时快照，行为等同旧实现。
+     */
+    private class DirSnapshot(val dir: String, val names: Array<String>)
+
+    @Volatile
+    private var dirSnapshot: DirSnapshot? = null
+
     private fun listEntries(dir: String, offset: Int, limit: Int, dirsOnly: Boolean): Array<String> {
-        val names = File(dir).list() ?: return emptyArray()
-        // 排序保证翻页窗口稳定（readdir 原始序在并发修改时不可靠）
-        names.sort()
-        if (offset >= names.size) return emptyArray()
+        val cached = dirSnapshot
+        val snap = if (offset > 0 && cached != null && cached.dir == dir) cached else {
+            val names = File(dir).list() ?: run {
+                dirSnapshot = null
+                return emptyArray()
+            }
+            // 排序保证翻页窗口稳定（readdir 原始序在并发修改时不可靠）
+            names.sort()
+            DirSnapshot(dir, names).also { dirSnapshot = it }
+        }
+        val names = snap.names
+        if (offset >= names.size) {
+            if (dirSnapshot === snap) dirSnapshot = null
+            return emptyArray()
+        }
         val end = minOf(offset + limit, names.size)
         val out = ArrayList<String>(end - offset + 1)
         for (i in offset until end) {
@@ -95,7 +122,12 @@ internal object FileOpsImpl {
                 // 单项 lstat 失败（瞬时删除/权限）：跳过该项，不影响整页
             }
         }
-        if (end < names.size) out.add(MORE_MARKER)
+        if (end < names.size) {
+            out.add(MORE_MARKER)
+        } else if (dirSnapshot === snap) {
+            // 末页发出后释放快照，长驻特权进程不长期钉住大目录的名单内存
+            dirSnapshot = null
+        }
         return out.toTypedArray()
     }
 

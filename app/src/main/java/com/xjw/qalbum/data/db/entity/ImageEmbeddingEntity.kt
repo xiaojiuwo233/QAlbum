@@ -9,12 +9,14 @@ import androidx.room.PrimaryKey
  * 图片语义 embedding（Phase 4）
  *
  * 原计划用 sqlite-vec 扩展存储 [FLOAT[N]] 向量，但 sqlite-vec 需要预编译 .so 集成成本较高。
- * 这里采用更简洁的方案：
- * - 把向量序列化为 FloatArray → ByteArray（小端序）存到 BLOB
- * - 启动 / 首次搜索时一次性加载到内存（[com.xjw.qalbum.service.ai.SemanticIndex]）
- * - 暴力 cosine 相似度搜索；10w 条 × 1536 维向量约 600MB 内存，可控
+ * 这里采用更简洁的方案：把向量序列化为 FloatArray → ByteArray（小端序）存到 BLOB，
+ * 搜索时由 [com.xjw.qalbum.service.ai.SemanticIndex] 装载做暴力 cosine。
  *
- * 这种方案对一般用户够用；超大规模再切到 sqlite-vec 是后续优化。
+ * 内存红线：1536 维 × 4B ≈ 6KB/条，Android 应用堆普遍 256MB（largeHeap 512MB），
+ * **全量常驻内存的上限约 3-4w 条**——5w 条起就有必崩风险，绝不能按「全表进堆」设计。
+ * 索引侧必须设按可用堆折算的硬上限，超限降级为 [EmbeddingDao.listPaged] 分页扫 DB 的
+ * 流式 top-K；判「是否已嵌入」走 [EmbeddingDao.exists] 主键单查，不为判存在触发全量装载。
+ * 大规模的长期方案仍是 sqlite-vec / 量化（float16/int8 省 50-75%）。
  */
 @Entity(
     tableName = "image_embeddings",

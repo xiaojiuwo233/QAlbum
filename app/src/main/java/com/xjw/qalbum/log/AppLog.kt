@@ -6,6 +6,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Process
+import android.os.SystemClock
 import androidx.core.content.FileProvider
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -41,6 +42,7 @@ object AppLog {
     private const val RING_CAPACITY = 5000                   // 内存里最多保留多少条供查看
     private const val SEED_TAIL_BYTES = 512L * 1024          // 启动时回填的尾部字节数
     private const val FLUSH_DELAY_MS = 200L                  // 写入后合并刷盘的延迟
+    private const val ROTATE_RETRY_BACKOFF_MS = 30_000L      // 轮转失败（磁盘满）后的重试退避
 
     private const val CURRENT_NAME = "app.log"
     private val TIME_FORMAT = ThreadLocal.withInitial {
@@ -66,6 +68,9 @@ object AppLog {
     // 仅在 handler 线程访问
     private var writer: BufferedWriter? = null
     private var currentBytes = 0L
+    // rename 失败（磁盘满）时 app.log 仍超限，退避到此时刻前不再触发 rotate，
+    // 避免磁盘满期间每写一条日志都重跑一次轮转
+    private var rotateRetryAt = 0L
     private val flushRunnable = Runnable { runCatching { writer?.flush() } }
 
     private val ring = ArrayDeque<LogEntry>(RING_CAPACITY)
@@ -131,7 +136,7 @@ object AppLog {
             w.write(line)
             w.newLine()
             currentBytes += line.toByteArray(Charsets.UTF_8).size + 1
-            if (currentBytes >= MAX_FILE_BYTES) rotate()
+            if (currentBytes >= MAX_FILE_BYTES && SystemClock.uptimeMillis() >= rotateRetryAt) rotate()
         }
         handler?.removeCallbacks(flushRunnable)
         handler?.postDelayed(flushRunnable, FLUSH_DELAY_MS)
@@ -178,10 +183,10 @@ object AppLog {
             return
         }
         h.post {
-            runCatching { writer?.flush(); writer?.close() }
-            writer = null
+            closeWriter()
             logFilesOldestFirst().forEach { it.delete() }
             currentBytes = 0
+            rotateRetryAt = 0
             openWriter()
             synchronized(ring) { ring.clear() }
             _version.value = _version.value + 1
@@ -211,10 +216,17 @@ object AppLog {
         }
     }
 
+    /** flush 与 close 分开兜底：flush 抛异常（磁盘满）时也必须走到 close，否则泄漏 fd。 */
+    private fun closeWriter() {
+        val w = writer ?: return
+        writer = null
+        runCatching { w.flush() }
+        runCatching { w.close() }
+    }
+
     private fun rotate() {
+        closeWriter()
         runCatching {
-            writer?.flush(); writer?.close()
-            writer = null
             // 删最旧、整体后移：app.(N-1).log → app.N.log … app.log → app.1.log
             File(logDir, "$CURRENT_NAME.$MAX_ROTATED_FILES").delete()
             for (i in MAX_ROTATED_FILES - 1 downTo 1) {
@@ -225,6 +237,10 @@ object AppLog {
         }
         currentBytes = 0
         openWriter()
+        // openWriter 读回真实大小：仍超限说明 rename 未成功，退避一段时间再重试轮转
+        rotateRetryAt = if (currentBytes >= MAX_FILE_BYTES) {
+            SystemClock.uptimeMillis() + ROTATE_RETRY_BACKOFF_MS
+        } else 0
     }
 
     /** 历史→当前 顺序的全部日志文件（存在的）。 */

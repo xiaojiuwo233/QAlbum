@@ -23,6 +23,8 @@ datastore = "1.1.2"
 # 2025.12.00 绑定 material3 1.5.0-alpha10：暴露 MaterialExpressiveTheme / expressiveLightColorScheme / MotionScheme，
 # 且 minCompileSdk=35、minAGP=8.6.0，与本项目 AGP 8.7.3 / compileSdk 35 兼容
 # （material3 1.4.0 stable 把 Expressive API 改成了 internal；1.5.0-alpha19+ 要求 AGP 9 / compileSdk 37）
+# 迁移目标：material3 1.5.0 stable 发布后，与 AGP 9 + compileSdk 37 一并升级并换回稳定通道 BOM；
+# 在此之前冻结本 BOM 不做顺手 bump（alpha 通道无 API/行为稳定性保证，且全局 opt-in 使受影响面不可见）
 composeBom = "2025.12.00"
 # androidx.compose.material3.adaptive 是独立 group，最新稳定 1.2.0
 adaptive = "1.2.0"
@@ -103,6 +105,7 @@ androidx-room-runtime = { group = "androidx.room", name = "room-runtime", versio
 androidx-room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "room" }
 androidx-room-paging = { group = "androidx.room", name = "room-paging", version.ref = "room" }
 androidx-room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
+androidx-room-testing = { group = "androidx.room", name = "room-testing", version.ref = "room" }
 
 # Coil
 coil-compose = { group = "io.coil-kt.coil3", name = "coil-compose", version.ref = "coil" }
@@ -151,6 +154,7 @@ androidx-compose-ui-test-manifest = { group = "androidx.compose.ui", name = "ui-
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 android-library = { id = "com.android.library", version.ref = "agp" }
+androidx-room = { id = "androidx.room", version.ref = "room" }
 kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }

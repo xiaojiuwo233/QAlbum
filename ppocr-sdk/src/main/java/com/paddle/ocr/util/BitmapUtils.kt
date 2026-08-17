@@ -15,6 +15,7 @@
 package com.paddle.ocr.util
 
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import org.opencv.android.Utils
 import org.opencv.core.CvType
 import org.opencv.core.Mat
@@ -24,6 +25,11 @@ import org.opencv.imgproc.Imgproc
 
 object BitmapUtils {
 
+    // Bounds the memory peak of the platform-decoder fallback (2048px max side ≈ 16MB
+    // ARGB bitmap). Detection downscales further anyway and recognition crops keep enough
+    // resolution at this size.
+    private const val FALLBACK_MAX_SIDE = 2048
+
     fun imdecodeBGR(imageBytes: ByteArray): Mat {
         val encoded = MatOfByte(*imageBytes)
         return try {
@@ -31,6 +37,36 @@ object BitmapUtils {
         } finally {
             encoded.release()
         }
+    }
+
+    /**
+     * Decodes to a BGR Mat, falling back to the platform decoder when imdecode fails:
+     * Android's opencv_java4 has no HEIF/AVIF/GIF codecs while BitmapFactory decodes HEIF
+     * and the first GIF frame. Returns an empty Mat when both decoders fail.
+     */
+    fun decodeBGRWithFallback(imageBytes: ByteArray): Mat {
+        val decoded = imdecodeBGR(imageBytes)
+        if (!decoded.empty()) return decoded
+        decoded.release()
+        val bitmap = decodeDownsampledBitmap(imageBytes) ?: return Mat()
+        return try {
+            bitmapToBGRMat(bitmap)
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    private fun decodeDownsampledBitmap(imageBytes: ByteArray): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        var sampleSize = 1
+        val maxSide = maxOf(bounds.outWidth, bounds.outHeight)
+        while (maxSide / sampleSize > FALLBACK_MAX_SIDE) {
+            sampleSize *= 2
+        }
+        val opts = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+        return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size, opts)
     }
 
     fun bitmapToBGRMat(bitmap: Bitmap): Mat {

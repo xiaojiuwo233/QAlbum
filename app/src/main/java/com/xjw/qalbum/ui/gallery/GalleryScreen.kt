@@ -64,13 +64,15 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -104,6 +106,12 @@ import com.xjw.qalbum.ui.components.SaveToAlbumSheet
 import com.xjw.qalbum.ui.imageloading.ImageEntityModel
 import org.koin.androidx.compose.koinViewModel
 
+/** 多选集合的 Saver：让 selectedIds 与弹窗开关一样经 rememberSaveable 恢复，二者成对存亡 */
+private val SelectedIdsSaver = listSaver<Set<Long>, Long>(
+    save = { it.toList() },
+    restore = { it.toSet() },
+)
+
 @Composable
 fun GalleryScreen(
     contentPadding: PaddingValues,
@@ -122,7 +130,9 @@ fun GalleryScreen(
     val sort by viewModel.gallerySort.collectAsState()
     val largeThreshold by viewModel.largeThresholdBytes.collectAsState()
     val enabledPhases by viewModel.enabledPhases.collectAsState()
-    var selectedIds by remember { mutableStateOf(setOf<Long>()) }
+    // 多选状态必须与 rememberSaveable 的弹窗开关成对存亡：否则旋转/进程重建后
+    // 确认框恢复显示而选中集已清空，出现「删除 0 张」的幽灵对话框
+    var selectedIds by rememberSaveable(stateSaver = SelectedIdsSaver) { mutableStateOf(setOf<Long>()) }
     var showDeleteConfirm by rememberSaveable { mutableStateOf(false) }
     var showPrefsSheet by rememberSaveable { mutableStateOf(false) }
     var showSaveSheet by rememberSaveable { mutableStateOf(false) }
@@ -254,8 +264,8 @@ fun GalleryScreen(
             onConfirm = { subdir, alsoTrash ->
                 val ids = selectedIds
                 showSaveSheet = false
-                viewModel.saveImages(ids, subdir, alsoTrash) { count ->
-                    Toast.makeText(context, "已保存 $count 张", Toast.LENGTH_SHORT).show()
+                viewModel.saveImages(ids, subdir, alsoTrash) { saved, failed ->
+                    Toast.makeText(context, saveResultMessage(saved, failed), Toast.LENGTH_SHORT).show()
                     clearSelection()
                     items.refresh()
                 }
@@ -263,6 +273,10 @@ fun GalleryScreen(
         )
     }
 }
+
+/** 保存结果文案：失败的图不会被移入回收站，必须显式告知张数 */
+private fun saveResultMessage(saved: Int, failed: Int): String =
+    if (failed > 0) "已保存 $saved 张，$failed 张保存失败（未移入回收站）" else "已保存 $saved 张"
 
 @Composable
 fun FavoriteGalleryScreen(
@@ -281,7 +295,7 @@ fun FavoriteGalleryScreen(
     val gridState = rememberLazyGridState()
     val context = LocalContext.current
     var columns by rememberSaveable { mutableIntStateOf(4) }
-    var selectedIds by remember { mutableStateOf(setOf<Long>()) }
+    var selectedIds by rememberSaveable(stateSaver = SelectedIdsSaver) { mutableStateOf(setOf<Long>()) }
     var showDeleteConfirm by rememberSaveable { mutableStateOf(false) }
     var showSaveSheet by rememberSaveable { mutableStateOf(false) }
     val exportSubdirs by viewModel.exportSubdirs.collectAsState()
@@ -390,8 +404,8 @@ fun FavoriteGalleryScreen(
             onConfirm = { subdir, alsoTrash ->
                 val ids = selectedIds
                 showSaveSheet = false
-                viewModel.saveImages(ids, subdir, alsoTrash) { count ->
-                    Toast.makeText(context, "已保存 $count 张", Toast.LENGTH_SHORT).show()
+                viewModel.saveImages(ids, subdir, alsoTrash) { saved, failed ->
+                    Toast.makeText(context, saveResultMessage(saved, failed), Toast.LENGTH_SHORT).show()
                     clearSelection()
                     items.refresh()
                 }
@@ -577,10 +591,15 @@ private fun TimelineGrid(
     sharedScope: SharedTransitionScope? = null,
     animatedScope: AnimatedVisibilityScope? = null,
 ) {
-    val photoBounds = remember { mutableStateMapOf<Long, Rect>() }
+    // 命中矩形只被手势闭包读取，不参与组合——用普通 HashMap 避免滚动期每帧的快照写入；
+    // 条目在 item 离屏销毁时移除（见下方 DisposableEffect），map 恒约等于可见项数
+    val photoBounds = remember { HashMap<Long, Rect>() }
     var containerBounds by remember { mutableStateOf(Rect.Zero) }
     var dragSelectTarget by remember { mutableStateOf<Boolean?>(null) }
     val draggedIds = remember { mutableSetOf<Long>() }
+    // pointerInput 的手势闭包只在 key 变化时重启，直接捕获 selectedIds 参数会永远读到
+    // 首次组合时的旧值（拖动「取消选择」失效）；经 rememberUpdatedState 转发读最新值
+    val currentSelectedIds by rememberUpdatedState(selectedIds)
 
     fun idAt(rootOffset: Offset): Long? {
         val visibleIds = gridState.layoutInfo.visibleItemsInfo.mapNotNull { it.key as? Long }.toSet()
@@ -634,7 +653,7 @@ private fun TimelineGrid(
                     onDragStart = { offset ->
                         val rootOffset = offset + Offset(containerBounds.left, containerBounds.top)
                         val id = idAt(rootOffset) ?: return@detectDragGesturesAfterLongPress
-                        val target = id !in selectedIds
+                        val target = id !in currentSelectedIds
                         dragSelectTarget = target
                         draggedIds.clear()
                         draggedIds.add(id)
@@ -679,20 +698,26 @@ private fun TimelineGrid(
         ) { index ->
             when (val item = items[index]) {
                 is GalleryTimelineItem.Header -> SectionHeader(item.label)
-                is GalleryTimelineItem.Photo -> TimelinePhoto(
-                    image = item.image,
-                    selected = item.image.id in selectedIds,
-                    selectionMode = selectionMode,
-                    largeThresholdBytes = largeThresholdBytes,
-                    enabledPhases = enabledPhases,
-                    onBounds = { photoBounds[item.image.id] = it },
-                    onClick = {
-                        if (selectionMode) onToggleSelection(item.image.id) else onImageClick(item.image.id)
-                    },
-                    onLongClick = { onSelect(item.image.id) },
-                    sharedScope = sharedScope,
-                    animatedScope = animatedScope,
-                )
+                is GalleryTimelineItem.Photo -> {
+                    val imageId = item.image.id
+                    DisposableEffect(imageId) {
+                        onDispose { photoBounds.remove(imageId) }
+                    }
+                    TimelinePhoto(
+                        image = item.image,
+                        selected = imageId in selectedIds,
+                        selectionMode = selectionMode,
+                        largeThresholdBytes = largeThresholdBytes,
+                        enabledPhases = enabledPhases,
+                        onBounds = { photoBounds[imageId] = it },
+                        onClick = {
+                            if (selectionMode) onToggleSelection(imageId) else onImageClick(imageId)
+                        },
+                        onLongClick = { onSelect(imageId) },
+                        sharedScope = sharedScope,
+                        animatedScope = animatedScope,
+                    )
+                }
                 null -> Unit
             }
         }

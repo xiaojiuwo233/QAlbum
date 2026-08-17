@@ -15,6 +15,12 @@ import com.xjw.qalbum.service.cleanup.ImageFileManager
 import com.xjw.qalbum.ui.cleanup.PurgeProgress
 import com.xjw.qalbum.ui.gallery.GalleryTimelineItem
 import com.xjw.qalbum.ui.gallery.withDateHeaders
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -22,6 +28,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import timber.log.Timber
 
 /**
  * 标签管理页 ViewModel
@@ -30,6 +38,8 @@ import kotlinx.coroutines.launch
  * - [timelineFor]：某标签下活跃图片的分页流，**按时间分组**（复用图库的 [withDateHeaders]，与图库页一致）。
  * - [moveToTrash]：选中子集（[selectedIds] 非空）按 id 删，否则按 tag 分块全删，全程上报 [progress]。
  * - [removeTag]/[removeTagBulk]：从图片上取消该标签；若是「用户保留」标签，同时清除 user_keep（重新可进审核）。
+ * - 分钟级批量操作（整标签回收站 / 批量取消标签）跑在 App 级 [appScope]：退出页面 / VM 销毁不中断，
+ *   避免取消落在管线「文件已移、DB 未写」的中间窗口。
  * - 预览所需的收藏 / 分享 / 保存 / OCR 与图库 / 审核页同一套实现。
  */
 class TagsViewModel(
@@ -38,6 +48,7 @@ class TagsViewModel(
     private val cleanupController: CleanupController,
     private val imageFileManager: ImageFileManager,
     private val settings: SettingsRepository,
+    private val appScope: CoroutineScope,
 ) : ViewModel() {
 
     val tags: StateFlow<List<TagDao.TagWithCount>> =
@@ -58,11 +69,34 @@ class TagsViewModel(
     private val _busy = MutableStateFlow(false)
     val busy: StateFlow<Boolean> = _busy.asStateFlow()
 
-    /** 某标签下活跃图片，按时间（新→旧）分页并插入日期分组标题，与图库时间线同一渲染。 */
-    fun timelineFor(tagId: Long): Flow<PagingData<GalleryTimelineItem>> =
-        imageRepository.imagesByTagPager(tagId)
-            .withDateHeaders(imageRepository.observeTagDateBucketCounts(tagId))
-            .cachedIn(viewModelScope)
+    /** 单条活跃分页流：cachedIn 在给定 scope 内常驻，不主动取消不会释放页缓存与 Room 失效监听 */
+    private var timelineScope: CoroutineScope? = null
+    private var timelineTagId: Long? = null
+    private var timelineFlow: Flow<PagingData<GalleryTimelineItem>>? = null
+
+    /**
+     * 某标签下活跃图片，按时间（新→旧）分页并插入日期分组标题，与图库时间线同一渲染。
+     * 同一标签重进复用同一条流；切换标签时取消旧流的缓存 scope ——否则反复浏览 N 个标签会
+     * 挂着 N 条活跃 pager，images 表每次写入都让它们全部后台重查（200 万行库上代价显著）。
+     */
+    fun timelineFor(tagId: Long): Flow<PagingData<GalleryTimelineItem>> {
+        timelineFlow?.let { if (timelineTagId == tagId) return it }
+        timelineScope?.cancel()
+        // 子 scope 挂在 viewModelScope 的 Job 下：VM 清理时随之取消，切换标签时单独取消
+        val scope = CoroutineScope(
+            viewModelScope.coroutineContext + SupervisorJob(viewModelScope.coroutineContext[Job]),
+        )
+        timelineScope = scope
+        timelineTagId = tagId
+        // 计数流固化为 StateFlow：每个 PagingData generation 冷订阅时即时读缓存值，
+        // 不再各自触发一次 Room 聚合冷查询（与 GalleryViewModel 同范式）
+        val bucketCounts = imageRepository.observeTagDateBucketCounts(tagId)
+            .stateIn(scope, SharingStarted.WhileSubscribed(5_000), null)
+        return imageRepository.imagesByTagPager(tagId)
+            .withDateHeaders(bucketCounts)
+            .cachedIn(scope)
+            .also { timelineFlow = it }
+    }
 
     fun setColumns(columns: Int) {
         viewModelScope.launch { settings.setGalleryColumns(columns) }
@@ -94,25 +128,36 @@ class TagsViewModel(
 
     /**
      * 取消单张图片的该标签。若是「用户保留」标签，同时把 user_keep 清掉——
-     * 等价于「撤销保留」，该图之后可重新进入审核（见 [TAG_USER_KEEP] 语义）。
+     * 等价于「撤销保留」，该图之后可重新进入审核（见 [TAG_USER_KEEP] 语义）；
+     * 摘标签与清 user_keep 在 DAO 层同一事务内完成，不会出现半完成状态。
      */
     fun removeTag(tag: TagDao.TagWithCount, imageId: Long, onDone: () -> Unit = {}) {
         viewModelScope.launch {
-            tagDao.unlinkTag(imageId, tag.id)
-            if (tag.name == TAG_USER_KEEP) imageRepository.setUserKeep(imageId, false)
+            tagDao.removeTagBatch(tag.id, listOf(imageId), clearUserKeep = tag.name == TAG_USER_KEEP)
             onDone()
         }
     }
 
-    /** 批量取消选中图片的该标签（同 [removeTag] 语义）。 */
+    /**
+     * 批量取消选中图片的该标签（同 [removeTag] 语义）。DAO 层分块 IN 删除并包进单事务：
+     * 整批只触发一次表失效，且不会留下「一半摘了标签、一半没摘」的中间态。
+     * [onDone] 回调实际处理张数，失败回调 0。
+     */
     fun removeTagBulk(tag: TagDao.TagWithCount, ids: Set<Long>, onDone: (Int) -> Unit = {}) {
-        if (ids.isEmpty()) return
-        viewModelScope.launch {
-            ids.forEach { id ->
-                tagDao.unlinkTag(id, tag.id)
-                if (tag.name == TAG_USER_KEEP) imageRepository.setUserKeep(id, false)
+        if (ids.isEmpty() || _busy.value) return
+        _busy.value = true
+        appScope.launch {
+            try {
+                tagDao.removeTagBatch(tag.id, ids.toList(), clearUserKeep = tag.name == TAG_USER_KEEP)
+                withContext(Dispatchers.Main.immediate) { onDone(ids.size) }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                Timber.e(t, "批量取消标签失败: tag=${tag.name}, count=${ids.size}")
+                withContext(Dispatchers.Main.immediate) { onDone(0) }
+            } finally {
+                _busy.value = false
             }
-            onDone(ids.size)
         }
     }
 
@@ -122,8 +167,8 @@ class TagsViewModel(
      */
     fun moveToTrash(tag: TagDao.TagWithCount, selectedIds: Set<Long>, onDone: (Int) -> Unit = {}) {
         if (_busy.value) return
-        viewModelScope.launch {
-            _busy.value = true
+        _busy.value = true
+        appScope.launch {
             try {
                 val moved = if (selectedIds.isNotEmpty()) {
                     _progress.value = PurgeProgress(0, selectedIds.size, PROGRESS_LABEL)
@@ -133,7 +178,12 @@ class TagsViewModel(
                 } else {
                     deleteWholeTag(tag)
                 }
-                onDone(moved)
+                withContext(Dispatchers.Main.immediate) { onDone(moved) }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                Timber.e(t, "按标签移入回收站失败: tag=${tag.name}")
+                withContext(Dispatchers.Main.immediate) { onDone(0) }
             } finally {
                 _progress.value = null
                 _busy.value = false

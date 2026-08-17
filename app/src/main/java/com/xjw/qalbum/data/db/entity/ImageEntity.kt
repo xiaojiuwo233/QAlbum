@@ -4,6 +4,8 @@ import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import java.time.Instant
+import java.time.ZoneId
 
 /**
  * 图片索引表 —— QAlbum 的核心实体。
@@ -19,8 +21,9 @@ import androidx.room.PrimaryKey
     indices = [
         // path 是扫描入库 diff 的高频查询列：updateFromScanByPath 按等值命中，
         // listScanRowsInPathRange / markMissingInPathRange 按 "dir/" 前缀做范围扫描，
-        // 不加索引会退化成全表扫描。
-        Index("path"),
+        // 不加索引会退化成全表扫描。unique：insertAll 的 IGNORE 兜底依赖此唯一约束，
+        // 否则极端并发下的双插会静默写入重复行且无任何约束拦截。
+        Index(value = ["path"], unique = true),
         Index("xxhash"),
         Index("phash"),
         Index("cache_key"),
@@ -32,6 +35,12 @@ import androidx.room.PrimaryKey
         Index("delete_score"),
         Index("info_score"),
         Index("duplicate_group_id"),
+        // 分桶计数覆盖索引：observeTimelineDateBucketCounts / observeFavoriteDateBucketCounts
+        // 只扫索引条目做 GROUP BY date_bucket，免 200w 行全表逐行 strftime。
+        Index("status", "source_type", "date_bucket", "is_protected"),
+        // 时间线定位覆盖索引：timelineRank* / timelineIds*（keyset 定位与窗口）只扫索引条目计数，
+        // 不做 200w 次行回表。
+        Index("status", "source_type", "mtime"),
     ]
 )
 data class ImageEntity(
@@ -47,6 +56,10 @@ data class ImageEntity(
     @ColumnInfo(name = "is_variant_primary") val isVariantPrimary: Boolean = false,
     @ColumnInfo(name = "size") val size: Long,
     @ColumnInfo(name = "mtime") val mtime: Long,
+    // 本地日分桶键（year*1000 + dayOfYear，与 strftime('%Y'/'%j', 'localtime') 同口径）：
+    // 入库/扫描更新时预计算，分桶聚合走覆盖索引整列 GROUP BY，免逐行 strftime。
+    // 时区变更后存量值仍是旧时区口径，由下一次扫描 updateFromScanByPath 逐步矫正（可接受的近似）。
+    @ColumnInfo(name = "date_bucket", defaultValue = "0") val dateBucket: Long = computeDateBucket(mtime),
     @ColumnInfo(name = "first_seen") val firstSeen: Long,
     @ColumnInfo(name = "last_seen") val lastSeen: Long,
 
@@ -109,6 +122,7 @@ data class ImageEntity(
             isVariantPrimary == other.isVariantPrimary &&
             size == other.size &&
             mtime == other.mtime &&
+            dateBucket == other.dateBucket &&
             firstSeen == other.firstSeen &&
             lastSeen == other.lastSeen &&
             mime == other.mime &&
@@ -137,4 +151,14 @@ data class ImageEntity(
     }
 
     override fun hashCode(): Int = id.hashCode()
+}
+
+/**
+ * 由 mtime 计算本地日分桶键（year*1000 + dayOfYear）。
+ * 必须与 SQL 侧 `CAST(strftime('%Y', mtime/1000, 'unixepoch', 'localtime') AS INTEGER) * 1000
+ * + CAST(strftime('%j', …) AS INTEGER)` 严格同口径（updateFromScanByPath 与 v10 迁移回填用后者）。
+ */
+fun computeDateBucket(mtime: Long): Long {
+    val d = Instant.ofEpochMilli(mtime).atZone(ZoneId.systemDefault()).toLocalDate()
+    return d.year * 1000L + d.dayOfYear
 }

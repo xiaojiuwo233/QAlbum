@@ -1,5 +1,6 @@
 package com.xjw.qalbum.fileops
 
+import com.xjw.qalbum.access.AccessException
 import com.xjw.qalbum.access.FileAccessProvider
 import com.xjw.qalbum.domain.model.AccessMode
 import com.xjw.qalbum.domain.model.FileInfo
@@ -8,6 +9,7 @@ import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.fail
 import org.junit.Test
 import java.io.ByteArrayInputStream
 import java.io.InputStream
@@ -39,9 +41,20 @@ class PrivilegedImageReaderTest {
     }
 
     @Test
-    fun `读抛异常时返回 null 不抛出`() = runBlocking {
+    fun `单文件 IO 异常返回 null 不抛出`() = runBlocking {
         val reader = PrivilegedImageReader(bound = null, provider = ThrowingProvider())
         assertNull(reader.read("/x.jpg", cap = 1024))
+    }
+
+    @Test
+    fun `基础设施失败 AccessException 向上抛出而非折叠成 null`() = runBlocking {
+        // 若被折叠成 null，上层会把整轮剩余健康图片误标 is_corrupt（见 PrivilegedImageReader 失败语义）
+        val reader = PrivilegedImageReader(bound = null, provider = InfraFailingProvider())
+        try {
+            reader.read("/x.jpg", cap = 1024)
+            fail("应抛出 AccessException")
+        } catch (expected: AccessException) {
+        }
     }
 
     private open class FakeProvider(private val bytes: ByteArray) : FileAccessProvider {
@@ -58,5 +71,9 @@ class PrivilegedImageReaderTest {
 
     private class ThrowingProvider : FakeProvider(ByteArray(0)) {
         override suspend fun readFile(path: String): InputStream = throw java.io.IOException("boom")
+    }
+
+    private class InfraFailingProvider : FakeProvider(ByteArray(0)) {
+        override suspend fun readFile(path: String): InputStream = throw AccessException("Shizuku 不可用")
     }
 }

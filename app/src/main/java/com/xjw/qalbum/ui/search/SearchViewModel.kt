@@ -7,8 +7,10 @@ import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.data.repository.ImageRepository
 import com.xjw.qalbum.service.ai.SemanticHit
 import com.xjw.qalbum.service.ai.SemanticSearchEngine
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -63,8 +65,9 @@ class SearchViewModel(
 
     private fun scheduleSearch() {
         searchJob?.cancel()
-        val text = _query.value
-        if (text.isBlank()) {
+        // 过短查询（含空）不触发：单字符在 20 万 OCR 行上的 FTS 命中集过大，逐键必卡
+        val text = _query.value.trim()
+        if (text.length < MIN_QUERY_CHARS) {
             _state.value = SearchUiState.Idle
             return
         }
@@ -76,15 +79,19 @@ class SearchViewModel(
                     SearchMode.OCR -> runOcrSearch(text)
                     SearchMode.Semantic -> runSemanticSearch(text)
                 }
+            } catch (ce: CancellationException) {
+                throw ce
             } catch (t: Throwable) {
+                // 已被新输入/清空取消的旧任务不得再写共享状态（否则 Idle 之后残留「查询失败」）
+                ensureActive()
                 _state.value = SearchUiState.Failed(t.message ?: "查询失败")
             }
         }
     }
 
     private suspend fun runOcrSearch(text: String) {
-        val sanitized = sanitizeForFts(text)
-        val hits = imageRepository.search(sanitized, limit = 100)
+        // 原始输入直接下传：MATCH 构造（CJK 逐字短语 / ASCII 前缀）由 OcrDao 内部的 FtsTokenize 完成
+        val hits = imageRepository.search(text, limit = 100)
         _state.value = if (hits.isEmpty()) SearchUiState.Empty else SearchUiState.OcrResult(hits)
     }
 
@@ -93,12 +100,8 @@ class SearchViewModel(
         _state.value = if (hits.isEmpty()) SearchUiState.Empty else SearchUiState.SemanticResult(hits)
     }
 
-    /** 把用户输入按空格拆词，每个词加 `*` 做前缀匹配，OR 拼接 */
-    private fun sanitizeForFts(input: String): String {
-        val cleaned = input.replace('"', ' ').replace('\'', ' ')
-        return cleaned.split(Regex("\\s+"))
-            .filter { it.isNotBlank() }
-            .joinToString(" OR ") { "$it*" }
+    companion object {
+        private const val MIN_QUERY_CHARS = 2
     }
 }
 

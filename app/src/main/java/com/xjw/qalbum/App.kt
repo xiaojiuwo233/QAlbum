@@ -2,6 +2,9 @@ package com.xjw.qalbum
 
 import android.app.Application
 import androidx.work.Configuration
+import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkManager
 import coil3.ImageLoader
 import coil3.SingletonImageLoader
 import com.xjw.qalbum.di.appModule
@@ -9,6 +12,12 @@ import com.xjw.qalbum.log.AppLog
 import com.xjw.qalbum.log.CrashHandler
 import com.xjw.qalbum.log.FileLoggingTree
 import com.xjw.qalbum.log.LogcatCapture
+import com.xjw.qalbum.service.cleanup.QuarantineManager
+import com.xjw.qalbum.worker.IncrementalScanWorker
+import com.xjw.qalbum.worker.QuarantinePurgeWorker
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
+import java.util.concurrent.TimeUnit
 import org.koin.android.ext.android.get
 import org.koin.android.ext.koin.androidContext
 import org.koin.android.ext.koin.androidLogger
@@ -55,6 +64,24 @@ class App : Application(), Configuration.Provider {
             workManagerFactory()
             modules(appModule)
         }
+
+        // 文件操作日志必须在任何新扫描/清理前尽快对账；周期 Worker 仍会再次幂等兜底。
+        val quarantineManager = get<QuarantineManager>()
+        get<CoroutineScope>().launch { quarantineManager.reconcilePending() }
+
+        // 后台任务排程（均 KEEP 幂等，重复调用无副作用）：
+        // - 增量扫描：每 6 小时一次（目录剪枝后常态秒级完成）
+        // - 回收站到期清理：每日一次，兑现 UI 承诺的「N 天后自动删除」
+        //   （AnalysisWorker 是 UI 按需触发的一次性工作，不在启动时排程）
+        IncrementalScanWorker.schedulePeriodic(this)
+        WorkManager.getInstance(this).enqueueUniquePeriodicWork(
+            QuarantinePurgeWorker.NAME_UNIQUE,
+            ExistingPeriodicWorkPolicy.KEEP,
+            PeriodicWorkRequestBuilder<QuarantinePurgeWorker>(
+                QuarantinePurgeWorker.INTERVAL_HOURS,
+                TimeUnit.HOURS,
+            ).build(),
+        )
 
         // 把 Koin 注入的 ImageLoader 安装为 Coil 全局单例，
         // 这样 Compose 内的 AsyncImage 不需要显式传 ImageLoader 也能用到自定义 Fetcher

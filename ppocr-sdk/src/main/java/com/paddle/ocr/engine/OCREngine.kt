@@ -57,7 +57,8 @@ class OCREngine(
     }
 
     fun run(imageBytes: ByteArray): OCREngineResult {
-        val srcMat = BitmapUtils.imdecodeBGR(imageBytes)
+        // Falls back to the platform decoder for formats OpenCV cannot decode (HEIC/GIF/...)
+        val srcMat = BitmapUtils.decodeBGRWithFallback(imageBytes)
         if (srcMat.empty()) {
             srcMat.release()
             throw OCRError.InvalidImage()
@@ -107,20 +108,31 @@ class OCREngine(
         val perLineRecMs = mutableListOf<Long>()
         val batchSize = config.recBatchSize.coerceAtLeast(1)
 
+        // Group boxes of similar aspect ratio into the same batch (official sorted_boxes+batch
+        // strategy): each batch is padded to its widest crop, so mixing one long line with short
+        // ones multiplies the inference cost. Ordering only affects grouping — crops are still
+        // produced lazily per batch and results are emitted in reading order below.
+        val batchOrder = if (batchSize <= 1) {
+            sortedBoxes.indices.toList()
+        } else {
+            sortedBoxes.indices.sortedBy { QuadTextCrop.estimatedCropRatio(sortedBoxes[it]) }
+        }
+        val recognized = arrayOfNulls<Pair<String, Float>>(sortedBoxes.size)
+
         var i = 0
-        while (i < sortedBoxes.size) {
+        while (i < batchOrder.size) {
             val batchCrops = mutableListOf<org.opencv.core.Mat>()
             val batchBoxIndices = mutableListOf<Int>()
-            var next = i
-            while (next < sortedBoxes.size && batchCrops.size < batchSize) {
-                val crop = QuadTextCrop.crop(srcMat, sortedBoxes[next])
+            while (i < batchOrder.size && batchCrops.size < batchSize) {
+                val boxIdx = batchOrder[i]
+                val crop = QuadTextCrop.crop(srcMat, sortedBoxes[boxIdx])
                 if (crop.rows() > 0 && crop.cols() > 0) {
                     batchCrops.add(crop)
-                    batchBoxIndices.add(next)
+                    batchBoxIndices.add(boxIdx)
                 } else {
                     crop.release()
                 }
-                next++
+                i++
             }
 
             try {
@@ -136,23 +148,25 @@ class OCREngine(
                     }
 
                     for (j in batchResult.texts.indices) {
-                        val boxIdx = batchBoxIndices[j]
-                        val (text, confidence) = batchResult.texts[j]
-                        if (confidence >= config.recScoreThresh) {
-                            allResults.add(
-                                OCRResult(
-                                    box = sortedBoxes[boxIdx],
-                                    text = text,
-                                    confidence = confidence,
-                                )
-                            )
-                        }
+                        recognized[batchBoxIndices[j]] = batchResult.texts[j]
                     }
                 }
             } finally {
                 batchCrops.forEach { it.release() }
             }
-            i = next
+        }
+
+        for (boxIdx in sortedBoxes.indices) {
+            val (text, confidence) = recognized[boxIdx] ?: continue
+            if (confidence >= config.recScoreThresh) {
+                allResults.add(
+                    OCRResult(
+                        box = sortedBoxes[boxIdx],
+                        text = text,
+                        confidence = confidence,
+                    )
+                )
+            }
         }
 
         val totalElapsed = System.currentTimeMillis() - totalStart

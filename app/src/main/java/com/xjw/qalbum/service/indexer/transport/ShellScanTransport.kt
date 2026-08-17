@@ -2,15 +2,9 @@ package com.xjw.qalbum.service.indexer.transport
 
 import com.xjw.qalbum.domain.model.AccessMode
 import com.xjw.qalbum.domain.model.FileInfo
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.toList
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 
 /**
  * Shell 传输（兜底）：AIDL 服务绑定失败时使用。
@@ -18,15 +12,15 @@ import kotlinx.coroutines.sync.withPermit
  * 相比旧实现的关键改进：
  * - `find … -exec stat {} +` 由 find 在设备端自行批量调 stat，
  *   不再有「app 侧每 200 个文件一条 stat 命令」的万次跨进程往返；
- * - stdout 全程流式逐行解析（[StreamingShell]），不再缓冲完整输出。
- *
- * 文件头读取仍是逐文件（[headerReader]），增量常态下新增/变化文件很少，
- * 可接受；深度校验请优先在 AIDL 可用的环境跑。
+ * - stdout 全程流式逐行解析（[StreamingShell]），不再缓冲完整输出；
+ * - 文件头读取走批量委托（[headerReader]，FileAccessProvider.readHeaders：
+ *   每约 200 文件一次进程/命令），不再逐文件 fork —— 首次全量 200w 图从
+ *   小时级降到分钟级。深度校验仍建议优先在 AIDL 可用的环境跑。
  */
 class ShellScanTransport(
     mode: AccessMode,
     private val shell: StreamingShell,
-    private val headerReader: suspend (path: String, n: Int) -> ByteArray?,
+    private val headerReader: suspend (paths: List<String>, n: Int) -> List<ByteArray?>,
 ) : ScanTransport {
 
     override val name: String = "shell-${mode.name.lowercase()}"
@@ -48,14 +42,8 @@ class ShellScanTransport(
         }
     }
 
-    override suspend fun readHeaders(paths: List<String>, n: Int): List<ByteArray?> = coroutineScope {
-        val semaphore = Semaphore(HEADER_CONCURRENCY)
-        paths.map { path ->
-            async(Dispatchers.IO) {
-                semaphore.withPermit { headerReader(path, n) }
-            }
-        }.awaitAll()
-    }
+    override suspend fun readHeaders(paths: List<String>, n: Int): List<ByteArray?> =
+        headerReader(paths, n)
 
     override fun close() {}
 
@@ -95,8 +83,5 @@ class ShellScanTransport(
     companion object {
         /** 一条 find 命令携带的目录参数数量（控制命令行长度与单命令产出） */
         private const val FIND_DIRS_PER_CMD = 150
-
-        /** 兜底路径逐文件读 header 的并发度 */
-        private const val HEADER_CONCURRENCY = 8
     }
 }

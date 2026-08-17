@@ -37,30 +37,51 @@ interface CleanupDao {
 
     // ---- 回收站 ----
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insertQuarantine(item: QuarantineEntity): Long
 
     /** 批量插入回收站记录（移入回收站时一批写入，避免逐条事务各自 fsync）。 */
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertQuarantineAll(items: List<QuarantineEntity>)
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    suspend fun insertQuarantineAll(items: List<QuarantineEntity>): List<Long>
 
     /**
      * 回收站列表分页（UI 用 Paging3）。早期 observeQuarantine() 全量 `SELECT *` 把整张 quarantine
      * （每行含多个 path 文本，10 列 ~1.2KB/行）一次性物化，积累上千项就撞 CursorWindow 2MB 崩
      * `Couldn't read row N, col 0`。
      */
-    @Query("SELECT * FROM quarantine ORDER BY quarantined_at DESC")
+    @Query("SELECT * FROM quarantine WHERE state = 'ready' ORDER BY quarantined_at DESC")
     fun pagingQuarantine(): PagingSource<Int, QuarantineEntity>
 
-    @Query("SELECT COUNT(*) FROM quarantine")
+    @Query("SELECT COUNT(*) FROM quarantine WHERE state = 'ready'")
     suspend fun countQuarantine(): Int
 
     /** keyset 分页遍历（一键清理逐页 purge，避免全量装载）；purge 删行后旧 id ≤ afterId 自然出后续页。 */
-    @Query("SELECT * FROM quarantine WHERE id > :afterId ORDER BY id ASC LIMIT :limit")
+    @Query("SELECT * FROM quarantine WHERE state = 'ready' AND id > :afterId ORDER BY id ASC LIMIT :limit")
     suspend fun listQuarantinePaged(afterId: Long, limit: Int): List<QuarantineEntity>
+
+    /**
+     * 已过期回收站记录（expires_at ≤ now），keyset 分页：过期自动清理逐页取出后走
+     * purgeByRecords 批删（复用 IFileOps 批删范式），afterId 防止个别 purge 失败时原地打转。
+     * quarantine 行数最多数万，expires_at 无索引的逐行过滤可接受，不为此加索引。
+     */
+    @Query("SELECT * FROM quarantine WHERE state = 'ready' AND expires_at <= :now AND id > :afterId ORDER BY id ASC LIMIT :limit")
+    suspend fun listExpiredQuarantinePaged(now: Long, afterId: Long, limit: Int): List<QuarantineEntity>
+
+    /** 未完成文件操作的持久化日志；启动时按 id keyset 对账。 */
+    @Query("SELECT * FROM quarantine WHERE state <> 'ready' AND id > :afterId ORDER BY id ASC LIMIT :limit")
+    suspend fun listPendingQuarantinePaged(afterId: Long, limit: Int): List<QuarantineEntity>
 
     @Query("SELECT * FROM quarantine WHERE id = :id LIMIT 1")
     suspend fun getQuarantineById(id: Long): QuarantineEntity?
+
+    @Query("UPDATE quarantine SET state = 'ready', thumbnail_path = :thumbnailPath WHERE id = :id")
+    suspend fun markQuarantineReady(id: Long, thumbnailPath: String?)
+
+    @Query("UPDATE quarantine SET state = 'restoring' WHERE id = :id AND state = 'ready'")
+    suspend fun markQuarantineRestoring(id: Long): Int
+
+    @Query("UPDATE quarantine SET state = 'ready' WHERE id = :id AND state = 'restoring'")
+    suspend fun rollbackQuarantineRestore(id: Long): Int
 
     @Query("DELETE FROM quarantine WHERE id = :id")
     suspend fun deleteQuarantine(id: Long)
@@ -69,7 +90,7 @@ interface CleanupDao {
     @Query("DELETE FROM quarantine WHERE id IN (:ids)")
     suspend fun deleteQuarantineByIds(ids: List<Long>)
 
-    @Query("SELECT COUNT(*) AS count, IFNULL(SUM(size), 0) AS bytes FROM quarantine")
+    @Query("SELECT COUNT(*) AS count, IFNULL(SUM(size), 0) AS bytes FROM quarantine WHERE state = 'ready'")
     fun observeQuarantineStats(): Flow<QuarantineStatsRow>
 
     data class QuarantineStatsRow(val count: Int, val bytes: Long)

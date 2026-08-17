@@ -76,8 +76,9 @@ private enum class CleanupPage { Main, Review, Group, RecycleBin }
 
 /**
  * 清理页根：在「主页 / 审核网格 / 重复组详情 / 回收站」之间用 [page] 内部切换（非导航路由），
- * 共享同一个 [CleanupViewModel]。[page] 用 remember（非 saveable），从其它 Tab 切回时回到主页、
- * 不会自动停在审核页；审核状态由 ViewModel 保留，可从主页入口卡再次进入。
+ * 共享同一个 [CleanupViewModel]。[page] 用 rememberSaveable：旋转 / 深色切换等配置变更重建
+ * Activity 时留在当前子页（审核到一半不被踢回主页）；底部导航用 saveState/restoreState，
+ * 切 Tab 再回来同样恢复到离开时的子页，可按返回键回主页。
  * 进入非主页时通过 [onReviewModeChange] 通知外层隐藏底部导航栏做全屏专注。
  */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
@@ -88,8 +89,20 @@ fun CleanupScreen(
     onReviewModeChange: (Boolean) -> Unit,
     viewModel: CleanupViewModel = koinViewModel(),
 ) {
-    var page by remember { mutableStateOf(CleanupPage.Main) }
-    var groupId by remember { mutableLongStateOf(0L) }
+    val context = LocalContext.current
+    var page by rememberSaveable { mutableStateOf(CleanupPage.Main) }
+    var groupId by rememberSaveable { mutableLongStateOf(0L) }
+    // 进程重建后恢复上次未关闭的审核会话（批次已落库，勾选可用「按推荐勾选」重建）
+    LaunchedEffect(Unit) { viewModel.ensureReviewSessionRestored() }
+    // 操作结果 / 失败提示：批量任务跑在 appScope（比页面长寿），结果经共享 message 流回到任意存活页面
+    LaunchedEffect(Unit) {
+        viewModel.message.collect { msg ->
+            if (msg != null) {
+                Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                viewModel.consumeMessage()
+            }
+        }
+    }
     // 审核网格的滚动 / 筛选 / 排序 / 列数都提升到这里：进重复组详情再返回时不被 AnimatedContent 销毁而丢失。
     // 筛选 / 排序用批次 id 作 key：同批次内增删图片保持，仅换新批次才回到默认。
     val reviewGridState = rememberLazyGridState()
@@ -151,6 +164,10 @@ fun CleanupScreen(
             )
         }
     }
+
+    // 清理进度模态提升到根部：清理进行中无论处于哪个子页（含重建后落回主页）都保持输入屏蔽
+    val purgeProgress by viewModel.purgeProgress.collectAsState()
+    purgeProgress?.let { PurgeProgressDialog(it) }
 }
 
 /**
@@ -221,8 +238,10 @@ fun CleanupMainScreen(
                 onSelectPreset = viewModel::applyPreset,
                 onGenerate = { viewModel.generateBatch(onReady = onOpenReview) },
                 onRecluster = {
+                    // 重聚类在 pipeline 自有 scope 后台跑（页面销毁不中断），此处仅提示已发起，
+                    // 进行中状态由上方分析卡片（analysisState==Running）展示
                     viewModel.reclusterDuplicates {
-                        Toast.makeText(context, "重复分组已用新算法重算", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "已开始后台重新查重", Toast.LENGTH_SHORT).show()
                     }
                 },
             )
@@ -231,6 +250,7 @@ fun CleanupMainScreen(
                 ReviewSummaryCard(
                     batch = batch,
                     selectedCount = selectedReviewDeleteIds.size,
+                    busy = busy,
                     onOpen = onOpenReview,
                     onClose = viewModel::closeReview,
                 )
@@ -435,6 +455,7 @@ private fun StrategyCard(
 private fun ReviewSummaryCard(
     batch: CleanupBatch,
     selectedCount: Int,
+    busy: Boolean,
     onOpen: () -> Unit,
     onClose: () -> Unit,
 ) {
@@ -464,7 +485,8 @@ private fun ReviewSummaryCard(
             Spacer(Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = onOpen) { Text("开始审核") }
-                OutlinedButton(onClick = onClose) { Text("关闭审核") }
+                // 批量清理（appScope 上跑）期间禁止关闭审核：避免关闭后过期结果与主页状态打架
+                OutlinedButton(onClick = onClose, enabled = !busy) { Text("关闭审核") }
             }
         }
     }
