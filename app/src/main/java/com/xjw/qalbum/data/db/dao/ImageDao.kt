@@ -723,7 +723,7 @@ interface ImageDao {
         SELECT xxhash AS hash, GROUP_CONCAT(id) AS ids
         FROM images
         WHERE status = 'active' AND source_type <> 'chatthumb' AND xxhash IS NOT NULL
-        GROUP BY xxhash
+        GROUP BY xxhash, size
         HAVING COUNT(*) > 1
     """)
     suspend fun xxhashGroups(): List<XxhashGroupRow>
@@ -768,7 +768,7 @@ interface ImageDao {
      * 只装载冲突组，无需经过本投影。
      */
     @Query("""
-        SELECT id, xxhash, phash, block_hash AS blockHash, feature_grid AS featureGrid, width, height, size, is_blank AS isBlank FROM images
+        SELECT id, xxhash, phash, block_hash AS blockHash, feature_grid AS featureGrid, width, height, size, is_blank AS isBlank, is_animated AS isAnimated FROM images
         WHERE status = 'active' AND source_type <> 'chatthumb'
           AND (xxhash IS NOT NULL OR phash IS NOT NULL)
           AND id > :afterId
@@ -998,7 +998,8 @@ interface ImageDao {
     @Query("""
         SELECT id, mtime FROM images
         WHERE status = 'active' AND source_type <> 'chatthumb'
-          AND hash_done = 1 AND ai_done = 0 AND is_corrupt = 0
+          AND hash_done = 1 AND is_corrupt = 0
+          AND (ai_done = 0 OR NOT EXISTS (SELECT 1 FROM ai_analysis a WHERE a.image_id = images.id))
           AND (mtime > :afterMtime OR (mtime = :afterMtime AND id > :afterId))
         ORDER BY mtime ASC, id ASC
         LIMIT :limit
@@ -1008,7 +1009,8 @@ interface ImageDao {
     @Query("""
         SELECT id, mtime FROM images
         WHERE status = 'active' AND source_type <> 'chatthumb'
-          AND hash_done = 1 AND ai_done = 0 AND is_corrupt = 0
+          AND hash_done = 1 AND is_corrupt = 0
+          AND (ai_done = 0 OR NOT EXISTS (SELECT 1 FROM ai_analysis a WHERE a.image_id = images.id))
           AND (mtime < :afterMtime OR (mtime = :afterMtime AND id < :afterId))
         ORDER BY mtime DESC, id DESC
         LIMIT :limit
@@ -1021,31 +1023,38 @@ interface ImageDao {
         oldestFirst: Boolean,
         afterMtime: Long,
         afterId: Long,
+        model: String = "",
     ): List<PendingAnalysisRow> = if (oldestFirst) {
-        pendingEmbeddingPageAsc(limit, afterMtime, afterId)
+        pendingEmbeddingPageAsc(limit, afterMtime, afterId, model)
     } else {
-        pendingEmbeddingPageDesc(limit, afterMtime, afterId)
+        pendingEmbeddingPageDesc(limit, afterMtime, afterId, model)
     }
 
     @Query("""
         SELECT id, mtime FROM images
         WHERE status = 'active' AND source_type <> 'chatthumb'
-          AND hash_done = 1 AND embedding_done = 0 AND is_corrupt = 0
+          AND hash_done = 1 AND is_corrupt = 0
+          AND (embedding_done = 0 OR EXISTS (
+              SELECT 1 FROM image_embeddings e WHERE e.image_id = images.id AND e.model <> :model
+          ))
           AND (mtime > :afterMtime OR (mtime = :afterMtime AND id > :afterId))
         ORDER BY mtime ASC, id ASC
         LIMIT :limit
     """)
-    suspend fun pendingEmbeddingPageAsc(limit: Int, afterMtime: Long, afterId: Long): List<PendingAnalysisRow>
+    suspend fun pendingEmbeddingPageAsc(limit: Int, afterMtime: Long, afterId: Long, model: String): List<PendingAnalysisRow>
 
     @Query("""
         SELECT id, mtime FROM images
         WHERE status = 'active' AND source_type <> 'chatthumb'
-          AND hash_done = 1 AND embedding_done = 0 AND is_corrupt = 0
+          AND hash_done = 1 AND is_corrupt = 0
+          AND (embedding_done = 0 OR EXISTS (
+              SELECT 1 FROM image_embeddings e WHERE e.image_id = images.id AND e.model <> :model
+          ))
           AND (mtime < :afterMtime OR (mtime = :afterMtime AND id < :afterId))
         ORDER BY mtime DESC, id DESC
         LIMIT :limit
     """)
-    suspend fun pendingEmbeddingPageDesc(limit: Int, afterMtime: Long, afterId: Long): List<PendingAnalysisRow>
+    suspend fun pendingEmbeddingPageDesc(limit: Int, afterMtime: Long, afterId: Long, model: String): List<PendingAnalysisRow>
 
     // ocr_done 标记已并入 OcrDao.saveOcrResultsBatch（带乐观校验 + 按块事务提交），
     // 不再提供无守卫的单条 markOcrDone：OCR 期间文件被重写时会把陈旧内容标成已完成。
@@ -1054,12 +1063,12 @@ interface ImageDao {
      * 定向标记 AI 打标完成（带 size/mtime 乐观守卫）：文件在打标窗口内被重写则守卫不命中、
      * 不落陈旧完成标记；只置 ai_done，不整行回写 chunk 装载时的陈旧快照。
      */
-    @Query("UPDATE images SET ai_done = 1 WHERE id = :id AND size = :size AND mtime = :mtime")
+    @Query("UPDATE images SET ai_done = 1, embedding_done = 0 WHERE id = :id AND status = 'active' AND size = :size AND mtime = :mtime")
     suspend fun markAiTagDone(id: Long, size: Long, mtime: Long): Int
 
     /** 定向标记 embedding 完成：只置 embedding_done，不整行回写陈旧快照 */
-    @Query("UPDATE images SET embedding_done = 1 WHERE id = :id")
-    suspend fun markEmbeddingDone(id: Long)
+    @Query("UPDATE images SET embedding_done = 1 WHERE id = :id AND status = 'active' AND size = :size AND mtime = :mtime")
+    suspend fun markEmbeddingDone(id: Long, size: Long, mtime: Long): Int
 
     @Query("""
         SELECT * FROM images
@@ -1322,6 +1331,7 @@ data class DedupRow(
     val height: Int,
     val size: Long,
     val isBlank: Boolean,
+    val isAnimated: Boolean,
 )
 
 /** 一条重复分配结果（由 [DuplicateClusterer] 产出，[ImageDao.assignDuplicates] 批量写回） */

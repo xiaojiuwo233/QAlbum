@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 enum class SearchMode {
@@ -38,7 +39,7 @@ class SearchViewModel(
     settings: SettingsRepository,
 ) : ViewModel() {
 
-    val aiEnabled: StateFlow<Boolean> = settings.aiEnabled
+    val aiEnabled: StateFlow<Boolean> = settings.aiConnection.map { it.enabled && it.endpoint.isNotBlank() }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     private val _query = MutableStateFlow("")
@@ -54,7 +55,10 @@ class SearchViewModel(
 
     fun onQueryChange(text: String) {
         _query.value = text
-        scheduleSearch()
+        if (_mode.value == SearchMode.OCR) scheduleSearch() else {
+            searchJob?.cancel()
+            _state.value = SearchUiState.Idle
+        }
     }
 
     fun setMode(mode: SearchMode) {
@@ -63,7 +67,9 @@ class SearchViewModel(
         scheduleSearch()
     }
 
-    private fun scheduleSearch() {
+    fun submitSearch() = scheduleSearch(immediate = true)
+
+    private fun scheduleSearch(immediate: Boolean = false) {
         searchJob?.cancel()
         // 过短查询（含空）不触发：单字符在 20 万 OCR 行上的 FTS 命中集过大，逐键必卡
         val text = _query.value.trim()
@@ -71,11 +77,13 @@ class SearchViewModel(
             _state.value = SearchUiState.Idle
             return
         }
+        val mode = _mode.value
+        _state.value = SearchUiState.Idle
         searchJob = viewModelScope.launch {
-            delay(250)
+            if (!immediate) delay(250)
             _state.value = SearchUiState.Loading
             try {
-                when (_mode.value) {
+                when (mode) {
                     SearchMode.OCR -> runOcrSearch(text)
                     SearchMode.Semantic -> runSemanticSearch(text)
                 }
@@ -92,11 +100,13 @@ class SearchViewModel(
     private suspend fun runOcrSearch(text: String) {
         // 原始输入直接下传：MATCH 构造（CJK 逐字短语 / ASCII 前缀）由 OcrDao 内部的 FtsTokenize 完成
         val hits = imageRepository.search(text, limit = 100)
+        kotlinx.coroutines.currentCoroutineContext().ensureActive()
         _state.value = if (hits.isEmpty()) SearchUiState.Empty else SearchUiState.OcrResult(hits)
     }
 
     private suspend fun runSemanticSearch(text: String) {
         val hits = semanticEngine.searchByText(text, topK = 50)
+        kotlinx.coroutines.currentCoroutineContext().ensureActive()
         _state.value = if (hits.isEmpty()) SearchUiState.Empty else SearchUiState.SemanticResult(hits)
     }
 

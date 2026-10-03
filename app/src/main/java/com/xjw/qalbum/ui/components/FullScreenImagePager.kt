@@ -1,5 +1,6 @@
 package com.xjw.qalbum.ui.components
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -32,8 +33,11 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -79,23 +83,32 @@ internal fun FullScreenImagePager(
     bottomBar: @Composable (current: ImageEntity) -> Unit,
 ) {
     if (images.isEmpty()) {
-        onClose()
+        LaunchedEffect(Unit) { onClose() }
         return
     }
     val pagerState = rememberPagerState(initialPage = startIndex.coerceIn(0, images.lastIndex)) { images.size }
     var detailsVisible by remember { mutableStateOf(false) }
     var showSaveSheet by remember { mutableStateOf(false) }
+    var zoom by remember { mutableFloatStateOf(1f) }
+    var zoomReset by remember { mutableIntStateOf(0) }
 
     Dialog(
         onDismissRequest = onClose,
         properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
     ) {
+        BackHandler(enabled = detailsVisible || zoom > 1f) {
+            if (detailsVisible) detailsVisible = false else zoomReset++
+        }
         Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
             HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize(), key = { images[it].id }) { page ->
                 ZoomableImage(
                     model = ImageEntityModel(images[page]),
                     contentDescription = images[page].filename,
                     modifier = Modifier.fillMaxSize(),
+                    stateKey = images[page].id,
+                    isActive = page == pagerState.currentPage,
+                    resetSignal = zoomReset,
+                    onZoomChanged = { if (page == pagerState.currentPage) zoom = it },
                 )
             }
 
@@ -150,6 +163,7 @@ internal fun FullScreenImagePager(
 
             // 「查看详情」：复用图库详情卡（元数据 + OCR），从底部滑入
             val ocr by produceState<OcrTextEntity?>(null, current.id, detailsVisible) {
+                value = null
                 value = if (detailsVisible) onLoadOcr(current.id) else null
             }
             // 详情卡外的全屏遮罩：点详情卡以外任意处关闭（绘制顺序在详情卡之下、其余之上）

@@ -1,6 +1,8 @@
 package com.xjw.qalbum.service.analysis
 
 import android.os.RemoteException
+import androidx.room.withTransaction
+import com.xjw.qalbum.data.db.AppDatabase
 import com.xjw.qalbum.access.AccessException
 import com.xjw.qalbum.access.AccessManager
 import com.xjw.qalbum.access.ImageBytesReader
@@ -17,6 +19,7 @@ import com.xjw.qalbum.data.remote.OpenAiCompatClient
 import com.xjw.qalbum.domain.model.AutoFavoriteConfig
 import com.xjw.qalbum.service.ai.AiTaggingService
 import com.xjw.qalbum.service.ai.SemanticIndex
+import com.xjw.qalbum.service.ai.SemanticDocument
 import com.xjw.qalbum.service.ocr.OcrResult
 import com.xjw.qalbum.service.ocr.OcrModelStatus
 import com.xjw.qalbum.service.ocr.OcrModelStore
@@ -54,7 +57,7 @@ import kotlin.math.abs
  * 5. AI_TAG / EMBEDDING —— 需全局 AI 服务可用
  *
  * SCORE 前置于 OCR/AI：评分只依赖 DB 里已累积的结果，故放在慢的 OCR 之前先刷新、不被逐图
- * OCR 阻塞；本轮新产生的 OCR/AI 结果会在下一轮分析的评分中反映（渐进更新，可接受）。
+ * OCR 阻塞；OCR 每批完成后立即定向刷新该批评分与自动收藏。
  *
  * 承载与生命周期：数小时级长任务应经 [com.xjw.qalbum.worker.AnalysisWorker]（前台通知保活）
  * 直接 suspend 调 [runOnce]，取消沿调用链传导；[start]/[cancel] 是进程内 scope 的兼容入口。
@@ -66,6 +69,7 @@ import kotlin.math.abs
 class AnalysisPipeline(
     private val accessManager: AccessManager,
     private val fileOpsClient: FileOpsClient,
+    private val db: AppDatabase,
     private val imageDao: ImageDao,
     private val ocrDao: OcrDao,
     private val duplicateDetector: DuplicateDetector,
@@ -143,9 +147,9 @@ class AnalysisPipeline(
             // limit<=0 视为无限（分页循环跑完所有待办）。各 *_done 标记持久化，故天然「从上次增量继续」。
             val config = settings.analysisConfig.first()
             val oldestFirst = settings.analysisOldestFirst.first()
-            // 只有本轮确实 hash 了新图，才重算重复聚类（否则跳过，避免「没新 hash 也全量查重」）
+            // 新指纹或算法升级才重算；升级后的存量分组也必须应用新规则。
             val hashed = runHashAndQuality(config.hashLimit, oldestFirst, activeReader)
-            if (hashed > 0) runDuplicate()
+            if (hashed > 0 || settings.duplicateAlgorithmVersion.first() != DuplicateDetector.ALGORITHM_VERSION) runDuplicate()
             // 评分前置：只读 DB 里「已累积」的 OCR 信号（hasPhone 等），不依赖本轮 OCR/AI 输出，
             // 放到慢的 OCR 之前先把 info/delete 评分刷新出来，避免被逐图 OCR 阻塞、迟迟不更新。
             runScore()
@@ -165,7 +169,8 @@ class AnalysisPipeline(
         } catch (t: Throwable) {
             Timber.e(t, "AnalysisPipeline failed")
             _state.value = AnalysisState.Failed
-            _progress.value = AnalysisProgress(AnalysisPhase.SCORE, 0, 0, t.message ?: "未知错误")
+            _progress.value = _progress.value?.copy(msg = t.message ?: "未知错误")
+                ?: AnalysisProgress(AnalysisPhase.HASH, 0, 0, t.message ?: "未知错误")
             return AnalysisState.Failed
         } finally {
             try {
@@ -244,7 +249,7 @@ class AnalysisPipeline(
                     batch.map { img ->
                         async(Dispatchers.IO) {
                             semaphore.withPermit {
-                                val r = analyzeOneIsolated(reader, img.path, infraStreak)
+                                val r = analyzeOneIsolated(reader, img.path, img.size, infraStreak)
                                 if (r == null) img.id to null
                                 else img.id to HashQualityWrite(
                                     img.id, r.xxhash, r.phash, r.blockHash, r.featureGrid,
@@ -278,10 +283,11 @@ class AnalysisPipeline(
     private suspend fun analyzeOneIsolated(
         reader: ImageBytesReader,
         path: String,
+        expectedSize: Long,
         infraStreak: AtomicInteger,
     ): HashQualityResult? {
         return try {
-            analyzeOne(reader, path).also { infraStreak.set(0) }
+            analyzeOne(reader, path, expectedSize).also { infraStreak.set(0) }
         } catch (ce: CancellationException) {
             throw ce
         } catch (e: AccessException) {
@@ -309,9 +315,10 @@ class AnalysisPipeline(
     private class AnalysisInfraException(message: String, cause: Throwable?) : RuntimeException(message, cause)
 
     /** 一次读取字节 → xxHash + pHash + 质量，避免对同一文件重复跨进程读取。 */
-    private suspend fun analyzeOne(reader: ImageBytesReader, path: String): HashQualityResult {
+    private suspend fun analyzeOne(reader: ImageBytesReader, path: String, expectedSize: Long): HashQualityResult {
         val bytes = reader.read(path, PrivilegedImageReader.MAX_IMAGE_BYTES)
-            ?: return HashQualityResult(null, null, null, null, 0, 0, null, false, true)
+            ?: throw java.io.IOException("图片暂不可读")
+        check(bytes.size.toLong() == expectedSize) { "文件读取不完整或分析期间已变化" }
         val xxhash = HashEngine.xxHashOf(bytes)
         // EXIF 方向归一 + 原图尺寸：视觉特征在显示方向像素上算（旋转副本才可能聚上）；
         // 宽高写原图 bounds（旋转档位换边）而非 768px 采样解码尺寸——采样尺寸入库会让全库
@@ -355,6 +362,7 @@ class AnalysisPipeline(
         // 旧分配的清空在 DuplicateDetector 的写回事务内完成（清空 + 写新原子）：
         // 聚类分钟级窗口内取消 / 崩溃不会把全库分组留在「已清空未写回」状态
         duplicateDetector.recluster(settings.maxDuplicateGroupSize.first(), strictness, model)
+        settings.setDuplicateAlgorithmVersion(DuplicateDetector.ALGORITHM_VERSION)
         _progress.value = AnalysisProgress(AnalysisPhase.DUPLICATE, 1, 1, msg = "完成")
     }
 
@@ -391,11 +399,11 @@ class AnalysisPipeline(
                 val writes = ArrayList<OcrWrite>(chunkIds.size)
                 for (img in imageDao.getByIds(chunkIds)) {
                     attempted++
-                    // 走原生 fd 直读拿字节；null = 该文件本身不可读 → 空字节 → 引擎回 Empty 标记完成。
+                    // 不可读的文件留待下轮重试，不能当成「确认无文字」写空 OCR。
                     // 抛 AccessException/RemoteException = 基础设施失败：本图不落任何记录（下轮重试），
                     // 连续超限中止本阶段（先保住已完成结果）。
                     val bytes = try {
-                        (reader.read(img.path, PrivilegedImageReader.MAX_IMAGE_BYTES) ?: ByteArray(0))
+                        (reader.read(img.path, PrivilegedImageReader.MAX_IMAGE_BYTES) ?: continue)
                             .also { infraStreak = 0 }
                     } catch (ce: CancellationException) {
                         throw ce
@@ -404,7 +412,7 @@ class AnalysisPipeline(
                         failed++
                         Timber.w(e, "读取基础设施失败（连续 ${infraStreak + 1}）：${img.path}")
                         if (++infraStreak >= INFRA_ABORT_STREAK) {
-                            ocrDao.saveOcrResultsBatch(writes)
+                            saveOcrAndRefreshScores(writes)
                             throw AnalysisInfraException("读取通道连续失败（Shizuku/Root 不可用？），OCR 已中止", e)
                         }
                         continue
@@ -453,24 +461,24 @@ class AnalysisPipeline(
                             Timber.w("OCR failed for ${img.path}: ${result.reason}")
                             failed++
                             if (++failStreak >= OCR_FAIL_ABORT_STREAK) {
-                                ocrDao.saveOcrResultsBatch(writes)
+                                saveOcrAndRefreshScores(writes)
                                 completed += writes.size
                                 _progress.value = AnalysisProgress(AnalysisPhase.OCR, completed, maxOf(total, completed), msg = "OCR 引擎连续失败，已中止")
                                 Timber.e("AnalysisPipeline.runOcr: aborted after $failStreak consecutive failures")
-                                return
+                                throw AnalysisInfraException("OCR 引擎连续失败，已保留完成结果", null)
                             }
                         }
                         OcrResult.Unavailable -> {
                             Timber.i("OCR skipped: model is not installed")
-                            ocrDao.saveOcrResultsBatch(writes)
+                            saveOcrAndRefreshScores(writes)
                             completed += writes.size
-                            _progress.value = AnalysisProgress(AnalysisPhase.OCR, completed, maxOf(total, completed), msg = "未安装 OCR 模型")
+                            _progress.value = AnalysisProgress(AnalysisPhase.OCR, completed, maxOf(total, completed), msg = "OCR 引擎不可用")
                             return
                         }
                     }
                 }
                 if (writes.isNotEmpty()) {
-                    ocrDao.saveOcrResultsBatch(writes)
+                    saveOcrAndRefreshScores(writes)
                     completed += writes.size
                     _progress.value = AnalysisProgress(AnalysisPhase.OCR, completed, maxOf(total, completed))
                 }
@@ -558,9 +566,8 @@ class AnalysisPipeline(
         if (result is AiTaggingService.Result.Success) {
             infraStreak.set(0)
             failStreak.set(0)
-            // 定向 UPDATE 只置 ai_done（带 size/mtime 乐观守卫）：整行 @Update 会把 chunk 装载时的
-            // 陈旧快照写回，AI 逐图分钟级窗口内的收藏 / 保留 / 入回收站（status）全被回滚
-            return imageDao.markAiTagDone(img.id, img.size, img.mtime) == 1
+            // 标签、描述及完成标记由服务在同一守卫事务中提交。
+            return true
         } else {
             // 端点不可达时每张都失败：连续超限中止本阶段，而不是把全库 pending 逐张白打一遍网络
             if (failStreak.incrementAndGet() >= AI_FAIL_ABORT_STREAK) {
@@ -575,7 +582,8 @@ class AnalysisPipeline(
         if (!provider.isAvailable()) return
 
         val concurrency = settings.aiConcurrency.first().coerceAtLeast(1)
-        val embModel = settings.aiEmbeddingModel.first()
+        val cfg = settings.aiConnection.first()
+        val embModel = SemanticDocument.modelKey(cfg.endpoint, cfg.embeddingModel)
         val bounded = limit > 0
         var total = if (bounded) limit else 0
         var completed = 0
@@ -587,7 +595,7 @@ class AnalysisPipeline(
         var rounds = 0
         while (!bounded || completed < limit) {
             val pageLimit = if (bounded) minOf(UNLIMITED_PAGE, limit - completed) else UNLIMITED_PAGE
-            val fetched = imageDao.pendingEmbeddingPage(pageLimit, oldestFirst, afterMtime, afterId)
+            val fetched = imageDao.pendingEmbeddingPage(pageLimit, oldestFirst, afterMtime, afterId, embModel)
             if (fetched.isEmpty()) break
             afterMtime = fetched.last().mtime
             afterId = fetched.last().id
@@ -600,7 +608,7 @@ class AnalysisPipeline(
                         async(Dispatchers.IO) {
                             semaphore.withPermit {
                                 val ok = try {
-                                    embedOne(img, embModel)
+                                    embedOne(img, embModel, cfg.embeddingModel, cfg.endpoint)
                                 } catch (ce: CancellationException) {
                                     throw ce
                                 } catch (t: Throwable) {
@@ -632,39 +640,30 @@ class AnalysisPipeline(
     }
 
     /**
-     * 单张图片的向量化：已存在则直接标记完成；用 OCR 文本 + 文件名等作为 embedding 输入。
+     * 单张图片的向量化：输入来自图片描述、标签和 OCR；无内容时不请求向量服务。
      * 返回是否已推进（写向量或标记完成）；false = 本图失败，本轮不再重试。
      * 完成标记用定向 UPDATE（[ImageDao.markEmbeddingDone]），不整行回写陈旧快照。
      */
-    private suspend fun embedOne(img: com.xjw.qalbum.data.db.entity.ImageEntity, embModel: String): Boolean {
-        if (semanticIndex.hasEmbedding(img.id)) {
-            imageDao.markEmbeddingDone(img.id)
-            return true
+    private suspend fun embedOne(
+        img: com.xjw.qalbum.data.db.entity.ImageEntity, modelKey: String, model: String, endpoint: String,
+    ): Boolean {
+        val text = db.withTransaction { buildEmbeddingText(img.id) }
+        val vec = if (text.isNotBlank()) aiClient.embedding(text, model, endpoint) ?: return false else null
+        return db.withTransaction {
+            // 网络期间 OCR/AI 或文件内容可能更新，拒绝把旧文档的向量标为已完成。
+            if (buildEmbeddingText(img.id) != text) return@withTransaction false
+            if (imageDao.markEmbeddingDone(img.id, img.size, img.mtime) != 1) return@withTransaction false
+            if (vec != null) semanticIndex.upsert(img.id, modelKey, vec)
+            else db.embeddingDao().deleteByImageId(img.id)
+            true
         }
-        val ocr = ocrDao.getByImageId(img.id)
-        val textForEmbedding = buildEmbeddingText(img, ocr)
-        if (textForEmbedding.isBlank()) {
-            // 无可嵌入文本：标记完成，避免反复占用名额
-            imageDao.markEmbeddingDone(img.id)
-            return true
-        }
-        val vec = aiClient.embedding(textForEmbedding) ?: return false
-        semanticIndex.upsert(img.id, embModel, vec)
-        imageDao.markEmbeddingDone(img.id)
-        return true
     }
 
-    private fun buildEmbeddingText(
-        img: com.xjw.qalbum.data.db.entity.ImageEntity,
-        ocr: OcrTextEntity?,
-    ): String {
-        val parts = mutableListOf<String>()
-        parts.add(img.filename)
-        parts.add(img.sourceType)
-        if (img.isAnimated) parts.add("动图")
-        ocr?.text?.takeIf { it.isNotBlank() }?.let { parts.add(it.take(500)) }
-        return parts.joinToString(" ")
-    }
+    private suspend fun buildEmbeddingText(imageId: Long): String = SemanticDocument.build(
+        ocrDao.getByImageId(imageId)?.text,
+        db.aiAnalysisDao().getByImageId(imageId),
+        db.tagDao().getTagsForImage(imageId).map { it.name },
+    )
 
     private suspend fun runScore() {
         // 全库遍历主图，重新计算 info_score / delete_score；**只有分数变化的行才写回**（脏检查）：
@@ -678,35 +677,43 @@ class AnalysisPipeline(
         while (true) {
             val page = imageDao.pagePrimaryHashed(afterId, SCORE_BATCH)
             if (page.isEmpty()) break
-            // 整页一次取 OCR（评分要读 hasPhone/hasAmount 等强信号），避免逐图 N+1 单查
-            val ocrMap = ocrDao.getByImageIds(page.map { it.id }).associateBy { it.imageId }
-            val writes = ArrayList<ScoreWrite>(page.size)
-            val newFavorites = ArrayList<Long>()
-            for (img in page) {
-                val ocr = ocrMap[img.id]
-                val info = ScoringEngine.computeInfoScore(img, ocr)
-                val del = ScoringEngine.computeDeleteScore(img, ocr)
-                if (!scoreEquals(img.infoScore, info) || !scoreEquals(img.deleteScore, del)) {
-                    writes.add(ScoreWrite(img.id, info, del))
-                }
-                // 自动收藏（默认关闭）：开启且命中用户勾选的敏感信息类型时，加入收藏避免误删。
-                // 已收藏的不重复写（此前每轮对全部命中图逐条重写独立事务）；命中集合页末批量一次写入。
-                if (autoFav.enabled && !img.isFavorite && ocr != null && matchesAutoFavorite(autoFav, ocr)) {
-                    newFavorites += img.id
-                }
-                afterId = img.id
-            }
-            // 整页评分一个事务写回（原是每图 2 次独立写）
-            if (writes.isNotEmpty()) imageDao.saveScoresBatch(writes)
-            if (newFavorites.isNotEmpty()) {
-                newFavorites.chunked(FAVORITE_CHUNK).forEach { imageDao.favoriteByIds(it) }
-            }
-            written += writes.size
+            written += db.withTransaction { refreshScores(page.map { it.id }, autoFav) }
+            afterId = page.last().id
             processed += page.size
             _progress.value = AnalysisProgress(AnalysisPhase.SCORE, processed, processed)
         }
         _progress.value = AnalysisProgress(AnalysisPhase.SCORE, processed, processed, msg = "完成")
         Timber.i("AnalysisPipeline.runScore: scored $processed primary images ($written changed)")
+    }
+
+    private suspend fun saveOcrAndRefreshScores(writes: List<OcrWrite>) {
+        if (writes.isEmpty()) return
+        val autoFav = settings.autoFavoriteConfig.first()
+        db.withTransaction {
+            ocrDao.saveOcrResultsBatch(writes)
+            refreshScores(writes.map { it.imageId }, autoFav)
+        }
+    }
+
+    private suspend fun refreshScores(ids: List<Long>, autoFav: AutoFavoriteConfig): Int {
+        val images = imageDao.getByIds(ids).filter { it.hashDone }
+        val ocrMap = ocrDao.getByImageIds(images.map { it.id }).associateBy { it.imageId }
+        val writes = ArrayList<ScoreWrite>()
+        val favorites = ArrayList<Long>()
+        for (image in images) {
+            val ocr = ocrMap[image.id]
+            val favorite = autoFav.enabled && !image.isFavorite && ocr != null && matchesAutoFavorite(autoFav, ocr)
+            val scored = if (favorite) image.copy(isFavorite = true) else image
+            val info = ScoringEngine.computeInfoScore(scored, ocr)
+            val delete = ScoringEngine.computeDeleteScore(scored, ocr)
+            if (!scoreEquals(image.infoScore, info) || !scoreEquals(image.deleteScore, delete)) {
+                writes += ScoreWrite(image.id, info, delete)
+            }
+            if (favorite) favorites += image.id
+        }
+        if (writes.isNotEmpty()) imageDao.saveScoresBatch(writes)
+        favorites.chunked(FAVORITE_CHUNK).forEach { imageDao.favoriteByIds(it) }
+        return writes.size
     }
 
     /** 评分脏检查的相等判定（容差比较，避免浮点表示误差造成的无效重写）。 */
@@ -725,9 +732,12 @@ class AnalysisPipeline(
 
         /**
          * hash+质量 合并阶段的块内并发度。原生 fd 直读后读不再是瓶颈、转为解码/DCT 的 CPU 开销，
-         * 故按 CPU 核数取值；上限 8 防止过多并发 768px 解码 bitmap 造成内存抖动。
+         * 按 CPU 与堆预算取较小值，每路预留 64MB（原始字节 + 解码）；上限 4。
          */
-        private val HASH_CONCURRENCY = Runtime.getRuntime().availableProcessors().coerceIn(4, 8)
+        private val HASH_CONCURRENCY = minOf(
+            Runtime.getRuntime().availableProcessors(),
+            (Runtime.getRuntime().maxMemory() / (64L * 1024 * 1024)).toInt(),
+        ).coerceIn(1, 4)
 
         /** 质量 / pHash 的解码目标边长（pHash 再缩到 32，质量在此尺寸上评估） */
         private const val QUALITY_DECODE_SIDE = 768

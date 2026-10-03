@@ -6,6 +6,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -16,16 +18,20 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material3.AssistChip
-import androidx.compose.material3.AssistChipDefaults
+import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboard
+import androidx.compose.ui.platform.ClipEntry
+import android.content.ClipData
+import kotlinx.coroutines.launch
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -106,18 +112,7 @@ internal fun PhotoDetailsSheet(
 @Composable
 private fun MetadataBlock(image: ImageEntity) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            AssistChip(
-                onClick = {},
-                label = { Text(image.sourceType) },
-                colors = AssistChipDefaults.assistChipColors(),
-            )
-            AssistChip(
-                onClick = {},
-                label = { Text(image.mime) },
-                colors = AssistChipDefaults.assistChipColors(),
-            )
-        }
+        Text("${image.sourceType} · ${image.mime}", style = MaterialTheme.typography.bodySmall)
         HorizontalDivider(Modifier.padding(vertical = 6.dp))
         InfoRow("大小", formatBytes(image.size))
         InfoRow("尺寸", if (image.width > 0) "${image.width} x ${image.height}" else "未读取")
@@ -132,6 +127,8 @@ private fun MetadataBlock(image: ImageEntity) {
 
 @Composable
 private fun OcrBlock(ocr: OcrTextEntity) {
+    val clipboard = LocalClipboard.current
+    val scope = rememberCoroutineScope()
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -145,6 +142,9 @@ private fun OcrBlock(ocr: OcrTextEntity) {
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            IconButton(onClick = { scope.launch { clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("OCR", ocr.text))) } }) {
+                Icon(Icons.Outlined.ContentCopy, contentDescription = "复制文字")
+            }
         }
         val flags = buildList {
             if (ocr.hasIdNumber) add("证件号")
@@ -154,16 +154,13 @@ private fun OcrBlock(ocr: OcrTextEntity) {
             if (ocr.hasAddress) add("地址")
         }
         if (flags.isNotEmpty()) {
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                flags.forEach { flag -> AssistChip(onClick = {}, label = { Text(flag) }) }
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                flags.forEach { flag -> Text(flag, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary) }
             }
         }
-        Text(
-            ocr.text.trim(),
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 12,
-        )
+        SelectionContainer {
+            Text(ocr.text.trim(), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
+        }
     }
 }
 

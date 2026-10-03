@@ -17,6 +17,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -25,9 +28,11 @@ import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.TextFields
-import androidx.compose.material3.AssistChip
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilterChip
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -36,7 +41,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -44,6 +49,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -77,14 +84,16 @@ fun SearchScreen(
     contentPadding: PaddingValues,
     onResultClick: (Long) -> Unit = {},
     onBack: (() -> Unit)? = null,
+    onOpenAiSettings: () -> Unit = {},
     sharedScope: SharedTransitionScope? = null,
     animatedScope: AnimatedVisibilityScope? = null,
     viewModel: SearchViewModel = koinViewModel(),
 ) {
-    val query by viewModel.query.collectAsState()
-    val mode by viewModel.mode.collectAsState()
-    val aiEnabled by viewModel.aiEnabled.collectAsState()
-    val state by viewModel.state.collectAsState()
+    val query by viewModel.query.collectAsStateWithLifecycle()
+    val mode by viewModel.mode.collectAsStateWithLifecycle()
+    val aiEnabled by viewModel.aiEnabled.collectAsStateWithLifecycle()
+    val state by viewModel.state.collectAsStateWithLifecycle()
+    val focusManager = LocalFocusManager.current
 
     Scaffold(
         modifier = Modifier.sharedContainer("search-bar", sharedScope, animatedScope),
@@ -107,13 +116,19 @@ fun SearchScreen(
                         onValueChange = viewModel::onQueryChange,
                         modifier = Modifier.weight(1f),
                         singleLine = true,
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                        keyboardActions = KeyboardActions(onSearch = { viewModel.submitSearch(); focusManager.clearFocus() }),
                         placeholder = {
                             Text(
-                                if (mode == SearchMode.OCR) "搜索 OCR 文本…"
-                                else "用自然语言搜索（如：发票截图）…"
+                                if (mode == SearchMode.OCR) "搜索文字"
+                                else "搜索图片内容"
                             )
                         },
-                        leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
+                        leadingIcon = {
+                            IconButton(onClick = { viewModel.submitSearch(); focusManager.clearFocus() }) {
+                                Icon(Icons.Outlined.Search, contentDescription = "搜索")
+                            }
+                        },
                         trailingIcon = {
                             if (query.isNotEmpty()) {
                                 IconButton(onClick = { viewModel.onQueryChange("") }) {
@@ -121,7 +136,7 @@ fun SearchScreen(
                                 }
                             }
                         },
-                        shape = RoundedCornerShape(20.dp),
+                        shape = RoundedCornerShape(8.dp),
                         colors = TextFieldDefaults.colors(
                             focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
                             unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainer,
@@ -129,26 +144,32 @@ fun SearchScreen(
                     )
                 }
                 Spacer(Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilterChip(
-                        selected = mode == SearchMode.OCR,
-                        onClick = { viewModel.setMode(SearchMode.OCR) },
-                        label = { Text("OCR 文本") },
-                        leadingIcon = {
-                            Icon(Icons.Outlined.TextFields, contentDescription = null, modifier = Modifier.size(18.dp))
-                        },
-                    )
-                    FilterChip(
-                        selected = mode == SearchMode.Semantic,
-                        onClick = { viewModel.setMode(SearchMode.Semantic) },
-                        enabled = aiEnabled,
-                        label = { Text("AI 语义") },
-                        leadingIcon = {
-                            Icon(Icons.Outlined.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
-                        },
-                    )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    SingleChoiceSegmentedButtonRow(modifier = Modifier.weight(1f)) {
+                        SegmentedButton(
+                            selected = mode == SearchMode.OCR,
+                            onClick = { viewModel.setMode(SearchMode.OCR) },
+                            label = { Text("文字") },
+                            shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                            icon = {
+                                Icon(Icons.Outlined.TextFields, contentDescription = null, modifier = Modifier.size(18.dp))
+                            },
+                        )
+                        SegmentedButton(
+                            selected = mode == SearchMode.Semantic,
+                            onClick = { viewModel.setMode(SearchMode.Semantic) },
+                            enabled = aiEnabled,
+                            label = { Text("语义") },
+                            shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                            icon = {
+                                Icon(Icons.Outlined.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
+                            },
+                        )
+                    }
                     if (!aiEnabled) {
-                        AssistChip(onClick = {}, label = { Text("先到设置启用 AI", style = MaterialTheme.typography.labelSmall) })
+                        IconButton(onClick = onOpenAiSettings) {
+                            Icon(Icons.Outlined.Settings, contentDescription = "AI 设置")
+                        }
                     }
                 }
             }
@@ -159,10 +180,11 @@ fun SearchScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(top = topBarPadding.calculateTopPadding())
-                .padding(contentPadding),
+                .padding(contentPadding)
+                .imePadding(),
         ) {
             when (val s = state) {
-                SearchUiState.Idle -> IdleHint(mode)
+                SearchUiState.Idle -> IdleHint()
                 SearchUiState.Loading -> Centered { CircularProgressIndicator() }
                 SearchUiState.Empty -> Centered {
                     Text("没有匹配结果", style = MaterialTheme.typography.bodyMedium)
@@ -306,26 +328,19 @@ private fun OcrHitRow(hit: OcrDao.SearchHit, onClick: (Long) -> Unit) {
 }
 
 @Composable
-private fun IdleHint(mode: SearchMode) {
+private fun IdleHint() {
     Centered {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Icon(
-                if (mode == SearchMode.OCR) Icons.Outlined.Search else Icons.Outlined.AutoAwesome,
+                Icons.Outlined.Search,
                 contentDescription = null,
-                modifier = Modifier.size(64.dp),
+                modifier = Modifier.size(40.dp),
                 tint = MaterialTheme.colorScheme.primary,
             )
             Spacer(Modifier.height(12.dp))
             Text(
-                if (mode == SearchMode.OCR) "OCR 全文搜索" else "AI 语义搜索",
+                "暂无搜索结果",
                 style = MaterialTheme.typography.titleMedium,
-            )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                if (mode == SearchMode.OCR) "试试搜：发票、订单、地址、姓名"
-                else "试试自然语言：寒假课表、收款码、写代码的截图",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }

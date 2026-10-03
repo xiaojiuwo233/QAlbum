@@ -25,8 +25,8 @@ class AppDatabaseMigrationTest {
 
     @Test
     fun migrationEdgesCoverEveryPublishedVersion() {
-        assertEquals((1..10).toList(), allMigrations.map { it.startVersion })
-        assertEquals((2..11).toList(), allMigrations.map { it.endVersion })
+        assertEquals((1..11).toList(), allMigrations.map { it.startVersion })
+        assertEquals((2..12).toList(), allMigrations.map { it.endVersion })
     }
 
     @Test
@@ -111,6 +111,35 @@ class AppDatabaseMigrationTest {
         }
     }
 
+    @Test
+    fun migrate11To12_preservesUserDataAndInvalidatesOnlyChangedContent() {
+        val name = "migration-11-12"
+        helper.createDatabase(name, 11).use { db ->
+            insertImage(db, 1, "/chatpic/Cache_revision", "active", 1, 1, 1000)
+            db.execSQL("INSERT INTO tags(id, name, type, color, auto_protect, auto_delete) VALUES (1, 'manual', 'user', NULL, 0, 0), (2, 'auto', 'ai', NULL, 0, 0)")
+            db.execSQL("INSERT INTO image_tags(image_id, tag_id, confidence, source) VALUES (1, 1, 1.0, 'user'), (1, 2, 1.0, 'ai')")
+            db.execSQL("INSERT INTO ocr_text(image_id, text, confidence, has_phone, has_amount, has_address, has_id_number, has_order_no, updated_at) VALUES (1, 'old content', 0.9, 0, 1, 0, 0, 0, 1000)")
+            db.execSQL("INSERT INTO ocr_fts(rowid, text) VALUES (1, 'old content')")
+            db.execSQL("INSERT INTO image_embeddings(image_id, model, dim, vector, updated_at) VALUES (1, 'legacy', 1, X'0000803F', 1000)")
+        }
+        helper.runMigrationsAndValidate(name, 12, true, AppDatabase.MIGRATION_11_12).use { db ->
+            assertTrue(tableExists(db, "ai_analysis"))
+            assertEquals("old content", scalarString(db, "SELECT text FROM ocr_text WHERE image_id = 1"))
+            assertEquals(1L, scalarLong(db, "SELECT COUNT(*) FROM image_embeddings"))
+            db.execSQL("INSERT INTO ai_analysis(image_id, description, info_type, model, updated_at) VALUES (1, 'receipt', 'document', 'vision', 1000)")
+            db.execSQL("UPDATE images SET last_seen = 2000 WHERE id = 1")
+            assertEquals(1L, scalarLong(db, "SELECT COUNT(*) FROM ai_analysis"))
+            db.execSQL("UPDATE images SET size = 200, mtime = 2000 WHERE id = 1")
+            for (table in listOf("ocr_text", "ocr_fts", "ai_analysis", "image_embeddings")) {
+                assertEquals("stale $table", 0L, scalarLong(db, "SELECT COUNT(*) FROM $table"))
+            }
+            assertEquals(1L, scalarLong(db, "SELECT COUNT(*) FROM image_tags WHERE source = 'user'"))
+            assertEquals(0L, scalarLong(db, "SELECT COUNT(*) FROM image_tags WHERE source = 'ai'"))
+            assertEquals(1L, scalarLong(db, "SELECT is_protected FROM images WHERE id = 1"))
+            assertEquals(1L, scalarLong(db, "SELECT user_keep FROM images WHERE id = 1"))
+        }
+    }
+
     private fun insertImage(
         db: SupportSQLiteDatabase,
         id: Long,
@@ -170,6 +199,7 @@ class AppDatabaseMigrationTest {
             AppDatabase.MIGRATION_8_9,
             AppDatabase.MIGRATION_9_10,
             AppDatabase.MIGRATION_10_11,
+            AppDatabase.MIGRATION_11_12,
         )
 
         private const val TEST_DB_V1 = "migration-1-11"

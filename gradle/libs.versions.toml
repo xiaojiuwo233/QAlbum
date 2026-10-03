@@ -65,7 +65,7 @@ timber = "5.0.1"
 # 测试
 junit = "4.13.2"
 androidxTestExt = "1.2.1"
-espresso = "3.6.1"
+espresso = "3.7.0"
 testRunner = "1.2.0"
 testMonitor = "1.7.2"
 

@@ -59,6 +59,15 @@ interface TagDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun linkTag(rel: ImageTagEntity)
 
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun linkAiTag(rel: ImageTagEntity)
+
+    @Query("DELETE FROM image_tags WHERE image_id = :imageId AND source = 'ai'")
+    suspend fun clearAiTags(imageId: Long)
+
+    @Query("DELETE FROM image_tags WHERE source = 'ai'")
+    suspend fun clearAllAiTags()
+
     /** 批量建立图-标签关联：Room 单事务逐行绑定，无 IN 变量上限问题（万级选中一次落库） */
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun linkTags(rels: List<ImageTagEntity>)

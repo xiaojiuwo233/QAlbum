@@ -2,6 +2,7 @@ package com.xjw.qalbum.ui.detail
 
 import android.content.Intent
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.SharedTransitionScope
@@ -13,8 +14,6 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -55,6 +54,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -67,25 +67,20 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.input.pointer.util.VelocityTracker
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import coil3.compose.AsyncImage
-import coil3.request.ImageRequest
-import coil3.request.crossfade
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.ui.anim.sharedImage
 import com.xjw.qalbum.ui.components.SaveToAlbumSheet
+import com.xjw.qalbum.ui.components.ZoomableImage
 import com.xjw.qalbum.ui.imageloading.ImageEntityModel
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
@@ -188,30 +183,36 @@ private fun ImmersivePhotoViewer(
     var detailsVisible by rememberSaveable { mutableStateOf(false) }
     var confirmDelete by rememberSaveable { mutableStateOf(false) }
     var currentZoom by remember { mutableFloatStateOf(1f) }
+    var zoomReset by remember { mutableIntStateOf(0) }
     var dismissOffsetY by remember { mutableFloatStateOf(0f) }
     val scope = rememberCoroutineScope()
     val velocityTracker = remember { VelocityTracker() }
     var draggingClose by remember { mutableStateOf(false) }
     var dragDirectionDecided by remember { mutableStateOf(false) }
     val springBack = remember { Animatable(0f) }
+    val density = LocalDensity.current
+    val dismissDistance = with(density) { 120.dp.toPx() }
+    val dismissVelocity = with(density) { 600.dp.toPx() }
+    val dismissRange = with(density) { 400.dp.toPx() }
+    val latestOnBack by rememberUpdatedState(onBack)
+    val latestOnPageSelected by rememberUpdatedState(onPageSelected)
     val pagerState = rememberPagerState(
         initialPage = state.currentIndex,
         pageCount = { state.ids.size },
     )
 
-    LaunchedEffect(state.currentIndex) {
+    LaunchedEffect(pagerState, state.ids) {
         if (pagerState.currentPage != state.currentIndex) {
             pagerState.scrollToPage(state.currentIndex)
         }
-    }
-    LaunchedEffect(pagerState) {
         snapshotFlow { pagerState.settledPage }
             .distinctUntilChanged()
             .collect { page ->
-                // 新落定页初始未缩放；该页真实缩放会经 onZoomChanged 再上报
-                currentZoom = 1f
-                onPageSelected(page)
+                latestOnPageSelected(page)
             }
+    }
+    BackHandler(enabled = detailsVisible || currentZoom > 1f) {
+        if (detailsVisible) detailsVisible = false else zoomReset++
     }
 
     // 组合期只订阅「是否处于下滑位移中」的布尔翻转（derivedStateOf 只在翻转时失效）；
@@ -225,18 +226,12 @@ private fun ImmersivePhotoViewer(
             .fillMaxSize()
             .drawBehind {
                 val offsetY = if (draggingClose) dismissOffsetY else springBack.value
-                val progress = (offsetY / 400f).coerceIn(0f, 1f)
+                val progress = (offsetY / dismissRange).coerceIn(0f, 1f)
                 drawRect(Color.Black.copy(alpha = 1f - progress * 0.7f))
-            }
-            .pointerInput(Unit) {
-                detectTapGestures {
-                    chromeVisible = !chromeVisible
-                    if (!chromeVisible) detailsVisible = false
-                }
             }
             // 手势 lambda 内对 detailsVisible/currentZoom 的读取都是经 state 委托的实时读，
             // 无需作为 key —— 以 currentZoom 作 key 会让捏合的每一帧都重启拖拽手势协程
-            .pointerInput(Unit) {
+            .pointerInput(density.density) {
                 detectVerticalDragGestures(
                     onDragStart = {
                         dragDirectionDecided = false
@@ -256,11 +251,11 @@ private fun ImmersivePhotoViewer(
                             0f
                         }
                         dragDirectionDecided = false
-                        if (finalOffset > 120f || velocity > 600f) {
+                        if (finalOffset > dismissDistance || (finalOffset > 0f && velocity > dismissVelocity)) {
                             // 关闭：图片停在当前下滑位置（draggingClose 不复位，避免跳回原位），
                             // 直接返回 —— 配合「图库 popEnter 立即显示 + 详情 popExit 缩小淡出」，
                             // 图片淡出即露出图库，没有飞出后那段纯黑
-                            onBack()
+                            latestOnBack()
                         } else {
                             draggingClose = false
                             scope.launch {
@@ -268,7 +263,7 @@ private fun ImmersivePhotoViewer(
                                 springBack.animateTo(
                                     0f,
                                     spring(
-                                        dampingRatio = Spring.DampingRatioLowBouncy,
+                                        dampingRatio = Spring.DampingRatioNoBouncy,
                                         stiffness = Spring.StiffnessMedium,
                                     ),
                                 )
@@ -277,6 +272,7 @@ private fun ImmersivePhotoViewer(
                         }
                     },
                     onDragCancel = {
+                        if (!draggingClose) return@detectVerticalDragGestures
                         val finalOffset = dismissOffsetY
                         draggingClose = false
                         dragDirectionDecided = false
@@ -301,7 +297,7 @@ private fun ImmersivePhotoViewer(
                         chromeVisible = false
                         velocityTracker.addPosition(change.uptimeMillis, change.position)
                         dismissOffsetY = (dismissOffsetY + dragAmount).coerceAtLeast(0f)
-                    } else if (dragAmount < -8f && !detailsVisible) {
+                    } else if (currentZoom <= 1.01f && dragAmount < -8f && !detailsVisible) {
                         change.consume()
                         chromeVisible = true
                         detailsVisible = true
@@ -318,17 +314,15 @@ private fun ImmersivePhotoViewer(
                 .graphicsLayer {
                     // 偏移/进度在图层 lambda 内读取：状态逐帧变化只更新图层，不触发重组
                     val offsetY = if (draggingClose) dismissOffsetY else springBack.value
-                    val progress = (offsetY / 400f).coerceIn(0f, 1f)
+                    val progress = (offsetY / dismissRange).coerceIn(0f, 1f)
                     translationY = offsetY
                     val dismissScale = 1f - progress * 0.15f
                     scaleX = dismissScale
                     scaleY = dismissScale
                     alpha = 1f - progress * 0.2f
                     val radius = progress * 24.dp.toPx()
-                    if (radius > 0f) {
-                        shape = RoundedCornerShape(radius)
-                        clip = true
-                    }
+                    shape = RoundedCornerShape(radius)
+                    clip = radius > 0f
                 },
         ) {
             HorizontalPager(
@@ -340,8 +334,14 @@ private fun ImmersivePhotoViewer(
                     id = state.ids[page],
                     fallback = if (page == state.currentIndex) state.current else null,
                     entityFor = entityFor,
+                    isActive = page == pagerState.currentPage,
+                    resetSignal = zoomReset,
+                    onTap = {
+                        chromeVisible = !chromeVisible
+                        if (!chromeVisible) detailsVisible = false
+                    },
                     onZoomChanged = { zoom ->
-                        if (page == state.currentIndex) currentZoom = zoom
+                        if (page == pagerState.currentPage) currentZoom = zoom
                     },
                     sharedScope = sharedScope,
                     animatedScope = animatedScope,
@@ -418,22 +418,16 @@ private fun FullscreenPhoto(
     id: Long,
     fallback: ImageEntity?,
     entityFor: suspend (Long) -> ImageEntity?,
+    isActive: Boolean,
+    resetSignal: Int,
+    onTap: () -> Unit,
     onZoomChanged: (Float) -> Unit,
     sharedScope: SharedTransitionScope? = null,
     animatedScope: AnimatedVisibilityScope? = null,
 ) {
-    val context = LocalContext.current
     // 当前页用 fallback（已加载的 current）立即显示；相邻页按 id 异步取实体
     val image by produceState<ImageEntity?>(initialValue = fallback, key1 = id) {
         if (value == null) value = entityFor(id)
-    }
-    var scale by remember(id) { mutableFloatStateOf(1f) }
-    var offset by remember(id) { mutableStateOf(Offset.Zero) }
-    // 缩放经 snapshotFlow 上报（以 scale 为 key 的 effect 会在捏合的每一帧被取消重启）；
-    // rememberUpdatedState 保证翻页后收集到的是携带最新 currentIndex 的回调
-    val latestOnZoomChanged by rememberUpdatedState(onZoomChanged)
-    LaunchedEffect(id) {
-        snapshotFlow { scale }.collect { latestOnZoomChanged(it) }
     }
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         val entity = image
@@ -441,67 +435,16 @@ private fun FullscreenPhoto(
             CircularProgressIndicator(color = Color.White)
             return@Box
         }
-        AsyncImage(
-            model = ImageRequest.Builder(context)
-                .data(ImageEntityModel(entity))
-                .crossfade(true)
-                .build(),
+        ZoomableImage(
+            model = ImageEntityModel(entity),
             contentDescription = entity.filename,
-            contentScale = ContentScale.Fit,
+            stateKey = id,
+            isActive = isActive,
+            resetSignal = resetSignal,
+            onTap = onTap,
+            onZoomChanged = onZoomChanged,
             modifier = Modifier
                 .fillMaxSize()
-                .pointerInput(id) {
-                    awaitEachGesture {
-                        var lastDistance = 0f
-                        var lastCentroid: Offset? = null
-                        while (true) {
-                            val event = awaitPointerEvent(PointerEventPass.Initial)
-                            val pressed = event.changes.filter { it.pressed }
-                            if (pressed.isEmpty()) break
-
-                            if (pressed.size >= 2) {
-                                val first = pressed[0].position
-                                val second = pressed[1].position
-                                val distance = (first - second).getDistance()
-                                val centroid = Offset(
-                                    x = pressed.sumOf { it.position.x.toDouble() }.toFloat() / pressed.size,
-                                    y = pressed.sumOf { it.position.y.toDouble() }.toFloat() / pressed.size,
-                                )
-                                if (lastDistance > 0f) {
-                                    val nextScale = (scale * (distance / lastDistance)).coerceIn(1f, 5f)
-                                    scale = nextScale
-                                    offset = if (nextScale <= 1.01f) {
-                                        Offset.Zero
-                                    } else {
-                                        offset + (centroid - (lastCentroid ?: centroid))
-                                    }
-                                }
-                                lastDistance = distance
-                                lastCentroid = centroid
-                                pressed.forEach { it.consume() }
-                            } else if (scale > 1.01f) {
-                                val change = pressed.first()
-                                offset += change.positionChange()
-                                change.consume()
-                                lastDistance = 0f
-                                lastCentroid = change.position
-                            } else {
-                                lastDistance = 0f
-                                lastCentroid = null
-                            }
-                        }
-                        if (scale <= 1.01f) {
-                            scale = 1f
-                            offset = Offset.Zero
-                        }
-                    }
-                }
-                .graphicsLayer {
-                    scaleX = scale
-                    scaleY = scale
-                    translationX = offset.x
-                    translationY = offset.y
-                }
                 .sharedImage("image-$id", sharedScope, animatedScope),
         )
     }

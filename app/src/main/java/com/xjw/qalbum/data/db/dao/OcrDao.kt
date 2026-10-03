@@ -59,8 +59,11 @@ interface OcrDao {
      * 文件在 OCR 期间被重写（扫描 updateFromScanByPath 已重置分析字段）时返回 0，
      * 调用方应丢弃陈旧结果、留待下轮重跑。返回受影响行数。
      */
-    @Query("UPDATE images SET ocr_done = 1 WHERE id = :imageId AND size = :expectedSize AND mtime = :expectedMtime")
+    @Query("UPDATE images SET ocr_done = 1, embedding_done = 0 WHERE id = :imageId AND status = 'active' AND size = :expectedSize AND mtime = :expectedMtime")
     suspend fun markOcrDoneGuarded(imageId: Long, expectedSize: Long, expectedMtime: Long): Int
+
+    @Query("DELETE FROM image_embeddings WHERE image_id = :imageId")
+    suspend fun invalidateEmbedding(imageId: Long)
 
     /**
      * 整块 OCR 结果一个事务写回（含 ocr_done 标记）：把「每图 2-3 个独立事务」收敛为按块提交，
@@ -71,6 +74,7 @@ interface OcrDao {
     suspend fun saveOcrResultsBatch(items: List<OcrWrite>) {
         for (item in items) {
             if (markOcrDoneGuarded(item.imageId, item.expectedSize, item.expectedMtime) > 0) {
+                invalidateEmbedding(item.imageId)
                 item.text?.let { saveOcrResult(it) }
             }
         }

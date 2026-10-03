@@ -2,6 +2,7 @@ package com.xjw.qalbum.data.remote
 
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.service.ai.AiPrivacyGuard
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -22,6 +23,8 @@ import kotlinx.coroutines.flow.first
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -61,12 +64,14 @@ class OpenAiCompatClient(
         model: String? = null,
         maxTokens: Int? = null,
         temperature: Float = 0.3f,
+        expectedEndpoint: String? = null,
     ): ChatResponse? = withContext(Dispatchers.IO) {
-        val cfg = settings.aiEnabled.first()
-        if (!cfg) return@withContext null
-        val endpoint = settings.aiEndpoint.first()
-        val apiKey = settings.aiApiKey.first()
-        val defaultModel = settings.aiModel.first()
+        val cfg = settings.aiConnection.first()
+        if (!cfg.enabled) return@withContext null
+        val endpoint = cfg.endpoint
+        if (expectedEndpoint != null && endpoint != expectedEndpoint) return@withContext null
+        val apiKey = cfg.apiKey
+        val defaultModel = cfg.model
         // 本地服务（LM Studio/Ollama 等）通常免鉴权，故 Key 可空，仅 endpoint 必填
         if (endpoint.isBlank()) {
             Timber.w("OpenAiCompatClient: AI endpoint is empty")
@@ -81,8 +86,9 @@ class OpenAiCompatClient(
             Timber.w("OpenAiCompatClient: 拒绝向未经隐私确认的公网 endpoint 上传图片")
             return@withContext null
         }
-        val disableThinking = settings.aiDisableThinking.first()
-        val maxTok = maxTokens ?: settings.aiMaxTokens.first()
+        val disableThinking = cfg.disableThinking
+        val maxTok = maxTokens ?: cfg.maxTokens
+        val url = resolveUrl(endpoint, "chat/completions") ?: return@withContext null
 
         val body = buildJsonObject {
             put("model", model ?: defaultModel)
@@ -99,7 +105,7 @@ class OpenAiCompatClient(
         }
 
         val req = Request.Builder()
-            .url(resolveUrl(endpoint, "chat/completions"))
+            .url(url)
             .addHeader("Authorization", "Bearer ${apiKey.ifBlank { "not-needed" }}")
             .addHeader("Content-Type", "application/json")
             .post(body.toString().toRequestBody(JSON_MEDIA_TYPE))
@@ -109,11 +115,13 @@ class OpenAiCompatClient(
             val resp = okHttpClient.newCall(req).awaitResponse()
             resp.use { r ->
                 if (!r.isSuccessful) {
-                    Timber.w("ChatCompletion HTTP ${r.code}: ${r.body?.string()?.take(300)}")
+                    Timber.w("ChatCompletion HTTP ${r.code}")
                     return@use null
                 }
                 parseChatResponse(r.body?.string(), disableThinking)
             }
+        } catch (ce: CancellationException) {
+            throw ce
         } catch (t: Throwable) {
             Timber.w(t, "ChatCompletion failed")
             null
@@ -121,14 +129,18 @@ class OpenAiCompatClient(
     }
 
     /** Embedding（文本/查询语义向量） */
-    suspend fun embedding(text: String, model: String? = null): FloatArray? = withContext(Dispatchers.IO) {
-        val cfg = settings.aiEnabled.first()
-        if (!cfg) return@withContext null
-        val endpoint = settings.aiEndpoint.first()
-        val apiKey = settings.aiApiKey.first()
-        val embModel = model ?: settings.aiEmbeddingModel.first()
+    suspend fun embedding(text: String, model: String? = null, expectedEndpoint: String? = null): FloatArray? = withContext(Dispatchers.IO) {
+        val cfg = settings.aiConnection.first()
+        if (!cfg.enabled || text.isBlank()) return@withContext null
+        val endpoint = cfg.endpoint
+        if (expectedEndpoint != null && endpoint != expectedEndpoint) return@withContext null
+        val apiKey = cfg.apiKey
+        val embModel = model ?: cfg.embeddingModel
         // 本地服务通常免鉴权，Key 可空，仅 endpoint 必填
         if (endpoint.isBlank()) return@withContext null
+        if (AiPrivacyGuard.classify(endpoint) == AiPrivacyGuard.Safety.PUBLIC_INTERNET &&
+            !settings.isAiPublicEndpointAcknowledged(endpoint)) return@withContext null
+        val url = resolveUrl(endpoint, "embeddings") ?: return@withContext null
 
         val body = buildJsonObject {
             put("model", embModel)
@@ -136,7 +148,7 @@ class OpenAiCompatClient(
         }
 
         val req = Request.Builder()
-            .url(resolveUrl(endpoint, "embeddings"))
+            .url(url)
             .addHeader("Authorization", "Bearer ${apiKey.ifBlank { "not-needed" }}")
             .addHeader("Content-Type", "application/json")
             .post(body.toString().toRequestBody(JSON_MEDIA_TYPE))
@@ -146,11 +158,13 @@ class OpenAiCompatClient(
             val resp = okHttpClient.newCall(req).awaitResponse()
             resp.use { r ->
                 if (!r.isSuccessful) {
-                    Timber.w("Embedding HTTP ${r.code}: ${r.body?.string()?.take(300)}")
+                    Timber.w("Embedding HTTP ${r.code}")
                     return@use null
                 }
                 parseEmbeddingResponse(r.body?.string())
             }
+        } catch (ce: CancellationException) {
+            throw ce
         } catch (t: Throwable) {
             Timber.w(t, "Embedding failed")
             null
@@ -166,13 +180,14 @@ class OpenAiCompatClient(
      * - `http://host:1234/v1`     + chat/completions → http://host:1234/v1/chat/completions
      * - `http://host:1234/v1/`    + chat/completions → http://host:1234/v1/chat/completions
      */
-    private fun resolveUrl(endpoint: String, path: String): String {
-        val base = endpoint.trim().trimEnd('/')
-        return if (base.endsWith("/v1", ignoreCase = true)) {
-            "$base/$path"
-        } else {
-            "$base/v1/$path"
-        }
+    private fun resolveUrl(endpoint: String, path: String): HttpUrl? {
+        val base = endpoint.trim().toHttpUrlOrNull() ?: return null
+        val segments = base.pathSegments.filter { it.isNotEmpty() }
+        return base.newBuilder().encodedPath("/").fragment(null).apply {
+            segments.forEach { addPathSegment(it) }
+            if (segments.lastOrNull() != "v1") addPathSegment("v1")
+            path.split('/').forEach { addPathSegment(it) }
+        }.build()
     }
 
     // ---- JSON 构造 / 解析 ----
@@ -211,7 +226,7 @@ class OpenAiCompatClient(
             if (content.isBlank()) {
                 // 部分思考模型会把全部 token 用于思考（reasoning_content），导致 content 为空，
                 // 此时给出明确日志，提示需要调大 max_tokens 或更换非思考模型
-                Timber.w("ChatCompletion content 为空（可能思考占满 max_tokens）：${raw.take(200)}")
+                Timber.w("ChatCompletion content 为空（可能思考占满 max_tokens）")
             }
             val usage = root["usage"]?.jsonObject
             ChatResponse(
@@ -224,7 +239,7 @@ class OpenAiCompatClient(
                 },
             )
         } catch (t: Throwable) {
-            Timber.w(t, "parseChatResponse failed: ${raw.take(200)}")
+            Timber.w(t, "parseChatResponse failed")
             null
         }
     }
@@ -256,8 +271,9 @@ class OpenAiCompatClient(
             val first = data.firstOrNull()?.jsonObject ?: return null
             val arr = first["embedding"]?.jsonArray ?: return null
             FloatArray(arr.size) { i -> arr[i].jsonPrimitive.float }
+                .takeIf { it.isNotEmpty() && it.all(Float::isFinite) && it.any { value -> value != 0f } }
         } catch (t: Throwable) {
-            Timber.w(t, "parseEmbeddingResponse failed: ${raw.take(200)}")
+            Timber.w(t, "parseEmbeddingResponse failed")
             null
         }
     }
@@ -298,7 +314,7 @@ private suspend fun Call.awaitResponse(): Response = suspendCancellableCoroutine
             if (!cont.isCancelled) cont.resumeWithException(e)
         }
         override fun onResponse(call: Call, response: Response) {
-            cont.resume(response)
+            cont.resume(response) { _, value, _ -> value.close() }
         }
     })
     cont.invokeOnCancellation { runCatching { cancel() } }

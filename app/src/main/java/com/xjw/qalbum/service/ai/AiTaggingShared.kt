@@ -1,10 +1,10 @@
 package com.xjw.qalbum.service.ai
 
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.util.Base64
 import com.xjw.qalbum.access.AccessException
 import com.xjw.qalbum.access.ImageBytesReader
+import com.xjw.qalbum.service.analysis.HashEngine
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -32,26 +32,14 @@ object AiTaggingShared {
     ): String? = withContext(Dispatchers.IO) {
         try {
             val bytes = reader.read(path, MAX_IMAGE_BYTES) ?: return@withContext null
-            val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
-            if (opts.outWidth <= 0) return@withContext null
-
-            var sample = 1
-            var w = opts.outWidth
-            var h = opts.outHeight
-            while (w > maxSide || h > maxSide) {
-                sample *= 2
-                w /= 2; h /= 2
+            val bitmap = HashEngine.decodeScaledOriented(bytes, maxSide)?.bitmap ?: return@withContext null
+            try {
+                val out = ByteArrayOutputStream()
+                if (!bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)) return@withContext null
+                Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+            } finally {
+                bitmap.recycle()
             }
-            val bitmap = BitmapFactory.decodeByteArray(
-                bytes, 0, bytes.size,
-                BitmapFactory.Options().apply { inSampleSize = sample },
-            ) ?: return@withContext null
-
-            val out = ByteArrayOutputStream()
-            bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
-            bitmap.recycle()
-            Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
         } catch (ce: CancellationException) {
             throw ce
         } catch (ae: AccessException) {

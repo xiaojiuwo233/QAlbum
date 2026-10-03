@@ -374,6 +374,8 @@ class SettingsViewModel(
                     imageDao.resetAllAnalysis()
                     ocrDao.clearAllOcr()
                     embeddingDao.deleteAll()
+                    db.aiAnalysisDao().deleteAll()
+                    db.tagDao().clearAllAiTags()
                 }
             } finally {
                 analysisResetRunning.value = false

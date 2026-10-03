@@ -1,6 +1,7 @@
 package com.xjw.qalbum.data.preferences
 
 import android.content.Context
+import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.xjw.qalbum.service.ai.AiPrivacyGuard
@@ -14,6 +15,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.File
+import java.util.UUID
 
 @RunWith(AndroidJUnit4::class)
 class SettingsRepositoryPrivacyTest {
@@ -21,10 +24,11 @@ class SettingsRepositoryPrivacyTest {
     @Test
     fun publicAcknowledgementIsBoundToExactEndpoint() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-        val repository = SettingsRepository(
-            ApplicationProvider.getApplicationContext<Context>(),
-            scope,
-        )
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val store = PreferenceDataStoreFactory.create(scope = scope) {
+            File(context.cacheDir, "privacy-${UUID.randomUUID()}.preferences_pb")
+        }
+        val repository = SettingsRepository(context, scope, store)
 
         repository.setAiEndpoint("https://privacy-test-a.example/v1")
         repository.setAiPublicEndpointAcknowledged(true)

@@ -23,6 +23,7 @@ class SemanticIndex(private val dao: EmbeddingDao) {
 
     /** 写入/替换向量：仅落 DB（REPLACE），无内存副本。 */
     suspend fun upsert(imageId: Long, model: String, vec: FloatArray) {
+        require(vec.isNotEmpty() && vec.all(Float::isFinite) && vec.any { it != 0f })
         dao.upsert(
             ImageEmbeddingEntity(
                 imageId = imageId,
@@ -48,9 +49,9 @@ class SemanticIndex(private val dao: EmbeddingDao) {
      * 打分跑在 Default 线程池，每批之间 ensureActive 响应取消（搜索防抖 cancel 生效）；
      * 点积直接在小端字节缓冲上进行，避免每行 ~6KB 的 FloatArray 分配抖动。
      */
-    suspend fun searchTopK(query: FloatArray, k: Int = 50): List<Pair<Long, Float>> =
+    suspend fun searchTopK(query: FloatArray, k: Int = 50, model: String): List<Pair<Long, Float>> =
         withContext(Dispatchers.Default) {
-            if (query.isEmpty() || k <= 0) return@withContext emptyList()
+            if (query.isEmpty() || query.any { !it.isFinite() } || k <= 0) return@withContext emptyList()
             val qNorm = l2norm(query)
             if (qNorm == 0f) return@withContext emptyList()
 
@@ -58,12 +59,12 @@ class SemanticIndex(private val dao: EmbeddingDao) {
             var afterId = 0L
             while (true) {
                 ensureActive()
-                val rows = dao.listPaged(afterId, SEARCH_PAGE)
+                val rows = dao.listPaged(afterId, SEARCH_PAGE, model)
                 if (rows.isEmpty()) break
                 afterId = rows.last().imageId
                 for (row in rows) {
                     val sim = cosineWithBytes(row.vector, row.dim, query, qNorm)
-                    if (!sim.isNaN()) heap.offer(row.imageId, sim)
+                    if (sim.isFinite()) heap.offer(row.imageId, sim)
                 }
             }
             heap.drainDescending()
@@ -84,17 +85,18 @@ class SemanticIndex(private val dao: EmbeddingDao) {
         var dot = 0.0
         var norm = 0.0
         for (i in 0 until dim) {
-            val v = buf.float
-            dot += v * query[i]
+            val v = buf.float.toDouble()
+            if (!v.isFinite()) return Float.NaN
+            dot += v * query[i].toDouble()
             norm += v * v
         }
-        if (norm == 0.0) return 0f
-        return (dot / (qNorm * sqrt(norm))).toFloat()
+        if (norm == 0.0) return Float.NaN
+        return (dot / (qNorm * sqrt(norm))).toFloat().coerceIn(-1f, 1f)
     }
 
     private fun l2norm(vec: FloatArray): Float {
         var s = 0.0
-        for (v in vec) s += v * v
+        for (v in vec) s += v.toDouble() * v.toDouble()
         return sqrt(s).toFloat()
     }
 
@@ -164,6 +166,6 @@ class SemanticIndex(private val dao: EmbeddingDao) {
          * 流式打分每批行数：单行 ~6KB（1536 维）时一批约 30MB 瞬时工作集，打完即可回收；
          * 行内 BLOB 远小于 CursorWindow 2MB 单行上限，多行跨窗口由 Cursor 自动翻页。
          */
-        private const val SEARCH_PAGE = 5000
+        private const val SEARCH_PAGE = 500
     }
 }

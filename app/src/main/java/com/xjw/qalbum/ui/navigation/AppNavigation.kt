@@ -10,15 +10,16 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.calculateEndPadding
-import androidx.compose.foundation.layout.calculateStartPadding
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -26,7 +27,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -88,7 +92,13 @@ fun AppNavigation() {
     val currentDestination = NavDestination.fromRoute(currentRoute)
     // 审核 / 重复组详情 / 回收站是清理页内部子页（activePage 切换）：进入时隐藏底部导航栏做全屏专注。
     var cleanupReviewMode by remember { mutableStateOf(false) }
-    val showBottomBar = currentRoute in bottomBarRoutes && !cleanupReviewMode
+    val showBottomBar = currentRoute in bottomBarRoutes &&
+        (currentRoute != NavDestination.Cleanup.route || !cleanupReviewMode)
+    val density = LocalDensity.current
+    val secondaryPadding = WindowInsets.navigationBars.asPaddingValues()
+    var bottomBarHeight by remember(density) { mutableStateOf(80.dp + secondaryPadding.calculateBottomPadding()) }
+    // 页面边距不随导航栏逐帧滑入/滑出改变，保持网格与转场起止位置稳定。
+    val contentPadding = PaddingValues(bottom = bottomBarHeight)
 
     val slideSpec = MaterialTheme.motionScheme.defaultSpatialSpec<IntOffset>()
     val fadeSpec = MaterialTheme.motionScheme.defaultEffectsSpec<Float>()
@@ -98,43 +108,7 @@ fun AppNavigation() {
     val sharedTransition by settings.detailSharedTransition.collectAsState(initial = false)
 
     SharedTransitionLayout {
-        Scaffold(
-            bottomBar = {
-                AnimatedVisibility(
-                    visible = showBottomBar,
-                    enter = slideInVertically(slideSpec) { it } + fadeIn(fadeSpec),
-                    exit = slideOutVertically(slideSpec) { it } + fadeOut(fadeSpec),
-                ) {
-                    NavigationBar {
-                        NavDestination.bottomBarEntries.forEach { dest ->
-                            val selected = dest == currentDestination
-                            NavigationBarItem(
-                                selected = selected,
-                                onClick = {
-                                    navController.navigate(dest.route) {
-                                        popUpTo(navController.graph.findStartDestination().id) {
-                                            saveState = true
-                                        }
-                                        launchSingleTop = true
-                                        restoreState = true
-                                    }
-                                },
-                                icon = {
-                                    Icon(
-                                        imageVector = if (selected) dest.filledIcon else dest.outlinedIcon,
-                                        contentDescription = stringResource(dest.labelRes),
-                                    )
-                                },
-                                label = { Text(stringResource(dest.labelRes)) },
-                                alwaysShowLabel = true,
-                            )
-                        }
-                    }
-                }
-            },
-            contentWindowInsets = WindowInsets(0, 0, 0, 0),
-        ) { innerPadding ->
-            val contentPadding = innerPadding.bottomOnly()
+        Box(Modifier.fillMaxSize()) {
             NavHost(
                 navController = navController,
                 startDestination = NavDestination.Dashboard.route,
@@ -196,7 +170,7 @@ fun AppNavigation() {
                 }
                 composable("favorites") {
                     FavoriteGalleryScreen(
-                        contentPadding = contentPadding,
+                        contentPadding = secondaryPadding,
                         onBack = { navController.popBackStack() },
                         onImageClick = { id -> navController.navigate("favorites/image/$id") },
                         sharedScope = this@SharedTransitionLayout,
@@ -206,9 +180,10 @@ fun AppNavigation() {
                 }
                 composable(NavDestination.Search.route) {
                     SearchScreen(
-                        contentPadding = contentPadding,
+                        contentPadding = secondaryPadding,
                         onResultClick = { id -> navController.navigate("image/$id") },
                         onBack = { navController.popBackStack() },
+                        onOpenAiSettings = { navController.navigate(SettingsCategory.AI.route) },
                         sharedScope = this@SharedTransitionLayout,
                         animatedScope = this,
                     )
@@ -222,7 +197,7 @@ fun AppNavigation() {
                 }
                 composable("tags") {
                     TagsScreen(
-                        contentPadding = contentPadding,
+                        contentPadding = secondaryPadding,
                         onBack = { navController.popBackStack() },
                     )
                 }
@@ -312,6 +287,36 @@ fun AppNavigation() {
                     )
                 }
             }
+            AnimatedVisibility(
+                visible = showBottomBar,
+                enter = slideInVertically(slideSpec) { it } + fadeIn(fadeSpec),
+                exit = slideOutVertically(slideSpec) { it } + fadeOut(fadeSpec),
+                modifier = Modifier.align(Alignment.BottomCenter),
+            ) {
+                NavigationBar(modifier = Modifier.onSizeChanged { bottomBarHeight = with(density) { it.height.toDp() } }) {
+                    NavDestination.bottomBarEntries.forEach { dest ->
+                        val selected = dest == currentDestination
+                        NavigationBarItem(
+                            selected = selected,
+                            onClick = {
+                                if (!selected) navController.navigate(dest.route) {
+                                    popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+                                    launchSingleTop = true
+                                    restoreState = true
+                                }
+                            },
+                            icon = {
+                                Icon(
+                                    imageVector = if (selected) dest.filledIcon else dest.outlinedIcon,
+                                    contentDescription = stringResource(dest.labelRes),
+                                )
+                            },
+                            label = { Text(stringResource(dest.labelRes)) },
+                            alwaysShowLabel = true,
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -349,16 +354,3 @@ private fun AnimatedContentTransitionScope<NavBackStackEntry>.isContainerTransit
 
 private fun NavBackStackEntry.isImage(): Boolean =
     (destination.route ?: "").let { it.startsWith("image/") || it.startsWith("favorites/image/") }
-
-/** 把 Scaffold 的 PaddingValues 拆掉顶部，只保留底部（导航栏高度）与左右 */
-@Composable
-private fun PaddingValues.bottomOnly(): PaddingValues {
-    val ld = LocalLayoutDirection.current
-    return PaddingValues(
-        start = calculateStartPadding(ld),
-        end = calculateEndPadding(ld),
-        bottom = calculateBottomPadding(),
-        top = 0.dp,
-    )
-}
-

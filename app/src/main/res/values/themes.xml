@@ -2,12 +2,12 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
     <!-- 基础主题：使用 Material3 + 透明状态栏 + DayNight 自动切换。
          Compose 内会重新定义 colorScheme，这里只负责系统层（启动闪屏、状态栏） -->
-    <style name="Theme.QAlbum" parent="Theme.Material3.DayNight.NoActionBar">
+    <style name="Base.Theme.QAlbum" parent="Theme.Material3.DayNight.NoActionBar">
         <item name="android:statusBarColor">@android:color/transparent</item>
-        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/black</item>
         <item name="android:windowLightStatusBar">true</item>
-        <item name="android:windowLightNavigationBar">true</item>
         <item name="android:enforceStatusBarContrast" tools:targetApi="29">false</item>
         <item name="android:enforceNavigationBarContrast" tools:targetApi="29">false</item>
     </style>
+    <style name="Theme.QAlbum" parent="Base.Theme.QAlbum" />
 </resources>

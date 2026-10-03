@@ -7,6 +7,7 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.xjw.qalbum.data.db.dao.CleanupDao
+import com.xjw.qalbum.data.db.dao.AiAnalysisDao
 import com.xjw.qalbum.data.db.dao.DedupExclusionDao
 import com.xjw.qalbum.data.db.dao.DirSnapshotDao
 import com.xjw.qalbum.data.db.dao.EmbeddingDao
@@ -14,6 +15,7 @@ import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.db.dao.OcrDao
 import com.xjw.qalbum.data.db.dao.TagDao
 import com.xjw.qalbum.data.db.entity.CleanupBatchEntity
+import com.xjw.qalbum.data.db.entity.AiAnalysisEntity
 import com.xjw.qalbum.data.db.entity.CleanupCandidateEntity
 import com.xjw.qalbum.data.db.entity.DedupExclusionEntity
 import com.xjw.qalbum.data.db.entity.DirSnapshotEntity
@@ -45,8 +47,9 @@ import com.xjw.qalbum.data.db.entity.TagEntity
         ImageEmbeddingEntity::class,
         DirSnapshotEntity::class,
         DedupExclusionEntity::class,
+        AiAnalysisEntity::class,
     ],
-    version = 11,
+    version = 12,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -58,6 +61,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun embeddingDao(): EmbeddingDao
     abstract fun dirSnapshotDao(): DirSnapshotDao
     abstract fun dedupExclusionDao(): DedupExclusionDao
+    abstract fun aiAnalysisDao(): AiAnalysisDao
 
     companion object {
         const val DB_NAME = "qalbum.db"
@@ -286,6 +290,38 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS `ai_analysis` (
+                        `image_id` INTEGER NOT NULL PRIMARY KEY,
+                        `description` TEXT NOT NULL,
+                        `info_type` TEXT NOT NULL,
+                        `model` TEXT NOT NULL,
+                        `updated_at` INTEGER NOT NULL,
+                        FOREIGN KEY(`image_id`) REFERENCES `images`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                """.trimIndent())
+                createAnalysisInvalidationTrigger(db)
+            }
+        }
+
+        private fun createAnalysisInvalidationTrigger(db: SupportSQLiteDatabase) {
+            // 文件被 QQ 重写时，标记和派生内容一起失效，避免旧 OCR/标签/向量污染新图片。
+            db.execSQL("""
+                CREATE TRIGGER IF NOT EXISTS invalidate_changed_image_analysis
+                AFTER UPDATE OF size, mtime ON images
+                WHEN OLD.size <> NEW.size OR OLD.mtime <> NEW.mtime
+                BEGIN
+                    DELETE FROM ocr_fts WHERE rowid = NEW.id;
+                    DELETE FROM ocr_text WHERE image_id = NEW.id;
+                    DELETE FROM image_tags WHERE image_id = NEW.id AND source = 'ai';
+                    DELETE FROM ai_analysis WHERE image_id = NEW.id;
+                    DELETE FROM image_embeddings WHERE image_id = NEW.id;
+                END
+            """.trimIndent())
+        }
+
         private fun retireTerminalImagePaths(db: SupportSQLiteDatabase) {
             db.execSQL(
                 """
@@ -489,7 +525,13 @@ abstract class AppDatabase : RoomDatabase() {
                     MIGRATION_8_9,
                     MIGRATION_9_10,
                     MIGRATION_10_11,
+                    MIGRATION_11_12,
                 )
+                .addCallback(object : Callback() {
+                    override fun onCreate(db: SupportSQLiteDatabase) {
+                        createAnalysisInvalidationTrigger(db)
+                    }
+                })
                 // 刻意不配置任何 destructive 回退：未覆盖的版本跳变（含降级）宁可 fail-fast
                 // 抛异常，也不允许静默清掉 200w 行索引与「已清理」统计（quarantine 被清后
                 // 回收站文件会成为无法恢复的孤儿）。新增版本必须同步补显式 Migration。

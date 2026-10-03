@@ -30,21 +30,21 @@ class SemanticSearchEngine(
     /** 按文本搜索 */
     suspend fun searchByText(query: String, topK: Int = 50): List<SemanticHit> {
         if (query.isBlank()) return emptyList()
-        if (!settings.aiEnabled.first()) {
-            Timber.w("SemanticSearch: AI not enabled")
-            return emptyList()
-        }
-        val emb = aiClient.embedding(query) ?: return emptyList()
-        val pairs = semanticIndex.searchTopK(emb, topK * OVERSAMPLE)
+        val cfg = settings.aiConnection.first()
+        check(cfg.enabled && cfg.endpoint.isNotBlank()) { "AI 服务未配置" }
+        val emb = aiClient.embedding(query, cfg.embeddingModel, cfg.endpoint)
+            ?: error("语义服务调用失败，请检查模型、连接及公网授权")
+        val pairs = semanticIndex.searchTopK(emb, topK, SemanticDocument.modelKey(cfg.endpoint, cfg.embeddingModel))
         return resolveHits(pairs, topK)
     }
 
     /** 以图搜图：用 vision 描述 + text embedding 降级方案 */
     suspend fun searchByImage(reader: ImageBytesReader, imageId: Long, topK: Int = 50): List<SemanticHit> {
         val image = imageDao.getById(imageId) ?: return emptyList()
+        val cfg = settings.aiConnection.first()
         val described = describeImage(reader, image) ?: return emptyList()
-        val emb = aiClient.embedding(described) ?: return emptyList()
-        val pairs = semanticIndex.searchTopK(emb, topK * OVERSAMPLE)
+        val emb = aiClient.embedding(described, cfg.embeddingModel, cfg.endpoint) ?: return emptyList()
+        val pairs = semanticIndex.searchTopK(emb, topK + 1, SemanticDocument.modelKey(cfg.endpoint, cfg.embeddingModel))
             .filter { it.first != imageId }   // 排除自己
         return resolveHits(pairs, topK)
     }
@@ -86,10 +86,6 @@ class SemanticSearchEngine(
         return resp.content
     }
 
-    private companion object {
-        /** Top-K 候选超采样倍数：吸收回表 active 过滤造成的名额损耗。 */
-        private const val OVERSAMPLE = 3
-    }
 }
 
 data class SemanticHit(val image: ImageEntity, val similarity: Float)

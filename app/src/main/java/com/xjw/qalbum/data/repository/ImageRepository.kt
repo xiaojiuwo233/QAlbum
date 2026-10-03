@@ -233,6 +233,7 @@ class ImageRepository(
                 ocrDao.deleteTextByImageIds(chunk)
                 tagDao.unlinkAllByImageIds(chunk)
                 embeddingDao.deleteByImageIds(chunk)
+                db.aiAnalysisDao().deleteByImageIds(chunk)
                 dedupExclusionDao.deleteByImageIds(chunk)
             }
         }

@@ -5,6 +5,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.media.ExifInterface
 import com.xjw.qalbum.access.FileAccessProvider
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import net.openhft.hashing.LongHashFunction
@@ -51,9 +52,14 @@ object HashEngine {
     /** 对文件内容计算 xxHash（便捷方法；分析阶段更推荐用 [readImageBytes] + [xxHashOf] 复用字节） */
     suspend fun computeXxHash(provider: FileAccessProvider, path: String): String? =
         withContext(Dispatchers.IO) {
-            runCatching {
+            try {
                 provider.readFile(path).use { it.readBytesCapped(MAX_HASH_BYTES) }
-            }.getOrNull()?.let { xxHashOf(it) }
+                    .let { xxHashOf(it) }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (_: Exception) {
+                null
+            }
         }
 
     // ---- pHash ----
@@ -364,12 +370,13 @@ object HashEngine {
         val output = java.io.ByteArrayOutputStream()
         var total = 0
         while (total < maxBytes) {
-            val read = read(buffer)
+            val read = read(buffer, 0, minOf(buffer.size, maxBytes - total))
             if (read == -1) break
             val toWrite = minOf(read, maxBytes - total)
             output.write(buffer, 0, toWrite)
             total += toWrite
         }
+        if (read() != -1) throw java.io.IOException("Image exceeds byte limit")
         return output.toByteArray()
     }
 

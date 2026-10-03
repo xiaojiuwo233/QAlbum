@@ -47,9 +47,8 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(
 class SettingsRepository(
     private val context: Context,
     private val appScope: CoroutineScope,
+    private val ds: DataStore<Preferences> = context.dataStore,
 ) {
-
-    private val ds = context.dataStore
 
     // 所有设置读取的基流：IO 读失败回退空配置（各 map 自带默认值），异常不沿流传播——
     // 设置流被各页面 stateIn / service 层直接收集，一旦抛出即整进程崩溃
@@ -88,6 +87,19 @@ class SettingsRepository(
     }
 
     // ---- AI 配置 ----
+
+    /** 请求使用同一次 DataStore 快照，避免并发改设置时混用地址、模型与密钥。 */
+    val aiConnection: Flow<AiConnectionConfig> = prefsData.map {
+        AiConnectionConfig(
+            enabled = it[Keys.AI_ENABLED] ?: false,
+            endpoint = it[Keys.AI_ENDPOINT] ?: "",
+            apiKey = it[Keys.AI_API_KEY] ?: "",
+            model = it[Keys.AI_MODEL] ?: "gpt-4o-mini",
+            embeddingModel = it[Keys.AI_EMBEDDING_MODEL] ?: "text-embedding-3-small",
+            disableThinking = it[Keys.AI_DISABLE_THINKING] ?: true,
+            maxTokens = (it[Keys.AI_MAX_TOKENS] ?: DEFAULT_AI_MAX_TOKENS).coerceIn(MIN_AI_MAX_TOKENS, MAX_AI_MAX_TOKENS),
+        )
+    }
 
     val aiEnabled: Flow<Boolean> = prefsData.map { it[Keys.AI_ENABLED] ?: false }
 
@@ -280,6 +292,12 @@ class SettingsRepository(
 
     suspend fun setDuplicateStrictness(value: DuplicateStrictness) {
         ds.edit { it[Keys.DUPLICATE_STRICTNESS] = value.name }
+    }
+
+    val duplicateAlgorithmVersion: Flow<Int> = prefsData.map { it[Keys.DUPLICATE_ALGORITHM_VERSION] ?: 0 }
+
+    suspend fun setDuplicateAlgorithmVersion(version: Int) {
+        ds.edit { it[Keys.DUPLICATE_ALGORITHM_VERSION] = version }
     }
 
     /**
@@ -519,6 +537,7 @@ class SettingsRepository(
         val CLEANUP_ALL_DUPLICATES = booleanPreferencesKey("cleanup_all_duplicates")
         val MAX_DUP_GROUP_SIZE = intPreferencesKey("max_dup_group_size")
         val DUPLICATE_STRICTNESS = stringPreferencesKey("duplicate_strictness")
+        val DUPLICATE_ALGORITHM_VERSION = intPreferencesKey("duplicate_algorithm_version")
         val SIM_W_BLOCK = doublePreferencesKey("sim_w_block")
         val SIM_W_LUMA = doublePreferencesKey("sim_w_luma")
         val SIM_W_EDGE = doublePreferencesKey("sim_w_edge")
@@ -540,3 +559,13 @@ class SettingsRepository(
         val EXPORT_SUBDIRS = stringPreferencesKey("export_subdirs")
     }
 }
+
+data class AiConnectionConfig(
+    val enabled: Boolean,
+    val endpoint: String,
+    val apiKey: String,
+    val model: String,
+    val embeddingModel: String,
+    val disableThinking: Boolean,
+    val maxTokens: Int,
+)

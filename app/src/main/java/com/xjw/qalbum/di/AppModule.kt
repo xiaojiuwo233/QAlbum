@@ -66,6 +66,7 @@ val appModule = module {
     single { get<AppDatabase>().embeddingDao() }
     single { get<AppDatabase>().dirSnapshotDao() }
     single { get<AppDatabase>().dedupExclusionDao() }
+    single { get<AppDatabase>().aiAnalysisDao() }
 
     single { SettingsRepository(get(), appScope = get()) }
     single {
@@ -121,7 +122,7 @@ val appModule = module {
     single { PaddleOcrEngine(modelStore = get(), runner = get()) }
     single { OpenAiCompatClient(settings = get(), okHttpClient = get()) }
     single { SemanticIndex(dao = get()) }
-    single { AiTaggingService(aiClient = get(), imageDao = get(), tagDao = get()) }
+    single { AiTaggingService(aiClient = get(), db = get(), imageDao = get(), tagDao = get(), settings = get()) }
     single {
         SemanticSearchEngine(
             aiClient = get(),
@@ -134,6 +135,7 @@ val appModule = module {
         AnalysisPipeline(
             accessManager = get(),
             fileOpsClient = get(),
+            db = get(),
             imageDao = get(),
             ocrDao = get(),
             duplicateDetector = get(),

@@ -11,7 +11,7 @@ class DuplicateClustererTest {
     fun exactXxhashClustersAndPicksLargestAsBest() {
         val items = listOf(
             item(1, xxhash = "H", w = 100, h = 100, size = 1_000),
-            item(2, xxhash = "H", w = 200, h = 200, size = 4_000), // 最大 → best
+            item(2, xxhash = "H", w = 200, h = 200, size = 1_000), // 最大 → best
         )
         val result = DuplicateClusterer.cluster(items, startGroupId = 1)
         assertEquals(setOf(1L, 2L), result.map { it.id }.toSet())
@@ -178,6 +178,62 @@ class DuplicateClustererTest {
             item(2, xxhash = "B", phash = 0xFFFFL, blockHash = blockHash(0..15), featureGrid = feature(luma = 200), w = 999, h = 100),
         )
         assertTrue(DuplicateClusterer.cluster(items, startGroupId = 1).isEmpty())
+    }
+
+    @Test
+    fun visualChainDoesNotPutDistantEndpointsInOneGroup() {
+        val items = listOf(0L, 7L, 7L or (7L shl 16)).mapIndexed { index, hash ->
+            item(index + 1L, phash = hash, blockHash = blockHash(), featureGrid = feature())
+        }
+        val groups = DuplicateClusterer.cluster(items, 1, visualThreshold = 4).groupBy { it.groupId }
+        assertTrue(groups.isNotEmpty())
+        for (group in groups.values) {
+            val members = group.map { assignment -> items.first { it.id == assignment.id } }
+            for (a in members) for (b in members) {
+                assertTrue(DuplicateClusterer.hamming(a.phash!!, b.phash!!) < 4)
+            }
+        }
+    }
+
+    @Test
+    fun exclusionsCannotBeBypassedThroughAnIntermediateImage() {
+        val items = (1L..3L).map { item(it, phash = 0L, blockHash = blockHash(), featureGrid = feature()) }
+        val exclusions = mapOf(1L to setOf(99L), 3L to setOf(99L))
+        val groups = DuplicateClusterer.cluster(items, 1, exclusions = exclusions).groupBy { it.groupId }
+        assertTrue(groups.values.none { group -> group.any { it.id == 1L } && group.any { it.id == 3L } })
+        assertTrue(groups.isNotEmpty())
+    }
+
+    @Test
+    fun animatedImagesDoNotMatchByFirstFrame() {
+        val a = item(1, phash = 0L, blockHash = blockHash(), featureGrid = feature()).copy(isAnimated = true)
+        val b = a.copy(id = 2)
+        assertTrue(DuplicateClusterer.cluster(listOf(a, b), 1).isEmpty())
+        assertEquals(2, DuplicateClusterer.cluster(listOf(a.copy(xxhash = "same"), b.copy(xxhash = "same")), 1).size)
+    }
+
+    @Test
+    fun exactHashRequiresTheSameFileLengthAndHonorsExclusions() {
+        assertTrue(DuplicateClusterer.cluster(listOf(item(1, xxhash = "H", size = 10), item(2, xxhash = "H", size = 20)), 1).isEmpty())
+        assertTrue(DuplicateClusterer.cluster(
+            listOf(item(1, xxhash = "H"), item(2, xxhash = "H")), 1,
+            exclusions = mapOf(1L to setOf(9L), 2L to setOf(9L)),
+        ).isEmpty())
+    }
+
+    @Test
+    fun malformedFeaturesAreNotVisualCandidates() {
+        assertTrue(!DuplicateClusterer.isVisualEligible(0L, byteArrayOf(0), feature(), false))
+        assertTrue(!DuplicateClusterer.isVisualEligible(0L, blockHash(), byteArrayOf(0), false))
+    }
+
+    @Test
+    fun keeperResolutionWinsEvenWhenLowerResolutionFileIsMuchLarger() {
+        val result = DuplicateClusterer.cluster(listOf(
+            item(1, phash = 0L, blockHash = blockHash(), featureGrid = feature(), w = 500, h = 500, size = 100_000_000),
+            item(2, phash = 0L, blockHash = blockHash(), featureGrid = feature(), w = 501, h = 501, size = 10),
+        ), 1)
+        assertEquals(2L, result.single { it.isBest }.id)
     }
 
     /** 256bit（32 字节）分块指纹。默认全 0；[diffBytes] 指定字节置 0xFF（0..15 = 128 bit 差异）。 */

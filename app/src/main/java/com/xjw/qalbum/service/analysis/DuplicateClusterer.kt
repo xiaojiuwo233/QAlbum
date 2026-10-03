@@ -40,13 +40,18 @@ object DuplicateClusterer {
         val featureGrid: ByteArray? = null,
         /** 纯色/空白图：排除出视觉聚类。 */
         val isBlank: Boolean = false,
+        val isAnimated: Boolean = false,
+        val mtime: Long = 0,
     ) {
         // 含 ByteArray，按 id 判等即可（不作集合 key）。
         override fun equals(other: Any?): Boolean = other is Item && other.id == id
         override fun hashCode(): Int = id.hashCode()
     }
 
-    data class Assignment(val id: Long, val groupId: Long, val isBest: Boolean)
+    data class Assignment(
+        val id: Long, val groupId: Long, val isBest: Boolean,
+        val expectedSize: Long = 0, val expectedMtime: Long = 0,
+    )
 
     const val DEFAULT_VISUAL_THRESHOLD = 8
     const val DEFAULT_ASPECT_TOLERANCE = 0.12
@@ -77,13 +82,14 @@ object DuplicateClusterer {
 
         // 1) 精确重复：xxHash 相同（可靠），不受视觉约束限制
         items.filter { it.xxhash != null }
-            .groupBy { it.xxhash!! }
+            .groupBy { it.xxhash!! to it.size }
             .values
             .forEach { members ->
                 if (members.size <= 1) return@forEach
-                val best = members.maxByOrNull { qualityKey(it.width, it.height, it.size) }!!
+                if (members.indices.any { i -> members.take(i).any { sharesCohort(exclusions, it.id, members[i].id) } }) return@forEach
+                val best = members.maxWithOrNull(qualityComparator)!!
                 members.forEach {
-                    assignments += Assignment(it.id, nextGroup, it.id == best.id)
+                    assignments += Assignment(it.id, nextGroup, it.id == best.id, it.size, it.mtime)
                     assignedExact += it.id
                 }
                 nextGroup++
@@ -91,7 +97,7 @@ object DuplicateClusterer {
 
         // 2) 视觉重复：未被精确分组、有 pHash + blockHash + featureGrid、且非纯色的图
         val visualItems = items.filter {
-            it.id !in assignedExact && isVisualEligible(it.phash, it.blockHash, it.featureGrid, it.isBlank)
+            it.id !in assignedExact && isVisualEligible(it.phash, it.blockHash, it.featureGrid, it.isBlank, it.isAnimated)
         }
         if (visualItems.isNotEmpty()) {
             val byId = visualItems.associateBy { it.id }
@@ -102,17 +108,56 @@ object DuplicateClusterer {
                 if (ids.size > maxVisualGroupSize) return@forEach // 超大视觉组 = 误聚，整组丢弃
                 val members = ids.mapNotNull { byId[it] }
                 if (members.size <= 1) return@forEach
-                val best = members.maxByOrNull { qualityKey(it.width, it.height, it.size) } ?: return@forEach
-                members.forEach { assignments += Assignment(it.id, nextGroup, it.id == best.id) }
-                nextGroup++
+                for (group in partitionVisualComponent(members, visualThreshold, model, aspectTolerance, exclusions)) {
+                    val best = group.maxWithOrNull(qualityComparator)!!
+                    group.forEach { assignments += Assignment(it.id, nextGroup, it.id == best.id, it.size, it.mtime) }
+                    nextGroup++
+                }
             }
         }
         return assignments
     }
 
     /** 是否具备参与视觉聚类的全部前提（缺任一特征 / 纯色 → 保守不聚）。 */
-    fun isVisualEligible(phash: Long?, blockHash: ByteArray?, featureGrid: ByteArray?, isBlank: Boolean): Boolean =
-        phash != null && blockHash != null && featureGrid != null && !isBlank
+    fun isVisualEligible(
+        phash: Long?, blockHash: ByteArray?, featureGrid: ByteArray?, isBlank: Boolean, isAnimated: Boolean = false,
+    ): Boolean = phash != null && blockHash?.size == BLOCK_HASH_BITS / 8 &&
+        featureGrid?.size == GRID_BYTES * 2 && !isBlank && !isAnimated
+
+    /** 相似关系不具传递性；最终组内任意两张都必须通过直接比较。 */
+    fun partitionVisualComponent(
+        members: List<Item>,
+        visualThreshold: Int,
+        model: SimilarityModel,
+        aspectTolerance: Double = DEFAULT_ASPECT_TOLERANCE,
+        exclusions: Map<Long, Set<Long>> = emptyMap(),
+    ): List<List<Item>> {
+        val groups = ArrayList<MutableList<Item>>()
+        for (item in members.sortedWith(qualityComparator.reversed())) {
+            if (!isVisualEligible(item.phash, item.blockHash, item.featureGrid, item.isBlank, item.isAnimated)) continue
+            val group = groups.firstOrNull { group ->
+                group.all { isDirectVisualMatch(it, item, visualThreshold, model, aspectTolerance, exclusions) }
+            }
+            if (group == null) groups.add(arrayListOf(item)) else group.add(item)
+        }
+        return groups.filter { it.size > 1 }
+    }
+
+    fun isDirectVisualMatch(
+        a: Item, b: Item, visualThreshold: Int, model: SimilarityModel,
+        aspectTolerance: Double = DEFAULT_ASPECT_TOLERANCE,
+        exclusions: Map<Long, Set<Long>> = emptyMap(),
+    ): Boolean {
+        if (!isVisualEligible(a.phash, a.blockHash, a.featureGrid, a.isBlank, a.isAnimated) ||
+            !isVisualEligible(b.phash, b.blockHash, b.featureGrid, b.isBlank, b.isAnimated)) return false
+        if (hamming(a.phash!!, b.phash!!) >= visualThreshold || !aspectClose(a, b, aspectTolerance) ||
+            sharesCohort(exclusions, a.id, b.id)) return false
+        return model.isSimilar(
+            blockHashDistance(a.blockHash!!, b.blockHash!!) / BLOCK_HASH_BITS.toDouble(),
+            lumaDistance(a.featureGrid!!, b.featureGrid!!),
+            edgeDistance(a.featureGrid, b.featureGrid),
+        )
+    }
 
     /** 对 [items] 按全部带各建一次桶并做桶内配对，连边累积进 [uf]。 */
     fun matchAllBands(
@@ -122,10 +167,12 @@ object DuplicateClusterer {
         model: SimilarityModel,
         aspectTolerance: Double = DEFAULT_ASPECT_TOLERANCE,
         exclusions: Map<Long, Set<Long>> = emptyMap(),
+        checkActive: () -> Unit = {},
     ) {
         for (band in 0 until BAND_COUNT) {
             items.groupBy { bandKey(it.phash!!, band) }.values.forEach { bucket ->
-                matchBucket(bucket, uf, visualThreshold, model, aspectTolerance, exclusions)
+                checkActive()
+                matchBucket(bucket, uf, visualThreshold, model, aspectTolerance, exclusions, checkActive)
             }
         }
     }
@@ -142,20 +189,16 @@ object DuplicateClusterer {
         model: SimilarityModel,
         aspectTolerance: Double = DEFAULT_ASPECT_TOLERANCE,
         exclusions: Map<Long, Set<Long>> = emptyMap(),
+        checkActive: () -> Unit = {},
     ) {
         if (bucket.size <= 1) return
         for (i in bucket.indices) {
             val a = bucket[i]
             for (j in i + 1 until bucket.size) {
+                if (j and 1023 == 0) checkActive()
                 val b = bucket[j]
                 if (uf.connected(a.id, b.id)) continue
-                if (hamming(a.phash!!, b.phash!!) >= visualThreshold) continue
-                if (!aspectClose(a, b, aspectTolerance)) continue
-                if (sharesCohort(exclusions, a.id, b.id)) continue
-                val dBlock = blockHashDistance(a.blockHash!!, b.blockHash!!) / BLOCK_HASH_BITS.toDouble()
-                val dLuma = lumaDistance(a.featureGrid!!, b.featureGrid!!)
-                val dEdge = edgeDistance(a.featureGrid!!, b.featureGrid!!)
-                if (model.isSimilar(dBlock, dLuma, dEdge)) uf.union(a.id, b.id)
+                if (isDirectVisualMatch(a, b, visualThreshold, model, aspectTolerance, exclusions)) uf.union(a.id, b.id)
             }
         }
     }
@@ -167,8 +210,9 @@ object DuplicateClusterer {
         return ca.any { it in cb }
     }
 
-    /** 质量排序键（像素优先、再比文件大小）：用于选组内保留图（best） */
-    fun qualityKey(width: Int, height: Int, size: Long): Long = width.toLong() * height * 1000 + size
+    /** 分辨率优先、文件大小次之、平手取较小 id；避免加权求和让大文件胜过更高分辨率。 */
+    val qualityComparator: Comparator<Item> = compareBy<Item> { it.width.toLong() * it.height }
+        .thenBy { it.size }.thenByDescending { it.id }
 
     /**
      * 惰性并查集：只为真正连过边的 id 建条目。全库预注册 200w 个装箱 Long 条目（约 160MB）

@@ -2,6 +2,7 @@ package com.xjw.qalbum.service.ocr
 
 import com.xjw.qalbum.access.FileAccessProvider
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withContext
 import timber.log.Timber
 
@@ -15,6 +16,8 @@ class PaddleOcrEngine(
         withContext(Dispatchers.IO) {
             val bytes = try {
                 provider.readFile(path).use { it.readBytes() }
+            } catch (ce: CancellationException) {
+                throw ce
             } catch (t: Throwable) {
                 Timber.w(t, "Paddle OCR read failed for $path")
                 return@withContext OcrResult.Failed(t.message ?: "读取失败")
@@ -47,6 +50,8 @@ class PaddleOcrEngine(
                     hasIdNumber = SensitivePatterns.IdNumber.containsMatchIn(full),
                     hasOrderNo = SensitivePatterns.OrderNo.containsMatchIn(full),
                 )
+            } catch (ce: CancellationException) {
+                throw ce
             } catch (t: OcrEngineUnavailableException) {
                 Timber.i(t, "Paddle OCR unavailable")
                 OcrResult.Unavailable

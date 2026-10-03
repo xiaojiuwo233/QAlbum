@@ -6,6 +6,7 @@ import com.xjw.qalbum.domain.model.FileInfo
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CancellationException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -74,6 +75,17 @@ class PaddleOcrEngineTest {
         val result = engine.recognize(FakeProvider("jpeg".toByteArray()), "/tmp/a.jpg")
 
         assertEquals(OcrResult.Unavailable, result)
+    }
+
+    @Test(expected = CancellationException::class)
+    fun cancellationIsNotReportedAsRecognitionFailure(): Unit = runBlocking {
+        val engine = PaddleOcrEngine(readyStore(), object : PaddleOcrRunner {
+            override suspend fun recognize(imageBytes: ByteArray, modelPaths: OcrModelPaths): PaddleOcrRunner.Result {
+                throw CancellationException("cancelled")
+            }
+        })
+        engine.recognize("image".toByteArray())
+        Unit
     }
 
     private class FakeProvider(private val bytes: ByteArray = ByteArray(0)) : FileAccessProvider {

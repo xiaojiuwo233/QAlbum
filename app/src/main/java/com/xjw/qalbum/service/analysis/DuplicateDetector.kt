@@ -38,6 +38,7 @@ class DuplicateDetector(
         strictness: DuplicateStrictness = DuplicateStrictness.DEFAULT,
         model: SimilarityModel = SimilarityModel.DEFAULT,
     ): Unit = withContext(Dispatchers.Default) {
+        val context = coroutineContext
         val exclusions = buildExclusionMap()
         val assignments = ArrayList<DuplicateClusterer.Assignment>()
         var nextGroup = imageDao.maxDuplicateGroupId() + 1
@@ -68,13 +69,14 @@ class DuplicateDetector(
         // ---- 2) 视觉相似：分页流式 + 多带 LSH ----
         val uf = DuplicateClusterer.LazyUnionFind()
         fun eligible(row: DedupRow): Boolean =
-            DuplicateClusterer.isVisualEligible(row.phash, row.blockHash, row.featureGrid, row.isBlank) &&
+            DuplicateClusterer.isVisualEligible(row.phash, row.blockHash, row.featureGrid, row.isBlank, row.isAnimated) &&
                 java.util.Arrays.binarySearch(assignedExact, row.id) < 0
 
         // xxhash 置 null：视觉阶段用不到，不为全库条目各留一份 16 字符 String
         fun toItem(row: DedupRow) = DuplicateClusterer.Item(
             id = row.id, xxhash = null, phash = row.phash, width = row.width, height = row.height,
-            size = row.size, blockHash = row.blockHash, featureGrid = row.featureGrid, isBlank = false,
+            size = row.size, blockHash = row.blockHash, featureGrid = row.featureGrid,
+            isBlank = row.isBlank, isAnimated = row.isAnimated,
         )
 
         // 第一遍扫描：各带 16bit 键直方图；若总量 ≤ IN_MEMORY_LIMIT 顺路把条目留在内存（单扫描完成）
@@ -100,6 +102,7 @@ class DuplicateDetector(
             DuplicateClusterer.matchAllBands(
                 inMemory, uf, strictness.visualThreshold, model,
                 DuplicateClusterer.DEFAULT_ASPECT_TOLERANCE, exclusions,
+                checkActive = { context.ensureActive() },
             )
         } else {
             Timber.i("DuplicateDetector: $eligibleTotal visual candidates > $IN_MEMORY_LIMIT, banded range passes")
@@ -121,6 +124,7 @@ class DuplicateDetector(
                         DuplicateClusterer.matchBucket(
                             bucket, uf, strictness.visualThreshold, model,
                             DuplicateClusterer.DEFAULT_ASPECT_TOLERANCE, exclusions,
+                            checkActive = { context.ensureActive() },
                         )
                         coroutineContext.ensureActive()
                     }
@@ -137,12 +141,16 @@ class DuplicateDetector(
                 buffer += memberIds
                 buffered += memberIds.size
                 if (buffered >= MEMBER_FLUSH_THRESHOLD) {
-                    nextGroup = assignGroupsBatched(buffer, nextGroup, assignments, collectAssigned = null)
+                    nextGroup = assignGroupsBatched(buffer, nextGroup, assignments, collectAssigned = null) { members ->
+                        DuplicateClusterer.partitionVisualComponent(members, strictness.visualThreshold, model, exclusions = exclusions)
+                    }
                     buffer.clear()
                     buffered = 0
                 }
             }
-            nextGroup = assignGroupsBatched(buffer, nextGroup, assignments, collectAssigned = null)
+            nextGroup = assignGroupsBatched(buffer, nextGroup, assignments, collectAssigned = null) { members ->
+                DuplicateClusterer.partitionVisualComponent(members, strictness.visualThreshold, model, exclusions = exclusions)
+            }
         }
 
         // ---- 4) 原子写回：清空旧分配 + 写入新分配同一事务 ----
@@ -151,7 +159,18 @@ class DuplicateDetector(
         // splitDuplicateGroup 也在 db 事务内写入，两边在同一写锁下串行，无交错窗口。
         val written = db.withTransaction {
             val freshExclusions = buildExclusionMap()
-            val toWrite = dropExcludedGroups(assignments, freshExclusions)
+            val allowed = dropExcludedGroups(assignments, freshExclusions)
+            val staleGroups = HashSet<Long>()
+            for (chunk in allowed.chunked(GET_BY_IDS_CHUNK)) {
+                val current = imageDao.getByIds(chunk.map { it.id }).associateBy { it.id }
+                for (assignment in chunk) {
+                    val image = current[assignment.id]
+                    if (image == null || !image.hashDone || image.size != assignment.expectedSize || image.mtime != assignment.expectedMtime) {
+                        staleGroups += assignment.groupId
+                    }
+                }
+            }
+            val toWrite = allowed.filterNot { it.groupId in staleGroups }
             imageDao.replaceDuplicateAssignments(
                 toWrite.map { DuplicateAssignment(it.id, it.groupId, it.isBest) }
             )
@@ -212,22 +231,29 @@ class DuplicateDetector(
         startGroup: Long,
         assignments: MutableList<DuplicateClusterer.Assignment>,
         collectAssigned: MutableList<Long>?,
+        partition: ((List<DuplicateClusterer.Item>) -> List<List<DuplicateClusterer.Item>>)? = null,
     ): Long {
         if (groups.isEmpty()) return startGroup
-        val quality = HashMap<Long, Long>()
+        val items = HashMap<Long, DuplicateClusterer.Item>()
         groups.asSequence().flatten().chunked(GET_BY_IDS_CHUNK).forEach { chunk ->
             imageDao.getByIds(chunk).forEach {
-                quality[it.id] = DuplicateClusterer.qualityKey(it.width, it.height, it.size)
+                items[it.id] = DuplicateClusterer.Item(
+                    it.id, it.xxhash, it.phash, it.width, it.height, it.size,
+                    it.blockHash, it.featureGrid, it.isBlank, it.isAnimated, it.mtime,
+                )
             }
         }
         var nextGroup = startGroup
         for (memberIds in groups) {
-            val known = memberIds.filter { it in quality }
-            if (known.size <= 1) continue
-            val best = known.maxByOrNull { quality[it]!! }!!
-            known.forEach { assignments += DuplicateClusterer.Assignment(it, nextGroup, it == best) }
-            collectAssigned?.addAll(known)
-            nextGroup++
+            val known = memberIds.mapNotNull { items[it] }
+            val groupsNow = partition?.invoke(known) ?: known.filter { it.xxhash != null }.groupBy { it.xxhash to it.size }.values
+            for (group in groupsNow) {
+                if (group.size <= 1) continue
+                val best = group.maxWithOrNull(DuplicateClusterer.qualityComparator)!!
+                group.forEach { assignments += DuplicateClusterer.Assignment(it.id, nextGroup, it.id == best.id, it.size, it.mtime) }
+                collectAssigned?.addAll(group.map { it.id })
+                nextGroup++
+            }
         }
         return nextGroup
     }
@@ -265,6 +291,7 @@ class DuplicateDetector(
     }
 
     companion object {
+        const val ALGORITHM_VERSION = 2
         /** 去重投影分页大小（keyset 游标）。 */
         private const val DEDUP_PAGE = 2000
 

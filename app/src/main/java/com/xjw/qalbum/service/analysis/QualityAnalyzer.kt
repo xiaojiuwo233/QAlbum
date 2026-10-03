@@ -109,7 +109,7 @@ object QualityAnalyzer {
         val small = Bitmap.createScaledBitmap(bitmap, 8, 8, true)
         val pixels = IntArray(64)
         small.getPixels(pixels, 0, 8, 0, 0, 8, 8)
-        small.recycle()
+        if (small !== bitmap) small.recycle()
 
         val refR = (pixels[0] shr 16) and 0xFF
         val refG = (pixels[0] shr 8) and 0xFF
