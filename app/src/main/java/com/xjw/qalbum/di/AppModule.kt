@@ -160,14 +160,7 @@ val appModule = module {
             imageRepository = get(),
         )
     }
-    single {
-        ThumbnailTrashManager(
-            accessManager = get(),
-            imageDao = get(),
-            fileOpsClient = get(),
-            imageRepository = get(),
-        )
-    }
+    single { ThumbnailTrashManager(imageDao = get()) }
     single { ImageFileManager(context = get(), accessManager = get(), imageDao = get()) }
     single { CleanupController(recommender = get(), quarantineManager = get(), cleanupDao = get()) }
 

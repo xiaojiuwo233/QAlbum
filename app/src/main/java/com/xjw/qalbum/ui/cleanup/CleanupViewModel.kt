@@ -259,7 +259,7 @@ class CleanupViewModel(
         launchGuarded(appScope, "清理回收站") {
             // 图片可能多达数万张，逐张删除较慢：上报进度给 UI 展示进度条
             val quarantineCount = cleanupController.countQuarantine()
-            val total = quarantineCount + thumbnailTrashSummary.value.count
+            val total = quarantineCount
             _purgeProgress.value = PurgeProgress(0, total)
             try {
                 var purgedImages = 0
@@ -276,32 +276,7 @@ class CleanupViewModel(
                     processed += page.size
                     _purgeProgress.value = PurgeProgress(processed.coerceAtMost(total), total)
                 }
-                val purgedThumbnails = thumbnailTrashManager.purgeAll { tDone, _ ->
-                    _purgeProgress.value = PurgeProgress((quarantineCount + tDone).coerceAtMost(total), total)
-                }
-                onMain { onDone(purgedImages + purgedThumbnails) }
-            } finally {
-                _purgeProgress.value = null
-            }
-        }
-    }
-
-    fun purgeThumbnails(imageIds: Set<Long>, onDone: (Int) -> Unit = {}) {
-        if (imageIds.isEmpty()) return
-        launchGuarded(appScope, "清理缩略图") {
-            val n = thumbnailTrashManager.purge(imageIds.toList())
-            onMain { onDone(n) }
-        }
-    }
-
-    fun purgeAllThumbnails(onDone: (Int) -> Unit = {}) {
-        launchGuarded(appScope, "清理缩略图") {
-            _purgeProgress.value = PurgeProgress(0, thumbnailTrashSummary.value.count)
-            try {
-                val n = thumbnailTrashManager.purgeAll { done, total ->
-                    _purgeProgress.value = PurgeProgress(done, total)
-                }
-                onMain { onDone(n) }
+                onMain { onDone(purgedImages) }
             } finally {
                 _purgeProgress.value = null
             }
@@ -825,7 +800,7 @@ internal fun buildReviewItems(
             ReviewItem.Single(
                 image = img,
                 reason = item.reason,
-                defaultSelected = !isProtectedImage(img) &&
+                defaultSelected = !isProtectedImage(img) && img.sourceType !in setOf("chatimg", "chatraw", "chatthumb", "temp") &&
                     (item.reason in HIGH_CONFIDENCE_REASONS || item.reason == CleanupRules.REASON_RECOMMENDED),
             )
         }
@@ -852,7 +827,7 @@ private fun protectedIdsOf(members: List<ImageEntity>): Set<Long> =
 internal fun suggestedSelection(items: List<ReviewItem>): Set<Long> = buildSet {
     items.forEach { item ->
         when (item) {
-            is ReviewItem.Single -> if (item.defaultSelected) add(item.image.id)
+            is ReviewItem.Single -> if (item.defaultSelected && item.image.sourceType !in setOf("chatimg", "chatraw", "chatthumb", "temp")) add(item.image.id)
             is ReviewItem.Group -> addAll(item.defaultDeleteIds)
         }
     }

@@ -14,7 +14,7 @@ import java.time.ZoneId
  * - `cache_key`：从 `Cache_{hash}` 文件名中提取的 hash 部分。
  * - `variant_group` / `is_variant_primary`：仅保留历史 cache_key 变体能力，不再用来匹配缩略图与原图。
  * - `duplicate_group_id` / `is_duplicate_best`：基于 xxHash + pHash 检测出的"重复组"。
- * - `status = thumbnail_trash`：chatthumb 缩略图自动进入独立回收站，不参与图库和分析。
+ * - `status = thumbnail_trash`：历史状态名；现在表示受保护的 QQ 预览缓存，不参与图库和分析，不能直接清理。
  */
 @Entity(
     tableName = "images",

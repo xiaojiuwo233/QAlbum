@@ -187,6 +187,14 @@ internal fun CleanupReviewScreen(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
+            item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) {
+                Text(
+                    "QQ 缓存尚未验证聊天引用。移入回收站也可能影响 QQ 回看，默认不勾选删除。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(6.dp),
+                )
+            }
             items(visibleItems, key = { it.itemKey }) { item ->
                 when (item) {
                     is ReviewItem.Single -> SingleTile(

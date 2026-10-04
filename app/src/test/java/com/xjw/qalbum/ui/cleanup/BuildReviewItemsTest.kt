@@ -16,12 +16,12 @@ import org.junit.Test
 class BuildReviewItemsTest {
 
     @Test
-    fun singleHighConfidenceDefaultSelected() {
+    fun highConfidenceQqCacheStillNotPreselected() {
         val items = buildReviewItems(
             listOf(ReviewBatchItem.Single(1, CleanupRules.REASON_EMOJI)),
             mapOf(1L to img(1)),
         ) { emptyList() }
-        assertTrue((items.single() as ReviewItem.Single).defaultSelected)
+        assertFalse((items.single() as ReviewItem.Single).defaultSelected)
     }
 
     @Test
@@ -34,7 +34,7 @@ class BuildReviewItemsTest {
     }
 
     @Test
-    fun groupBuiltWithKeeperAndInferiorDeletes() {
+    fun groupKeepsQqCachePathsUnselected() {
         val keeper = img(1, source = "chatraw", w = 1200, h = 1200)
         val dup = img(2, source = "chatimg", w = 800, h = 800)
         val items = buildReviewItems(
@@ -43,7 +43,7 @@ class BuildReviewItemsTest {
         ) { listOf(keeper, dup) }
         val group = items.single() as ReviewItem.Group
         assertEquals(1L, group.keeperId)
-        assertEquals(setOf(2L), group.defaultDeleteIds)
+        assertTrue(group.defaultDeleteIds.isEmpty())
         assertEquals(2, group.members.size)
     }
 
@@ -63,7 +63,7 @@ class BuildReviewItemsTest {
     }
 
     @Test
-    fun suggestedSelectionPicksHighConfidenceAndDuplicateInferiorOnly() {
+    fun suggestedSelectionDoesNotTreatQqCachesAsSafeToDelete() {
         val items = buildReviewItems(
             listOf(
                 ReviewBatchItem.Single(1, CleanupRules.REASON_EMOJI),
@@ -72,8 +72,7 @@ class BuildReviewItemsTest {
             ),
             mapOf(1L to img(1), 2L to img(2)),
         ) { listOf(img(10, source = "chatraw", w = 1200, h = 1200), img(11, source = "chatimg", w = 800, h = 800)) }
-        // 表情包(1) + 重复劣质副本(11)；低分辨率(2) 不预选；重复保留图(10) 不预选
-        assertEquals(setOf(1L, 11L), suggestedSelection(items))
+        assertTrue(suggestedSelection(items).isEmpty())
     }
 
     @Test

@@ -143,7 +143,7 @@ class CleanupRecommender(
                             batchId = batchId,
                             imageId = item.imageId,
                             reason = item.reason,
-                            riskLevel = if (isRisky(item.reason)) "high" else "safe",
+                            riskLevel = "high",
                             score = 0f,
                         )
                     )
@@ -154,7 +154,7 @@ class CleanupRecommender(
                                     batchId = batchId,
                                     imageId = row.id,
                                     reason = CleanupRules.REASON_DUPLICATE,
-                                    riskLevel = "safe",
+                                    riskLevel = "high",
                                     score = row.deleteScore,
                                 )
                             )
@@ -305,7 +305,7 @@ class CleanupRecommender(
                         batchId = batchId,
                         imageId = id,
                         reason = CleanupRules.REASON_DUPLICATE,
-                        riskLevel = "safe",
+                        riskLevel = "high",
                         score = 0f,
                     )
                 )
@@ -317,7 +317,7 @@ class CleanupRecommender(
                             batchId = batchId,
                             imageId = item.imageId,
                             reason = item.reason,
-                            riskLevel = if (isRisky(item.reason)) "high" else "safe",
+                            riskLevel = "high",
                             score = 0f,
                         )
                     )
@@ -329,11 +329,7 @@ class CleanupRecommender(
         return CleanupBatch(batchId, report, items)
     }
 
-    /** 重复 / 空白 / 损坏视为低风险（safe），其余视为中高风险 */
-    private fun isRisky(reason: String): Boolean = when (reason) {
-        CleanupRules.REASON_DUPLICATE, CleanupRules.REASON_BLANK, CleanupRules.REASON_CORRUPT -> false
-        else -> true
-    }
+    // 尚未接入完整 QQ 消息引用检查，不再把重复 / 空白 / 损坏直接标为安全删除。
 
     companion object {
         const val DEFAULT_MAX_ITEMS = 200

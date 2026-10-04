@@ -196,8 +196,8 @@ fun CleanupMainScreen(
     val thumbnailTrashSummary by viewModel.thumbnailTrashSummary.collectAsState()
 
     // 回收站计数/大小走 DB 聚合，不再全量装载 quarantine 列表（项多会撞 CursorWindow）
-    val recycleBinCount = quarantineStats.count + thumbnailTrashSummary.count
-    val recycleBinBytes = quarantineStats.bytes + thumbnailTrashSummary.bytes
+    val recycleBinCount = quarantineStats.count
+    val recycleBinBytes = quarantineStats.bytes
 
     Scaffold(
         topBar = {
@@ -262,6 +262,10 @@ fun CleanupMainScreen(
                 count = recycleBinCount,
                 bytes = recycleBinBytes,
                 onOpen = onOpenRecycleBin,
+            )
+            ThumbnailEntryCard(
+                summary = thumbnailTrashSummary,
+                onOpen = { context.startActivity(android.content.Intent(context, com.xjw.qalbum.ThumbnailTrashActivity::class.java)) },
             )
         }
     }
@@ -550,7 +554,7 @@ internal fun ThumbnailEntryCard(
             )
             Spacer(Modifier.size(12.dp))
             Column(modifier = Modifier.weight(1f)) {
-                Text("缩略图", style = MaterialTheme.typography.titleSmall)
+                Text("QQ 预览缓存", style = MaterialTheme.typography.titleSmall)
                 Text(
                     "${summary.count} 项 · ${formatBytes(summary.bytes)}",
                     style = MaterialTheme.typography.bodySmall,
@@ -591,7 +595,7 @@ internal fun PurgeProgressDialog(progress: PurgeProgress) {
 }
 
 private fun presetHint(preset: CleanupPreset?): String = when (preset) {
-    CleanupPreset.CONSERVATIVE -> "保守：只清理重复 / 损坏 / 空白，最安全。"
+    CleanupPreset.CONSERVATIVE -> "保守：审核重复 / 损坏 / 空白；仍需确认 QQ 回看影响。"
     CleanupPreset.BALANCED -> "平衡：加入低分辨率 / 模糊 / 表情包，覆盖大多数明显多余的图。"
     CleanupPreset.AGGRESSIVE -> "激进：全部维度开启且门限放宽，可能含有价值的图，请仔细审核。"
     null -> "自定义规则：可在「设置 → 清理规则」里逐项调整开关与门限。"

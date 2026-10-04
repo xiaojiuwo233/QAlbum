@@ -83,8 +83,8 @@ fun CleanupRecycleBinScreen(
     val busy by viewModel.busy.collectAsState()
 
     // 计数/总大小走 DB 聚合（stats），不再 items.size/sumOf —— 列表已分页，内存里没有全量项
-    val totalCount = quarantineStats.count + thumbnailSummary.count
-    val totalBytes = quarantineStats.bytes + thumbnailSummary.bytes
+    val totalCount = quarantineStats.count
+    val totalBytes = quarantineStats.bytes
     var showClearConfirm by remember { mutableStateOf(false) }
     var preview by remember { mutableStateOf<QuarantineEntity?>(null) }
 
@@ -196,7 +196,7 @@ fun CleanupRecycleBinScreen(
         AlertDialog(
             onDismissRequest = { showClearConfirm = false },
             title = { Text("清理整个回收站？") },
-            text = { Text("将永久删除回收站中的图片和缩略图，删除后不可恢复。") },
+            text = { Text("将永久删除已移入回收站的图片，删除后不可恢复。QQ 预览缓存不会被清理。") },
             confirmButton = {
                 TextButton(onClick = {
                     showClearConfirm = false

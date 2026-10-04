@@ -344,7 +344,7 @@ class ScanPipeline(
             width = 0, // 宽高在分析阶段读取
             height = 0,
             isAnimated = type.isAnimated,
-            // chatthumb 缩略图直接进缩略图回收站
+            // 沿用索引状态以兼容现有库；chatthumb 是受保护的 QQ 预览缓存，不再参与清空回收站。
             status = if (sourceType == "chatthumb") "thumbnail_trash" else "active",
         )
     }

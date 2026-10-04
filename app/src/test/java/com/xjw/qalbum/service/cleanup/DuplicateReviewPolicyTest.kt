@@ -40,41 +40,39 @@ class DuplicateReviewPolicyTest {
     // ---- decide：默认勾选集合 ----
 
     @Test
-    fun twoExactCopiesDeleteOneKeepOne() {
-        // 回归「2 张重复全勾」：精确副本应删 1 留 1
+    fun twoExactQqCopiesKeepBothPathsByDefault() {
         val a = img(1, source = "chatimg", w = 800, h = 800, xxhash = "H")
         val b = img(2, source = "chatimg", w = 800, h = 800, xxhash = "H")
         val d = DuplicateReviewPolicy.decide(listOf(a, b))!!
         assertEquals(1L, d.keepId)
-        assertEquals(setOf(2L), d.deleteIds)
+        assertTrue(d.deleteIds.isEmpty())
     }
 
     @Test
-    fun fourExactCopiesDeleteThreeKeepOne() {
-        // 回归「4 张重复全不勾」：精确副本应删 3 留 1
+    fun fourExactQqCopiesKeepAllPathsByDefault() {
         val imgs = (1..4).map { img(it.toLong(), source = "chatimg", w = 800, h = 800, xxhash = "H") }
         val d = DuplicateReviewPolicy.decide(imgs)!!
         assertEquals(1L, d.keepId)
-        assertEquals(setOf(2L, 3L, 4L), d.deleteIds)
+        assertTrue(d.deleteIds.isEmpty())
     }
 
     @Test
-    fun deletesCompressedChatImagesKeepsRaw() {
+    fun doesNotPreselectCompressedChatImagesWhenRawExists() {
         val raw = img(1, source = "chatraw", w = 1200, h = 1200, xxhash = "RAW")
         val c1 = img(2, source = "chatimg", w = 800, h = 800, xxhash = "A")
         val c2 = img(3, source = "chatimg", w = 600, h = 600, xxhash = "B")
         val d = DuplicateReviewPolicy.decide(listOf(raw, c1, c2))!!
         assertEquals(1L, d.keepId)
-        assertEquals(setOf(2L, 3L), d.deleteIds)
+        assertTrue(d.deleteIds.isEmpty())
     }
 
     @Test
-    fun deletesLowerResolutionCopy() {
+    fun doesNotPreselectLowerResolutionRawCache() {
         val a = img(1, source = "chatraw", w = 1000, h = 1000, blur = 300f, xxhash = "A")
         val b = img(2, source = "chatraw", w = 500, h = 500, blur = 300f, xxhash = "B")
         val d = DuplicateReviewPolicy.decide(listOf(a, b))!!
         assertEquals(1L, d.keepId)
-        assertEquals(setOf(2L), d.deleteIds)
+        assertTrue(d.deleteIds.isEmpty())
     }
 
     @Test
@@ -94,7 +92,7 @@ class DuplicateReviewPolicyTest {
         val deleted = img(3, source = "chatimg", w = 800, h = 800, xxhash = "H", status = "deleted")
         val d = DuplicateReviewPolicy.decide(listOf(a, b, deleted))!!
         assertEquals(1L, d.keepId)
-        assertEquals(setOf(2L), d.deleteIds) // 3 已删除，不参与
+        assertTrue(d.deleteIds.isEmpty()) // 已删除的行不参与，现存 QQ 路径不预选。
     }
 
     private fun img(

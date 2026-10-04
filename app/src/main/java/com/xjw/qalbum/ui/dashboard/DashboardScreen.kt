@@ -228,8 +228,8 @@ private fun MetricsGrid(state: DashboardUiState) {
     val cachedThumbCount = state.thumbnailTrashCount
     val cachedThumbBytes = state.thumbnailTrashBytes
 
-    val cleanableCount = state.thumbnailTrashCount + state.quarantineCount
-    val cleanableBytes = state.thumbnailTrashBytes + state.quarantineBytes
+    val cleanableCount = state.quarantineCount
+    val cleanableBytes = state.quarantineBytes
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Row(
@@ -262,7 +262,7 @@ private fun MetricsGrid(state: DashboardUiState) {
             MetricCard(
                 icon = Icons.Outlined.Folder,
                 value = formatCount(cachedThumbCount),
-                label = "缓存图片",
+                label = "QQ 预览缓存",
                 subtitle = if (cachedThumbBytes > 0) formatBytes(cachedThumbBytes) else null,
                 containerColor = MaterialTheme.colorScheme.secondaryContainer,
                 contentColor = MaterialTheme.colorScheme.onSecondaryContainer,

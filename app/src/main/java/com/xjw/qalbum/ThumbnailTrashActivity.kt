@@ -5,87 +5,38 @@ import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.asPaddingValues
-import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBars
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
-import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.Delete
-import androidx.compose.material.icons.outlined.RadioButtonUnchecked
-import androidx.compose.material3.Button
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
+import androidx.compose.material.icons.outlined.Image
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import androidx.paging.compose.LazyPagingItems
 import androidx.paging.compose.collectAsLazyPagingItems
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
-import coil3.request.crossfade
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.ui.cleanup.CleanupViewModel
-import com.xjw.qalbum.ui.cleanup.PurgeProgressDialog
 import com.xjw.qalbum.ui.imageloading.ImageEntityModel
 import com.xjw.qalbum.ui.theme.QAlbumTheme
-import kotlinx.coroutines.launch
 import org.koin.android.ext.android.inject
 import org.koin.androidx.compose.koinViewModel
+import java.util.Locale
 
 class ThumbnailTrashActivity : ComponentActivity() {
-
     private val settings: SettingsRepository by inject()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -94,365 +45,92 @@ class ThumbnailTrashActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.auto(Color.Transparent.value.toInt(), Color.Transparent.value.toInt()),
         )
         super.onCreate(savedInstanceState)
-
         setContent {
             val dynamicColor by settings.dynamicColorEnabled.collectAsState(initial = true)
             QAlbumTheme(dynamicColor = dynamicColor) {
-                Surface(modifier = Modifier.fillMaxSize()) {
-                    ThumbnailTrashScreen(onBack = ::finish)
-                }
+                ThumbnailCacheScreen(onBack = ::finish)
             }
         }
     }
 }
 
 @Composable
-private fun ThumbnailTrashScreen(
-    onBack: () -> Unit,
-    viewModel: CleanupViewModel = koinViewModel(),
-) {
-    val items = viewModel.thumbnailTrash.collectAsLazyPagingItems()
-    // 计数/总大小走 DB 聚合（summary），不再 items.size/sumOf —— 列表已分页，内存里没有全量项
+private fun ThumbnailCacheScreen(onBack: () -> Unit, viewModel: CleanupViewModel = koinViewModel()) {
+    val images = viewModel.thumbnailTrash.collectAsLazyPagingItems()
     val summary by viewModel.thumbnailTrashSummary.collectAsState()
-    val busy by viewModel.busy.collectAsState()
-    val purgeProgress by viewModel.purgeProgress.collectAsState()
-    var selectedIds by remember { mutableStateOf(setOf<Long>()) }
     var preview by remember { mutableStateOf<ImageEntity?>(null) }
-    val snackbarHostState = remember { SnackbarHostState() }
-    val scope = rememberCoroutineScope()
-
-    val bottomInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-
-    val clearSelection = { selectedIds = emptySet() }
-    val toggle: (Long) -> Unit = { id ->
-        selectedIds = if (id in selectedIds) selectedIds - id else selectedIds + id
-    }
-
-    // 进程级共享的操作提示（磁盘满等 DB 写失败的可读原因，launchGuarded 统一写入）：
-    // 转 snackbar 展示后消费，否则这些原因只记日志、本页只有张数差异提示
-    val opMessage by viewModel.message.collectAsState()
-    LaunchedEffect(opMessage) {
-        opMessage?.let {
-            snackbarHostState.showSnackbar(it)
-            viewModel.consumeMessage()
-        }
-    }
-
-    // 清理结果反馈：Shizuku/Root 掉线时下游直接返回 0，部分文件也可能删除失败；
-    // 不提示的话用户只看到进度一闪、列表纹丝不动，误以为已清理或反复无效点击
-    val showPurgeResult: (purged: Int, expected: Int) -> Unit = { purged, expected ->
-        val message = when {
-            purged <= 0 -> "未能清理：文件访问未就绪或删除失败，请检查 Shizuku/Root 授权后重试"
-            purged < expected -> "已清理 $purged 张，${expected - purged} 张失败"
-            else -> "已清理 $purged 张"
-        }
-        scope.launch { snackbarHostState.showSnackbar(message) }
-    }
-
+    val context = LocalContext.current
     Scaffold(
         topBar = {
-            if (selectedIds.isEmpty()) {
-                ThumbnailTopBar(
-                    count = summary.count,
-                    bytes = summary.bytes,
-                    busy = busy,
-                    onBack = onBack,
-                    onPurgeAll = {
-                        val expected = summary.count
-                        viewModel.purgeAllThumbnails { purged -> showPurgeResult(purged, expected) }
-                    },
-                )
-            } else {
-                ThumbnailSelectionTopBar(
-                    count = selectedIds.size,
-                    busy = busy,
-                    onClose = clearSelection,
-                    onDelete = {
-                        val expected = selectedIds.size
-                        viewModel.purgeThumbnails(selectedIds) { purged -> showPurgeResult(purged, expected) }
-                        clearSelection()
-                    },
-                )
-            }
-        },
-        snackbarHost = { SnackbarHost(snackbarHostState) },
-        contentWindowInsets = WindowInsets(0, 0, 0, 0),
-    ) { topPadding ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(top = topPadding.calculateTopPadding()),
-        ) {
-            if (items.itemCount == 0) {
-                ThumbnailEmptyState()
-            } else {
-                ThumbnailTrashGrid(
-                    items = items,
-                    selectedIds = selectedIds,
-                    bottomInset = bottomInset,
-                    onToggle = toggle,
-                    onLongPress = { preview = it },
-                )
-            }
-        }
-    }
-
-    preview?.let { image ->
-        ThumbnailPreviewDialog(image = image, onClose = { preview = null })
-    }
-
-    purgeProgress?.let { PurgeProgressDialog(it) }
-}
-
-@Composable
-private fun ThumbnailTopBar(
-    count: Int,
-    bytes: Long,
-    busy: Boolean,
-    onBack: () -> Unit,
-    onPurgeAll: () -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .statusBarsPadding()
-            .background(MaterialTheme.colorScheme.background)
-            .padding(start = 4.dp, top = 10.dp, end = 12.dp, bottom = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        IconButton(onClick = onBack) {
-            Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
-        }
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                "缩略图",
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onBackground,
-            )
-            Text(
-                "$count 项 · ${formatBytes(bytes)}",
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        Button(
-            onClick = onPurgeAll,
-            enabled = count > 0 && !busy,
-        ) {
-            Text("一键清理")
-        }
-    }
-}
-
-@Composable
-private fun ThumbnailSelectionTopBar(
-    count: Int,
-    busy: Boolean,
-    onClose: () -> Unit,
-    onDelete: () -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .statusBarsPadding()
-            .background(MaterialTheme.colorScheme.background)
-            .padding(start = 4.dp, top = 8.dp, end = 6.dp, bottom = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        IconButton(onClick = onClose) {
-            Icon(Icons.Outlined.Close, contentDescription = "取消选择")
-        }
-        Text(
-            "已选择 $count 项",
-            style = MaterialTheme.typography.titleLarge,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.weight(1f),
-        )
-        IconButton(onClick = onDelete, enabled = !busy) {
-            Icon(Icons.Outlined.Delete, contentDescription = "删除所选")
-        }
-    }
-}
-
-@Composable
-private fun ThumbnailTrashGrid(
-    items: LazyPagingItems<ImageEntity>,
-    selectedIds: Set<Long>,
-    bottomInset: Dp,
-    onToggle: (Long) -> Unit,
-    onLongPress: (ImageEntity) -> Unit,
-) {
-    LazyVerticalGrid(
-        columns = GridCells.Fixed(4),
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(
-            start = 1.5.dp,
-            end = 1.5.dp,
-            top = 2.dp,
-            bottom = bottomInset + 12.dp,
-        ),
-        horizontalArrangement = Arrangement.spacedBy(1.5.dp),
-        verticalArrangement = Arrangement.spacedBy(1.5.dp),
-    ) {
-        items(
-            count = items.itemCount,
-            key = { index -> items.peek(index)?.id ?: "loading-$index" },
-        ) { index ->
-            val image = items[index]
-            if (image != null) {
-                ThumbnailTile(
-                    image = image,
-                    selected = image.id in selectedIds,
-                    selectionMode = selectedIds.isNotEmpty(),
-                    onClick = { onToggle(image.id) },
-                    onLongPress = { onLongPress(image) },
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun ThumbnailTile(
-    image: ImageEntity,
-    selected: Boolean,
-    selectionMode: Boolean,
-    onClick: () -> Unit,
-    onLongPress: () -> Unit,
-) {
-    val context = LocalContext.current
-    val scale by animateFloatAsState(
-        targetValue = if (selected) 0.88f else 1f,
-        animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
-        label = "thumbSelectScale",
-    )
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .aspectRatio(1f)
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-            }
-            .clip(RoundedCornerShape(if (selected) 8.dp else 0.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .combinedClickable(onClick = onClick, onLongClick = onLongPress),
-    ) {
-        AsyncImage(
-            model = ImageRequest.Builder(context)
-                .data(ImageEntityModel(image))
-                .crossfade(true)
-                .build(),
-            contentDescription = image.filename,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier.fillMaxSize(),
-        )
-        if (selectionMode || selected) {
-            Icon(
-                if (selected) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
-                contentDescription = null,
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(5.dp)
-                    .size(22.dp)
-                    .clip(CircleShape)
-                    .background(if (selected) MaterialTheme.colorScheme.primary else Color.Black.copy(alpha = 0.36f)),
-                tint = Color.White,
-            )
-        }
-    }
-}
-
-/** 缩略图长按全屏预览：完整展示（Fit），点任意处关闭 */
-@Composable
-private fun ThumbnailPreviewDialog(
-    image: ImageEntity,
-    onClose: () -> Unit,
-) {
-    val context = LocalContext.current
-    Dialog(
-        onDismissRequest = onClose,
-        properties = DialogProperties(
-            usePlatformDefaultWidth = false,
-            decorFitsSystemWindows = false,
-        ),
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color.Black)
-                .clickable(onClick = onClose),
-        ) {
-            AsyncImage(
-                model = ImageRequest.Builder(context)
-                    .data(ImageEntityModel(image))
-                    .crossfade(true)
-                    .build(),
-                contentDescription = image.filename,
-                contentScale = ContentScale.Fit,
-                modifier = Modifier.fillMaxSize(),
-            )
             Row(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .fillMaxWidth()
-                    .background(
-                        Brush.verticalGradient(
-                            listOf(Color.Black.copy(alpha = 0.72f), Color.Transparent),
-                        ),
-                    )
-                    .statusBarsPadding()
-                    .padding(start = 4.dp, top = 6.dp, end = 12.dp, bottom = 28.dp),
+                modifier = Modifier.fillMaxWidth().statusBarsPadding().padding(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                IconButton(onClick = onClose) {
-                    Icon(Icons.Outlined.Close, contentDescription = "关闭", tint = Color.White)
+                IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回") }
+                Column {
+                    Text("QQ 预览缓存", style = MaterialTheme.typography.titleLarge)
+                    Text("${summary.count} 项 · ${formatThumbnailBytes(summary.bytes)} · 已保护", style = MaterialTheme.typography.bodySmall)
                 }
-                Column(modifier = Modifier.weight(1f).padding(start = 4.dp)) {
-                    Text(
-                        image.filename.ifBlank { "缩略图" },
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color = Color.White,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        formatBytes(image.size),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color.White.copy(alpha = 0.72f),
-                    )
+            }
+        },
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+    ) { padding ->
+        if (images.itemCount == 0) {
+            Column(
+                modifier = Modifier.fillMaxSize().padding(padding),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Icon(Icons.Outlined.Image, contentDescription = null, modifier = Modifier.size(56.dp))
+                Spacer(Modifier.height(12.dp))
+                Text("暂无已索引的预览缓存")
+            }
+        } else {
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(4),
+                modifier = Modifier.fillMaxSize().padding(padding),
+                contentPadding = WindowInsets.navigationBars.asPaddingValues(),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                items(images.itemCount, key = { images.peek(it)?.id ?: "loading-$it" }) { index ->
+                    val image = images[index]
+                    Box(Modifier.fillMaxWidth().aspectRatio(1f).background(MaterialTheme.colorScheme.surfaceVariant)) {
+                        image?.let {
+                            AsyncImage(
+                                model = ImageRequest.Builder(context).data(ImageEntityModel(it)).build(),
+                                contentDescription = it.filename,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize().clickable { preview = it },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+    preview?.let { image ->
+        Dialog(onDismissRequest = { preview = null }, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
+            Box(Modifier.fillMaxSize().background(Color.Black)) {
+                AsyncImage(
+                    model = ImageRequest.Builder(context).data(ImageEntityModel(image)).build(),
+                    contentDescription = image.filename,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize(),
+                )
+                IconButton(onClick = { preview = null }, modifier = Modifier.statusBarsPadding().align(Alignment.TopStart)) {
+                    Icon(Icons.Outlined.Close, contentDescription = "关闭", tint = Color.White)
                 }
             }
         }
     }
 }
 
-@Composable
-private fun ThumbnailEmptyState() {
-    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Icon(
-                Icons.Outlined.Delete,
-                contentDescription = null,
-                modifier = Modifier.size(72.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.height(12.dp))
-            Text(
-                "没有待清理缩略图",
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
-        }
-    }
-}
-
-private fun formatBytes(bytes: Long): String {
-    if (bytes <= 0) return "0 B"
-    val units = arrayOf("B", "KB", "MB", "GB", "TB")
-    val exp = (Math.log10(bytes.toDouble()) / Math.log10(1024.0)).toInt().coerceAtMost(units.size - 1)
-    val value = bytes.toDouble() / Math.pow(1024.0, exp.toDouble())
-    return String.format("%.1f %s", value, units[exp])
+private fun formatThumbnailBytes(bytes: Long): String {
+    if (bytes < 1024) return "$bytes B"
+    val units = listOf("KB", "MB", "GB", "TB")
+    var value = bytes / 1024.0
+    var index = 0
+    while (value >= 1024 && index < units.lastIndex) { value /= 1024; index++ }
+    return String.format(Locale.ROOT, "%.1f %s", value, units[index])
 }

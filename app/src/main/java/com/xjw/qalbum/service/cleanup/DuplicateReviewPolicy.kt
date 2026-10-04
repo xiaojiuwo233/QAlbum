@@ -9,7 +9,7 @@ import com.xjw.qalbum.data.db.entity.ImageEntity
  * 中存在「最优图已属其他组时整组 isBest 丢失」的 bug，会导致整组被误判）。改为审核时按组重算：
  *
  * - **保留图**：组内质量最高（chatraw 原图 > 其他非 chatimg > chatimg 压缩图；再比 分辨率 > 清晰度 > 文件大小；平手取 id 小）。
- * - **默认勾选删除**：非保留图且属「劣质副本」——与保留图字节相同（精确副本）/ 来源是 chatimg / 分辨率更低 / 更模糊。
+ * - **默认勾选删除**：仅非 QQ 缓存的劣质副本；QQ 缓存未验证聊天引用时不预选。
  * - 质量与保留图相当且非精确副本 → 不勾，交给用户判断（避免误删）。
  */
 object DuplicateReviewPolicy {
@@ -50,10 +50,11 @@ object DuplicateReviewPolicy {
         else -> 1
     }
 
-    /** 是否相对保留图为「劣质副本」：精确副本 / chatimg / 更低分辨率 / 更模糊。 */
+    /** 画质不能证明 QQ 路径可删；仅为非 QQ 缓存计算默认选择。 */
     private fun isInferiorCopy(img: ImageEntity, keeper: ImageEntity, keeperPixels: Long): Boolean {
-        if (img.xxhash != null && img.xxhash == keeper.xxhash) return true // 字节相同的精确副本
-        if (img.sourceType == "chatimg") return true                       // 聊天压缩图
+        // QQ 的缓存路径可能各自被聊天记录引用，画质或字节相同不足以证明可以删除。
+        if (img.sourceType in setOf("chatimg", "chatraw", "chatthumb", "temp")) return false
+        if (img.xxhash != null && img.xxhash == keeper.xxhash) return true
         val pixels = img.width.toLong() * img.height
         if (pixels in 1 until keeperPixels) return true                    // 分辨率更低
         val ib = img.blurScore
