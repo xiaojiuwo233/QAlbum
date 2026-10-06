@@ -25,8 +25,53 @@ class AppDatabaseMigrationTest {
 
     @Test
     fun migrationEdgesCoverEveryPublishedVersion() {
-        assertEquals((1..11).toList(), allMigrations.map { it.startVersion })
-        assertEquals((2..12).toList(), allMigrations.map { it.endVersion })
+        assertEquals((1..13).toList(), allMigrations.map { it.startVersion })
+        assertEquals((2..14).toList(), allMigrations.map { it.endVersion })
+    }
+
+    @Test
+    fun migrate13To14_preservesSourcesAndInvalidatesOnlyChangedFacetCounts() {
+        val name = "migration-13-14"
+        helper.createDatabase(name, 13).use { db ->
+            insertImage(db, 1, "/chatpic/chatraw/retained", "active", 1, 1, 1000)
+            db.execSQL("INSERT INTO qq_source_accounts VALUES('a','账号',1,1)")
+            db.execSQL("INSERT INTO qq_origins VALUES('o','a','g','群名',2,'s','昵称','群名片',1000,'md5')")
+            db.execSQL("INSERT INTO image_qq_origins VALUES(1,'o')")
+        }
+        helper.runMigrationsAndValidate(name, 14, true, AppDatabase.MIGRATION_13_14).use { db ->
+            assertEquals(1L, scalarLong(db, "SELECT COUNT(*) FROM image_qq_origins"))
+            assertEquals(1L, scalarLong(db, "SELECT COUNT(*) FROM images WHERE user_keep=1 AND is_protected=1"))
+            assertEquals(1L, scalarLong(db, "SELECT dirty FROM qq_source_cache WHERE id=1"))
+            db.execSQL("UPDATE qq_source_cache SET dirty=0")
+            db.execSQL("UPDATE images SET last_seen=2000 WHERE id=1")
+            assertEquals(0L, scalarLong(db, "SELECT dirty FROM qq_source_cache WHERE id=1"))
+            db.execSQL("UPDATE images SET status='quarantined' WHERE id=1")
+            assertEquals(1L, scalarLong(db, "SELECT dirty FROM qq_source_cache WHERE id=1"))
+        }
+    }
+
+    @Test
+    fun migrate12To13_preservesImagesAndLinksLaterScansWithoutReplacingSources() {
+        val name = "migration-12-13"
+        helper.createDatabase(name, 12).use { db ->
+            insertImage(db, 1, "/chatpic/chatraw/one", "active", 1, 1, 1000)
+        }
+        helper.runMigrationsAndValidate(name, 13, true, AppDatabase.MIGRATION_12_13).use { db ->
+            db.execSQL("PRAGMA foreign_keys=ON")
+            assertEquals(1L, scalarLong(db, "SELECT COUNT(*) FROM images WHERE id=1 AND is_protected=1 AND user_keep=1"))
+            db.execSQL("INSERT INTO qq_source_accounts(account_key,display_name,imported_at,picture_count) VALUES ('a','账号',1,1)")
+            db.execSQL("""INSERT INTO qq_origins(id,account_key,conversation_key,conversation_name,chat_type,sender_key,sender_name,member_name,message_time,md5)
+                VALUES ('o','a','g','完整群名',2,'s','完整发送人名','群名片',1000,'00000000000000000000000000000000')""")
+            db.execSQL("INSERT INTO qq_origin_paths(path,origin_id) VALUES ('/chatpic/chatimg/later','o')")
+            insertImage(db, 2, "/chatpic/chatimg/later", "active", 0, null, 2000)
+            assertEquals(1L, scalarLong(db, "SELECT COUNT(*) FROM image_qq_origins WHERE image_id=2 AND origin_id='o'"))
+            db.execSQL("UPDATE images SET path='qalbum-internal://quarantined/2', status='quarantined' WHERE id=2")
+            assertEquals(1L, scalarLong(db, "SELECT COUNT(*) FROM image_qq_origins WHERE image_id=2"))
+            db.execSQL("DELETE FROM qq_source_accounts")
+            assertEquals(0L, scalarLong(db, "SELECT COUNT(*) FROM qq_origins"))
+            assertEquals(0L, scalarLong(db, "SELECT COUNT(*) FROM qq_origin_paths"))
+            assertEquals(2L, scalarLong(db, "SELECT COUNT(*) FROM images"))
+        }
     }
 
     @Test
@@ -200,6 +245,8 @@ class AppDatabaseMigrationTest {
             AppDatabase.MIGRATION_9_10,
             AppDatabase.MIGRATION_10_11,
             AppDatabase.MIGRATION_11_12,
+            AppDatabase.MIGRATION_12_13,
+            AppDatabase.MIGRATION_13_14,
         )
 
         private const val TEST_DB_V1 = "migration-1-11"

@@ -68,6 +68,7 @@ import com.xjw.qalbum.ui.settings.ScanSettingsScreen
 import com.xjw.qalbum.ui.settings.SettingsCategory
 import com.xjw.qalbum.ui.settings.SettingsScreen
 import com.xjw.qalbum.ui.tags.TagsScreen
+import com.xjw.qalbum.ui.sources.QqSourcesScreen
 import org.koin.compose.koinInject
 
 /**
@@ -163,6 +164,7 @@ fun AppNavigation() {
                         onImageClick = { id -> navController.navigate("image/$id") },
                         onOpenSearch = { navController.navigate(NavDestination.Search.route) },
                         onOpenFavorites = { navController.navigate("favorites") },
+                        onOpenSources = { navController.navigate("qq-sources") },
                         sharedScope = this@SharedTransitionLayout,
                         animatedScope = this,
                         imageShared = sharedTransition,
@@ -177,6 +179,9 @@ fun AppNavigation() {
                         animatedScope = this,
                         imageShared = sharedTransition,
                     )
+                }
+                composable("qq-sources") {
+                    QqSourcesScreen(contentPadding = secondaryPadding, onBack = { navController.popBackStack() })
                 }
                 composable(NavDestination.Search.route) {
                     SearchScreen(

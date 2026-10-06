@@ -30,6 +30,8 @@ import com.xjw.qalbum.service.ocr.PaddleOnnxOcrRunner
 import com.xjw.qalbum.service.ocr.PaddleOcrRunner
 import com.xjw.qalbum.ui.dashboard.DashboardViewModel
 import com.xjw.qalbum.ui.gallery.GalleryViewModel
+import com.xjw.qalbum.qq.QqSourceRepository
+import com.xjw.qalbum.ui.sources.QqSourcesViewModel
 import com.xjw.qalbum.ui.imageloading.buildImageLoader
 import com.xjw.qalbum.ui.logs.LogViewModel
 import com.xjw.qalbum.ui.settings.SettingsViewModel
@@ -67,6 +69,7 @@ val appModule = module {
     single { get<AppDatabase>().dirSnapshotDao() }
     single { get<AppDatabase>().dedupExclusionDao() }
     single { get<AppDatabase>().aiAnalysisDao() }
+    single { get<AppDatabase>().qqSourceDao() }
 
     single { SettingsRepository(get(), appScope = get()) }
     single {
@@ -163,6 +166,7 @@ val appModule = module {
     single { ThumbnailTrashManager(imageDao = get()) }
     single { ImageFileManager(context = get(), accessManager = get(), imageDao = get()) }
     single { CleanupController(recommender = get(), quarantineManager = get(), cleanupDao = get()) }
+    single { QqSourceRepository(context = get(), db = get(), settings = get(), client = get(), quarantine = get(), appScope = get()) }
 
     // ---- Coil ImageLoader（全局单例，通过 Koin 暴露，App.onCreate 安装为 SingletonImageLoader） ----
 
@@ -252,6 +256,7 @@ val appModule = module {
         )
     }
     viewModel { LogViewModel() }
+    viewModel { QqSourcesViewModel(repository = get(), settings = get(), images = get(), imageFiles = get()) }
 
     // ---- Worker ----
 

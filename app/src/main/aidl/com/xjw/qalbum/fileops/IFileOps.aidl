@@ -39,4 +39,9 @@ interface IFileOps {
     // 进程 / libsu 逐文件往返」的旧路径（20w 图小时级 → 分钟级）。
     // 文件不可读 / 不存在返回 null；不受 binder 1MB 事务上限约束（只传 fd 句柄）。
     @nullable ParcelFileDescriptor openRead(String path) = 5;
+
+    // QQ 来源只读接口，仅 Root 实现；限定三个必要数据库及 WAL，不接受任意目标路径。
+    String qqAccountCatalog(int userId) = 6;
+    String qqDatabaseState(int userId, String account) = 7;
+    ParcelFileDescriptor openQqDatabaseRead(int userId, String account, String name) = 8;
 }

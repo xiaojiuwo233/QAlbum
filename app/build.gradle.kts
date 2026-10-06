@@ -217,6 +217,10 @@ dependencies {
     implementation(libs.androidx.room.paging)
     ksp(libs.androidx.room.compiler)
 
+    // QQ 加密库仅在应用私有的临时副本上读取，不接入 QAlbum 的 Room 数据库。
+    implementation("net.zetetic:sqlcipher-android:4.10.0@aar")
+    implementation("com.google.protobuf:protobuf-javalite:3.25.5")
+
     // --- 图片加载 ---
     implementation(libs.coil.compose)
     implementation(libs.coil.gif)

@@ -42,6 +42,7 @@ import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Favorite
 import androidx.compose.material.icons.outlined.FavoriteBorder
+import androidx.compose.material.icons.outlined.Groups
 import androidx.compose.material.icons.outlined.IosShare
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.RadioButtonUnchecked
@@ -118,6 +119,7 @@ fun GalleryScreen(
     onImageClick: (Long) -> Unit = {},
     onOpenSearch: () -> Unit = {},
     onOpenFavorites: () -> Unit = {},
+    onOpenSources: () -> Unit = {},
     sharedScope: SharedTransitionScope? = null,
     animatedScope: AnimatedVisibilityScope? = null,
     imageShared: Boolean = false,
@@ -157,6 +159,7 @@ fun GalleryScreen(
                     sortLabel = sort.label,
                     onOpenSearch = onOpenSearch,
                     onOpenFavorites = onOpenFavorites,
+                    onOpenSources = onOpenSources,
                     onOpenSettings = { showPrefsSheet = true },
                     sharedScope = sharedScope,
                     animatedScope = animatedScope,
@@ -420,6 +423,7 @@ private fun TimelineTopBar(
     sortLabel: String,
     onOpenSearch: () -> Unit,
     onOpenFavorites: () -> Unit,
+    onOpenSources: () -> Unit,
     onOpenSettings: () -> Unit,
     sharedScope: SharedTransitionScope? = null,
     animatedScope: AnimatedVisibilityScope? = null,
@@ -459,6 +463,9 @@ private fun TimelineTopBar(
         }
         IconButton(onClick = onOpenSettings) {
             Icon(Icons.Outlined.Tune, contentDescription = "图库偏好")
+        }
+        IconButton(onClick = onOpenSources) {
+            Icon(Icons.Outlined.Groups, contentDescription = "QQ 图片来源")
         }
     }
 }

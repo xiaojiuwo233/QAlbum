@@ -31,4 +31,9 @@ class FileOpsUserService : IFileOps.Stub() {
 
     override fun openRead(path: String): ParcelFileDescriptor? =
         FileOpsImpl.openRead(path)
+
+    override fun qqAccountCatalog(userId: Int): String = error("QQ 图片来源需要 Root 权限")
+    override fun qqDatabaseState(userId: Int, account: String): String = error("QQ 图片来源需要 Root 权限")
+    override fun openQqDatabaseRead(userId: Int, account: String, name: String): ParcelFileDescriptor =
+        error("QQ 图片来源需要 Root 权限")
 }

@@ -78,6 +78,13 @@ class SettingsRepository(
 
     val chatpicPath: Flow<String> = prefsData.map { it[Keys.CHATPIC_PATH] ?: DEFAULT_CHATPIC_PATH }
 
+    // 来源完整性跨进程保留；读取失败、取消或崩溃后，不能把缺失的共用来源当作不存在。
+    val qqSourcesComplete: Flow<Boolean> = prefsData.map { it[Keys.QQ_SOURCES_COMPLETE] ?: false }
+
+    suspend fun setQqSourcesComplete(complete: Boolean) {
+        ds.edit { it[Keys.QQ_SOURCES_COMPLETE] = complete }
+    }
+
     suspend fun setChatpicPath(path: String) {
         // 规范化 + 拒绝空值：root="" 会让扫描把根前缀算成 "/"，全部目录快照被判「消失」，
         // 后台增量扫描随即把 200 万行批量标记 missing（图库瞬间清空），因此空串绝不落盘
@@ -515,6 +522,7 @@ class SettingsRepository(
     private object Keys {
         val ACCESS_MODE = stringPreferencesKey("access_mode")
         val CHATPIC_PATH = stringPreferencesKey("chatpic_path")
+        val QQ_SOURCES_COMPLETE = booleanPreferencesKey("qq_sources_complete")
 
         val AI_ENABLED = booleanPreferencesKey("ai_enabled")
         val AI_ENDPOINT = stringPreferencesKey("ai_endpoint")

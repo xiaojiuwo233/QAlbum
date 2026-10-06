@@ -15,6 +15,7 @@ import com.xjw.qalbum.log.LogcatCapture
 import com.xjw.qalbum.service.cleanup.QuarantineManager
 import com.xjw.qalbum.worker.IncrementalScanWorker
 import com.xjw.qalbum.worker.QuarantinePurgeWorker
+import com.topjohnwu.superuser.Shell
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import java.util.concurrent.TimeUnit
@@ -38,6 +39,11 @@ class App : Application(), Configuration.Provider {
 
     override fun onCreate() {
         super.onCreate()
+
+        // Android 的应用数据挂载隔离会随普通 su 进程继承：即使 uid=0，仍看不到 QQ
+        // 私有目录。RootService 从同一 shell 启动，因此必须在首次 Root 调用前配置。
+        // KernelSU/Magisk 支持 --mount-master；不支持的管理器由 libsu 回退普通 su。
+        Shell.setDefaultBuilder(Shell.Builder.create().setFlags(Shell.FLAG_MOUNT_MASTER))
 
         // 日志系统：最早期装好，保证之后所有日志（含崩溃）都被持久化捕获。
         // - FileLoggingTree：所有构建都把 Timber 日志写入文件（release 也生效，闪退后仍在）

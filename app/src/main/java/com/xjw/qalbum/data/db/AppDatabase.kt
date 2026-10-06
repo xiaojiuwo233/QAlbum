@@ -8,6 +8,13 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.xjw.qalbum.data.db.dao.CleanupDao
 import com.xjw.qalbum.data.db.dao.AiAnalysisDao
+import com.xjw.qalbum.data.db.dao.QqSourceDao
+import com.xjw.qalbum.data.db.entity.QqSourceAccountEntity
+import com.xjw.qalbum.data.db.entity.QqOriginEntity
+import com.xjw.qalbum.data.db.entity.QqOriginPathEntity
+import com.xjw.qalbum.data.db.entity.ImageQqOriginEntity
+import com.xjw.qalbum.data.db.entity.QqSourceFacetCacheEntity
+import com.xjw.qalbum.data.db.entity.QqSourceCacheEntity
 import com.xjw.qalbum.data.db.dao.DedupExclusionDao
 import com.xjw.qalbum.data.db.dao.DirSnapshotDao
 import com.xjw.qalbum.data.db.dao.EmbeddingDao
@@ -48,8 +55,14 @@ import com.xjw.qalbum.data.db.entity.TagEntity
         DirSnapshotEntity::class,
         DedupExclusionEntity::class,
         AiAnalysisEntity::class,
+        QqSourceAccountEntity::class,
+        QqOriginEntity::class,
+        QqOriginPathEntity::class,
+        ImageQqOriginEntity::class,
+        QqSourceFacetCacheEntity::class,
+        QqSourceCacheEntity::class,
     ],
-    version = 12,
+    version = 14,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -62,6 +75,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun dirSnapshotDao(): DirSnapshotDao
     abstract fun dedupExclusionDao(): DedupExclusionDao
     abstract fun aiAnalysisDao(): AiAnalysisDao
+    abstract fun qqSourceDao(): QqSourceDao
 
     companion object {
         const val DB_NAME = "qalbum.db"
@@ -306,6 +320,77 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("""CREATE TABLE IF NOT EXISTS qq_source_accounts (
+                    account_key TEXT NOT NULL PRIMARY KEY, display_name TEXT NOT NULL,
+                    imported_at INTEGER NOT NULL, picture_count INTEGER NOT NULL)""")
+                db.execSQL("""CREATE TABLE IF NOT EXISTS qq_origins (
+                    id TEXT NOT NULL PRIMARY KEY, account_key TEXT NOT NULL,
+                    conversation_key TEXT NOT NULL, conversation_name TEXT NOT NULL,
+                    chat_type INTEGER NOT NULL, sender_key TEXT NOT NULL, sender_name TEXT NOT NULL,
+                    member_name TEXT NOT NULL, message_time INTEGER NOT NULL, md5 TEXT NOT NULL,
+                    FOREIGN KEY(account_key) REFERENCES qq_source_accounts(account_key) ON DELETE CASCADE)""")
+                listOf("account_key", "conversation_key", "sender_key").forEach { column ->
+                    db.execSQL("CREATE INDEX IF NOT EXISTS index_qq_origins_$column ON qq_origins($column)")
+                }
+                db.execSQL("""CREATE TABLE IF NOT EXISTS qq_origin_paths (
+                    path TEXT NOT NULL, origin_id TEXT NOT NULL, PRIMARY KEY(path, origin_id),
+                    FOREIGN KEY(origin_id) REFERENCES qq_origins(id) ON DELETE CASCADE)""")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_qq_origin_paths_origin_id ON qq_origin_paths(origin_id)")
+                db.execSQL("""CREATE TABLE IF NOT EXISTS image_qq_origins (
+                    image_id INTEGER NOT NULL, origin_id TEXT NOT NULL, PRIMARY KEY(image_id, origin_id),
+                    FOREIGN KEY(image_id) REFERENCES images(id) ON DELETE CASCADE,
+                    FOREIGN KEY(origin_id) REFERENCES qq_origins(id) ON DELETE CASCADE)""")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_image_qq_origins_origin_id ON image_qq_origins(origin_id)")
+                createQqSourceTriggers(db)
+            }
+        }
+
+        private fun createQqSourceTriggers(db: SupportSQLiteDatabase) {
+            listOf("INSERT", "UPDATE OF path").forEachIndexed { index, operation ->
+                db.execSQL("""CREATE TRIGGER IF NOT EXISTS link_qq_image_origin_$index
+                    AFTER $operation ON images BEGIN
+                    INSERT OR IGNORE INTO image_qq_origins(image_id, origin_id)
+                    SELECT NEW.id, origin_id FROM qq_origin_paths WHERE path = NEW.path;
+                    END""")
+            }
+        }
+
+        val MIGRATION_13_14 = object : Migration(13, 14) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("""CREATE TABLE IF NOT EXISTS qq_source_facets (
+                    kind INTEGER NOT NULL, `key` TEXT NOT NULL, name TEXT NOT NULL,
+                    search_text TEXT NOT NULL, account_key TEXT NOT NULL, image_count INTEGER NOT NULL,
+                    PRIMARY KEY(kind, `key`),
+                    FOREIGN KEY(account_key) REFERENCES qq_source_accounts(account_key) ON DELETE CASCADE)""")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_qq_source_facets_account_key ON qq_source_facets(account_key)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS qq_source_cache (id INTEGER NOT NULL PRIMARY KEY, dirty INTEGER NOT NULL, linked_count INTEGER NOT NULL)")
+                createQqSourceCacheTriggers(db)
+            }
+        }
+
+        internal fun createQqSourceCacheTriggers(db: SupportSQLiteDatabase) {
+            db.execSQL("INSERT OR IGNORE INTO qq_source_cache(id,dirty,linked_count) VALUES(1,1,0)")
+            val dirty = "UPDATE qq_source_cache SET dirty=1 WHERE id=1 AND dirty=0;"
+            listOf("INSERT", "DELETE").forEach { operation ->
+                db.execSQL("""CREATE TRIGGER IF NOT EXISTS dirty_qq_links_${operation.lowercase()}
+                    AFTER $operation ON image_qq_origins BEGIN $dirty END""")
+            }
+            db.execSQL("""CREATE TRIGGER IF NOT EXISTS dirty_qq_image_state
+                AFTER UPDATE OF status,source_type ON images
+                WHEN (OLD.status <> NEW.status OR OLD.source_type <> NEW.source_type)
+                  AND EXISTS(SELECT 1 FROM image_qq_origins WHERE image_id=NEW.id)
+                BEGIN $dirty END""")
+            db.execSQL("""CREATE TRIGGER IF NOT EXISTS dirty_qq_origin_names
+                AFTER UPDATE OF conversation_name,sender_name,member_name ON qq_origins
+                WHEN OLD.conversation_name <> NEW.conversation_name OR OLD.sender_name <> NEW.sender_name OR OLD.member_name <> NEW.member_name
+                BEGIN $dirty END""")
+            db.execSQL("""CREATE TRIGGER IF NOT EXISTS dirty_qq_account_names
+                AFTER UPDATE OF display_name ON qq_source_accounts WHEN OLD.display_name <> NEW.display_name
+                BEGIN $dirty END""")
+        }
+
         private fun createAnalysisInvalidationTrigger(db: SupportSQLiteDatabase) {
             // 文件被 QQ 重写时，标记和派生内容一起失效，避免旧 OCR/标签/向量污染新图片。
             db.execSQL("""
@@ -526,10 +611,14 @@ abstract class AppDatabase : RoomDatabase() {
                     MIGRATION_9_10,
                     MIGRATION_10_11,
                     MIGRATION_11_12,
+                    MIGRATION_12_13,
+                    MIGRATION_13_14,
                 )
                 .addCallback(object : Callback() {
                     override fun onCreate(db: SupportSQLiteDatabase) {
                         createAnalysisInvalidationTrigger(db)
+                        createQqSourceTriggers(db)
+                        createQqSourceCacheTriggers(db)
                     }
                 })
                 // 刻意不配置任何 destructive 回退：未覆盖的版本跳变（含降级）宁可 fail-fast

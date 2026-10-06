@@ -25,6 +25,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -38,6 +41,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.db.entity.OcrTextEntity
+import com.xjw.qalbum.data.db.dao.QqSourceDao
+import org.koin.compose.koinInject
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -53,6 +58,9 @@ internal fun PhotoDetailsSheet(
     ocr: OcrTextEntity?,
     onClose: () -> Unit,
 ) {
+    val sources = koinInject<QqSourceDao>()
+    val sourceFlow = remember(image.id, sources) { sources.observeImageOrigins(image.id) }
+    val origins by sourceFlow.collectAsState(initial = emptyList())
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -102,6 +110,24 @@ internal fun PhotoDetailsSheet(
                 }
             }
             item { MetadataBlock(image) }
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("QQ 来源", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    if (origins.isEmpty()) Text("未关联到本机聊天记录", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    origins.forEach { origin ->
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            val conversation = origin.conversationName.ifBlank { if (origin.chatType == 2) "群名称未缓存" else "会话名称未缓存" }
+                            InfoRow(if (origin.chatType == 2) "群聊" else "私聊", conversation)
+                            InfoRow("发送人", origin.senderName.ifBlank { "发送人名称未缓存" })
+                            if (origin.memberName.isNotBlank() && origin.memberName != origin.senderName) InfoRow("群名片", origin.memberName)
+                            if (origins.map { it.accountName }.distinct().size > 1) InfoRow("账号", origin.accountName)
+                            InfoRow("发送时间", formatTime(origin.messageTime))
+                            if (origin.messageCount > 1) Text("出现在 ${origin.messageCount} 条图片来源中", style = MaterialTheme.typography.bodySmall)
+                            HorizontalDivider()
+                        }
+                    }
+                }
+            }
             ocr?.takeIf { it.text.isNotBlank() }?.let { text ->
                 item { OcrBlock(text) }
             }
