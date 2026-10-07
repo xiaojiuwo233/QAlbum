@@ -65,6 +65,8 @@ data class QqScopeStats(val count: Int, val bytes: Long)
 data class QqSourceSummary(val linkedCount: Int, val linkedBytes: Long, val dirty: Boolean)
 data class QqFacetKindCount(val kind: Int, val chatType: Int, val count: Int)
 data class QqSourceName(val name: String, val chatType: Int)
+data class QqPicturePathEdge(val originId: String, val path: String)
+data class QqPictureContext(val conversationKey: String, val senderKey: String)
 data class QqOriginDetails(
     val conversationName: String, val senderName: String, val memberName: String,
     val chatType: Int, val messageTime: Long, val messageCount: Int, val accountName: String,
@@ -72,6 +74,15 @@ data class QqOriginDetails(
 
 @Dao
 interface QqSourceDao {
+    /** 合并同一图片的重复消息引用，避免热门图片的历史引用把查询放大成数万行。 */
+    @Query("""SELECT DISTINCT CASE WHEN length(o.md5)=32 THEN lower(o.md5) ELSE o.id END AS originId,p.path
+        FROM qq_origin_paths p JOIN qq_origins o ON o.id=p.origin_id
+        WHERE p.origin_id IN (SELECT origin_id FROM qq_origin_paths WHERE path IN (:paths))""")
+    suspend fun picturePathEdges(paths: List<String>): List<QqPicturePathEdge>
+
+    @Query("""SELECT DISTINCT conversation_key AS conversationKey,sender_key AS senderKey FROM qq_origins
+        WHERE id IN (SELECT origin_id FROM qq_origin_paths WHERE path IN (:paths))""")
+    suspend fun pictureContexts(paths: List<String>): List<QqPictureContext>
     // ---- 分类缓存（聚合较重，标脏后由仓库在空闲时重建） ----
 
     @Query("SELECT dirty FROM qq_source_cache WHERE id=1")

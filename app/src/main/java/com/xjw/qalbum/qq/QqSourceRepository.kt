@@ -7,6 +7,7 @@ import com.xjw.qalbum.data.db.AppDatabase
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.fileops.FileOpsClient
 import com.xjw.qalbum.service.cleanup.QuarantineManager
+import com.xjw.qalbum.service.cleanup.PictureDeleteOptions
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -185,7 +186,7 @@ class QqSourceRepository(
     }
 
     /** 按来源范围整体移入回收站（收藏 / 保留的图片跳过；[includeShared] 决定是否包含也出现在其他会话的图片） */
-    fun trash(scope: QqSourceScope, includeShared: Boolean) {
+    fun trash(scope: QqSourceScope, includeShared: Boolean, linkedVersions: Boolean = true) {
         if (scope.groupKey == null && scope.senderKey == null) return
         if (!_progress.compareAndSet(null, QqSourceProgress("准备移入回收站", cancellable = false))) return
         job = appScope.launch(Dispatchers.IO) {
@@ -198,9 +199,8 @@ class QqSourceRepository(
                 while (true) {
                     val ids = dao.removableIds(scope.groupKey, scope.senderKey, includeShared, afterId, maxId, 200)
                     if (ids.isEmpty()) break
-                    moved += quarantine.quarantineBatch(ids.map { it to "按 QQ 图片来源清理" }) { done, _ ->
-                        _progress.value = QqSourceProgress("移入回收站", processed + done, counts.removable.toLong(), false)
-                    }
+                    moved += quarantine.quarantinePictures(ids,PictureDeleteOptions(linkedVersions,includeShared),"按 QQ 图片来源清理",scope).selectedProcessed
+                    _progress.value = QqSourceProgress("移入回收站", processed + ids.size, counts.removable.toLong(), false)
                     processed += ids.size
                     afterId = ids.last()
                 }

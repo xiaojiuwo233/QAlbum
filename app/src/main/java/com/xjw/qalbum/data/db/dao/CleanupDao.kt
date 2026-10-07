@@ -49,14 +49,18 @@ interface CleanupDao {
      * （每行含多个 path 文本，10 列 ~1.2KB/行）一次性物化，积累上千项就撞 CursorWindow 2MB 崩
      * `Couldn't read row N, col 0`。
      */
-    @Query("SELECT * FROM quarantine WHERE state = 'ready' ORDER BY quarantined_at DESC")
+    @Query("""SELECT q.* FROM quarantine q WHERE q.state='ready'
+        AND (q.group_id IS NULL OR q.id=(SELECT MIN(s.id) FROM quarantine s WHERE s.group_id=q.group_id AND s.state='ready'))
+        ORDER BY q.quarantined_at DESC""")
     fun pagingQuarantine(): PagingSource<Int, QuarantineEntity>
 
-    @Query("SELECT COUNT(*) FROM quarantine WHERE state = 'ready'")
+    @Query("SELECT COUNT(DISTINCT COALESCE(group_id,'legacy:'||id)) FROM quarantine WHERE state='ready'")
     suspend fun countQuarantine(): Int
 
     /** keyset 分页遍历（一键清理逐页 purge，避免全量装载）；purge 删行后旧 id ≤ afterId 自然出后续页。 */
-    @Query("SELECT * FROM quarantine WHERE state = 'ready' AND id > :afterId ORDER BY id ASC LIMIT :limit")
+    @Query("""SELECT q.* FROM quarantine q WHERE q.state='ready' AND q.id>:afterId
+        AND (q.group_id IS NULL OR q.id=(SELECT MIN(s.id) FROM quarantine s WHERE s.group_id=q.group_id AND s.state='ready'))
+        ORDER BY q.id LIMIT :limit""")
     suspend fun listQuarantinePaged(afterId: Long, limit: Int): List<QuarantineEntity>
 
     /**
@@ -64,7 +68,9 @@ interface CleanupDao {
      * purgeByRecords 批删（复用 IFileOps 批删范式），afterId 防止个别 purge 失败时原地打转。
      * quarantine 行数最多数万，expires_at 无索引的逐行过滤可接受，不为此加索引。
      */
-    @Query("SELECT * FROM quarantine WHERE state = 'ready' AND expires_at <= :now AND id > :afterId ORDER BY id ASC LIMIT :limit")
+    @Query("""SELECT q.* FROM quarantine q WHERE q.state='ready' AND q.expires_at<=:now AND q.id>:afterId
+        AND (q.group_id IS NULL OR q.id=(SELECT MIN(s.id) FROM quarantine s WHERE s.group_id=q.group_id AND s.state='ready'))
+        ORDER BY q.id LIMIT :limit""")
     suspend fun listExpiredQuarantinePaged(now: Long, afterId: Long, limit: Int): List<QuarantineEntity>
 
     /** 未完成文件操作的持久化日志；启动时按 id keyset 对账。 */
@@ -73,6 +79,16 @@ interface CleanupDao {
 
     @Query("SELECT * FROM quarantine WHERE id = :id LIMIT 1")
     suspend fun getQuarantineById(id: Long): QuarantineEntity?
+
+    @Query("SELECT * FROM quarantine WHERE group_id = :groupId ORDER BY id")
+    suspend fun getQuarantineGroup(groupId: String): List<QuarantineEntity>
+
+    @Query("""SELECT COUNT(*) AS count,COALESCE(SUM(size),0) AS bytes FROM quarantine
+        WHERE state='ready' AND (id=:id OR (:groupId IS NOT NULL AND group_id=:groupId))""")
+    fun observeGroupStats(id: Long, groupId: String?): Flow<QuarantineStatsRow>
+
+    @Query("SELECT * FROM quarantine WHERE original_path IN (:paths) AND state='ready'")
+    suspend fun getQuarantineByOriginalPaths(paths: List<String>): List<QuarantineEntity>
 
     @Query("UPDATE quarantine SET state = 'ready', thumbnail_path = :thumbnailPath WHERE id = :id")
     suspend fun markQuarantineReady(id: Long, thumbnailPath: String?)
@@ -90,7 +106,7 @@ interface CleanupDao {
     @Query("DELETE FROM quarantine WHERE id IN (:ids)")
     suspend fun deleteQuarantineByIds(ids: List<Long>)
 
-    @Query("SELECT COUNT(*) AS count, IFNULL(SUM(size), 0) AS bytes FROM quarantine WHERE state = 'ready'")
+    @Query("SELECT COUNT(DISTINCT COALESCE(group_id,'legacy:'||id)) AS count, IFNULL(SUM(size), 0) AS bytes FROM quarantine WHERE state='ready'")
     fun observeQuarantineStats(): Flow<QuarantineStatsRow>
 
     data class QuarantineStatsRow(val count: Int, val bytes: Long)

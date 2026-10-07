@@ -39,6 +39,7 @@ import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Shield
+import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -87,8 +88,16 @@ import com.xjw.qalbum.ui.imageloading.ImageEntityModel
 import com.xjw.qalbum.ui.theme.QAlbumTheme
 import org.koin.android.ext.android.inject
 import org.koin.androidx.compose.koinViewModel
+import org.koin.compose.koinInject
+import com.xjw.qalbum.service.cleanup.QuarantineManager
+import com.xjw.qalbum.ui.components.DeleteImagesDialog
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import android.widget.Toast
 
-/** QQ 缩略图（chatthumb）浏览页：受保护，只能查看。 */
+/** QQ 缩略图浏览页：保留默认保护，手动删除时核查已关联的整张图片。 */
 class ThumbnailTrashActivity : ComponentActivity() {
     private val settings: SettingsRepository by inject()
 
@@ -120,7 +129,7 @@ private fun ThumbnailCacheScreen(onBack: () -> Unit, viewModel: CleanupViewModel
         topBar = {
             LargeFlexibleTopAppBar(
                 title = { Text("QQ 缩略图") },
-                subtitle = { Text("${summary.count} 项 · ${formatBytes(summary.bytes)} · 受保护，只能浏览") },
+                subtitle = { Text("${summary.count} 项 · ${formatBytes(summary.bytes)}") },
                 navigationIcon = { BackButton(onBack) },
                 scrollBehavior = scrollBehavior,
             )
@@ -200,7 +209,7 @@ private fun ProtectionCard() {
                     shape = MaterialShapes.Cookie7Sided.toShape(),
                 )
                 Spacer(Modifier.width(12.dp))
-                Text("为什么这些文件不能删？", style = MaterialTheme.typography.titleMediumEmphasized, modifier = Modifier.weight(1f))
+                Text("QQ 聊天预览缓存", style = MaterialTheme.typography.titleMediumEmphasized, modifier = Modifier.weight(1f))
                 Icon(
                     Icons.Outlined.ExpandMore,
                     contentDescription = if (expanded) "收起" else "展开",
@@ -226,7 +235,7 @@ private fun ProtectionCard() {
                         style = MaterialTheme.typography.bodyMedium,
                     )
                     Text(
-                        "缩略图通常只有几 KB 到几十 KB，删掉省下的空间很少，所以 QAlbum 只提供浏览，不提供删除。",
+                        "删除整张图片时可一并移入已确认关联的缓存；不确定是否还有其他副本的图片，建议保留。",
                         style = MaterialTheme.typography.bodyMedium,
                     )
                 }
@@ -235,11 +244,15 @@ private fun ProtectionCard() {
     }
 }
 
-/** 只读预览：左右滑动、缩放，单击显隐信息栏 */
+/** 缩略图预览：可手动确认清理整张图片，不自动清空预览缓存。 */
 @Composable
 private fun ThumbnailPreview(images: List<ImageEntity>, start: Int, onClose: () -> Unit) {
     val pagerState = rememberPagerState(initialPage = start.coerceIn(0, images.lastIndex)) { images.size }
     var chromeVisible by remember { mutableStateOf(true) }
+    var deleteImage by remember { mutableStateOf<ImageEntity?>(null) }
+    val manager=koinInject<QuarantineManager>()
+    val scope=koinInject<CoroutineScope>()
+    val context=LocalContext.current
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
         Box(Modifier.fillMaxSize().background(Color.Black)) {
             HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize(), key = { images[it].id }) { page ->
@@ -263,6 +276,7 @@ private fun ThumbnailPreview(images: List<ImageEntity>, start: Int, onClose: () 
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     ViewerIconButton(Icons.Outlined.Close, "关闭", onClose)
+                    ViewerIconButton(Icons.Outlined.Delete,"删除图片及关联缓存",{ deleteImage=current })
                     Column(Modifier.weight(1f).padding(start = 4.dp)) {
                         Text(
                             formatTitleDate(current.mtime),
@@ -272,12 +286,25 @@ private fun ThumbnailPreview(images: List<ImageEntity>, start: Int, onClose: () 
                             overflow = TextOverflow.Ellipsis,
                         )
                         Text(
-                            "${pagerState.currentPage + 1}/${images.size} · ${formatBytes(current.size)} · 受保护",
+                            "${pagerState.currentPage + 1}/${images.size} · ${formatBytes(current.size)}",
                             style = MaterialTheme.typography.bodySmall,
                             color = Color.White.copy(alpha = 0.72f),
                         )
                     }
                 }
+            }
+            deleteImage?.let { image ->
+                DeleteImagesDialog(1,{ deleteImage=null },{},null,imageIds=listOf(image.id),
+                    onTrashOptions={ options ->
+                        deleteImage=null
+                        scope.launch {
+                            val result=manager.quarantinePictures(listOf(image.id),options,"用户删除预览缓存对应图片")
+                            withContext(Dispatchers.Main) {
+                                Toast.makeText(context,result.message(),Toast.LENGTH_LONG).show()
+                                if(result.selectedProcessed>0)onClose()
+                            }
+                        }
+                    })
             }
         }
     }

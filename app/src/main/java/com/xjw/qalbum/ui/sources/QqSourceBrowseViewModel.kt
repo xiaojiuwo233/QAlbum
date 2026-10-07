@@ -21,6 +21,7 @@ import com.xjw.qalbum.qq.QqSourceScope
 import com.xjw.qalbum.service.cleanup.ExternalViewTarget
 import com.xjw.qalbum.service.cleanup.ImageFileManager
 import com.xjw.qalbum.service.cleanup.QuarantineManager
+import com.xjw.qalbum.service.cleanup.PictureDeleteOptions
 import com.xjw.qalbum.ui.gallery.GalleryTimelineItem
 import com.xjw.qalbum.ui.gallery.withDateHeaders
 import com.xjw.qalbum.ui.gallery.withSizeHeaders
@@ -46,6 +47,7 @@ data class QqTrashConfirmation(
     val scope: QqSourceScope,
     val counts: QqSourceCounts?,
     val includeShared: Boolean = false,
+    val ids: List<Long>? = null,
 )
 
 /**
@@ -191,20 +193,22 @@ class QqSourceBrowseViewModel(
     }
 
     /** [notify] = false 时不发页面消息（看图页自己用 Toast 反馈，避免被预览窗口挡住） */
-    fun moveToTrash(ids: Collection<Long>, notify: Boolean = true, onDone: (Int) -> Unit = {}) {
+    fun moveToTrash(ids: Collection<Long>, notify: Boolean = true, options: PictureDeleteOptions = PictureDeleteOptions(), onDone: (Int) -> Unit = {}) {
         if (ids.isEmpty()) return
         appScope.launch {
-            val moved = quarantine.quarantineBatch(ids.map { it to "按 QQ 来源手动删除" })
-            if (notify) _message.value = removalMessage("已移入回收站", moved, ids.size)
+            val result=quarantine.quarantinePictures(ids,options,"按 QQ 来源手动删除",scope.value)
+            val moved=result.selectedProcessed
+            if (notify) _message.value = result.message()
             withContext(Dispatchers.Main) { onDone(moved) }
         }
     }
 
-    fun deletePermanently(ids: Collection<Long>, notify: Boolean = true, onDone: (Int) -> Unit = {}) {
+    fun deletePermanently(ids: Collection<Long>, notify: Boolean = true, options: PictureDeleteOptions = PictureDeleteOptions(), onDone: (Int) -> Unit = {}) {
         if (ids.isEmpty()) return
         appScope.launch {
-            val deleted = quarantine.deletePermanentlyBatch(ids.toList())
-            if (notify) _message.value = removalMessage("已永久删除", deleted, ids.size)
+            val result=quarantine.deletePicturesPermanently(ids,options,scope.value)
+            val deleted=result.selectedProcessed
+            if (notify) _message.value = result.message(permanent=true)
             withContext(Dispatchers.Main) { onDone(deleted) }
         }
     }
@@ -255,8 +259,9 @@ class QqSourceBrowseViewModel(
         confirmation.value = next
         viewModelScope.launch {
             val counts = dao.counts(next.scope.groupKey, next.scope.senderKey, include)
+            val ids = dao.scopeIds(next.scope.groupKey,next.scope.senderKey)
             // 世代号拒绝过期查询；值相等判断弹窗是否仍对应同一请求
-            if (generation == countsGeneration && confirmation.value == next) confirmation.value = next.copy(counts = counts)
+            if (generation == countsGeneration && confirmation.value == next) confirmation.value = next.copy(counts = counts,ids=ids)
         }
     }
 
@@ -264,11 +269,11 @@ class QqSourceBrowseViewModel(
         confirmation.value = null
     }
 
-    fun confirmScopeTrash() {
+    fun confirmScopeTrash(options: PictureDeleteOptions = PictureDeleteOptions()) {
         val request = confirmation.value ?: return
         if (request.counts == null) return
         confirmation.value = null
-        repository.trash(request.scope, request.includeShared)
+        repository.trash(request.scope, options.includeShared,options.linkedVersions)
     }
 
     fun acknowledgeRepositoryMessage() = repository.acknowledgeMessage()

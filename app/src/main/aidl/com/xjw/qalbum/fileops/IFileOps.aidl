@@ -44,4 +44,10 @@ interface IFileOps {
     String qqAccountCatalog(int userId) = 6;
     String qqDatabaseState(int userId, String account) = 7;
     ParcelFileDescriptor openQqDatabaseRead(int userId, String account, String name) = 8;
+
+    // 精确文件状态：S|size|mtimeMs|stamp，M=不存在，E=无法核查，O=非普通文件。
+    String[] statFiles(in String[] paths) = 9;
+    // 同一特权调用内核验状态后移动/删除。状态变化、符号链接、已有目标均拒绝。
+    boolean[] moveFilesChecked(in String[] sources, in String[] targets, in String[] stamps) = 10;
+    boolean[] deleteFilesChecked(in String[] paths, in String[] stamps) = 11;
 }

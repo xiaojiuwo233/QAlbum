@@ -32,6 +32,12 @@ class RootFileOpsService : RootService() {
         override fun openRead(path: String): ParcelFileDescriptor? =
             FileOpsImpl.openRead(path)
 
+        override fun statFiles(paths: Array<String>): Array<String> = FileOpsImpl.statFiles(paths)
+        override fun moveFilesChecked(sources: Array<String>, targets: Array<String>, stamps: Array<String>): BooleanArray =
+            FileOpsImpl.moveFilesChecked(sources, targets, stamps)
+        override fun deleteFilesChecked(paths: Array<String>, stamps: Array<String>): BooleanArray =
+            FileOpsImpl.deleteFilesChecked(paths, stamps)
+
         override fun qqAccountCatalog(userId: Int): String = QqReadAccess.catalog(userId)
         override fun qqDatabaseState(userId: Int, account: String): String = QqReadAccess.state(userId, account)
         override fun openQqDatabaseRead(userId: Int, account: String, name: String): ParcelFileDescriptor =

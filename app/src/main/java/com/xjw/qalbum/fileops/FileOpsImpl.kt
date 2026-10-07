@@ -3,6 +3,9 @@ package com.xjw.qalbum.fileops
 import android.os.ParcelFileDescriptor
 import android.system.Os
 import android.system.OsConstants
+import android.system.ErrnoException
+import android.system.StructStat
+import android.os.Build
 import java.io.File
 import java.io.FileInputStream
 
@@ -69,6 +72,67 @@ internal object FileOpsImpl {
             }
         }
         return res
+    }
+
+    fun statFiles(paths: Array<String>): Array<String> = paths.map { path ->
+        try {
+            val stat = Os.lstat(path)
+            if (!OsConstants.S_ISREG(stat.st_mode)) "O"
+            else "S|${stat.st_size}|${stat.st_mtime * 1000L}|${stamp(stat)}"
+        } catch (e: ErrnoException) { if (e.errno == OsConstants.ENOENT) "M" else "E" }
+        catch (_: Exception) { "E" }
+    }.toTypedArray()
+
+    fun moveFilesChecked(sources: Array<String>, targets: Array<String>, stamps: Array<String>): BooleanArray {
+        require(sources.size == targets.size && sources.size == stamps.size)
+        return BooleanArray(sources.size) { i ->
+            var reserved: StructStat? = null
+            try {
+                check(mutationAllowed(sources[i]) && mutationAllowed(targets[i]))
+                check(matches(sources[i], stamps[i]))
+                // 独占创建自己的空占位：不会覆盖既有隔离文件，也不依赖先 exists 再 rename 的竞态窗口。
+                val fd = Os.open(targets[i], OsConstants.O_CREAT or OsConstants.O_EXCL or OsConstants.O_WRONLY, 0x180)
+                try { reserved = Os.fstat(fd) } finally { Os.close(fd) }
+                check(matches(sources[i], stamps[i]))
+                Os.rename(sources[i], targets[i])
+                reserved = null
+                true
+            } catch (_: Exception) { false }
+            finally {
+                reserved?.let { own ->
+                    runCatching { val actual = Os.lstat(targets[i]); if (actual.st_ino == own.st_ino && actual.st_dev == own.st_dev) File(targets[i]).delete() }
+                }
+            }
+        }
+    }
+
+    fun deleteFilesChecked(paths: Array<String>, stamps: Array<String>): BooleanArray {
+        require(paths.size == stamps.size)
+        return BooleanArray(paths.size) { i ->
+            try {
+                check(mutationAllowed(paths[i]) && matches(paths[i], stamps[i]))
+                check(File(paths[i]).delete())
+                true
+            } catch (_: Exception) { false }
+        }
+    }
+
+    private fun matches(path: String, expected: String): Boolean {
+        val stat = Os.lstat(path)
+        return OsConstants.S_ISREG(stat.st_mode) && stamp(stat) == expected
+    }
+
+    private fun stamp(stat: StructStat): String {
+        val modified = if (Build.VERSION.SDK_INT >= 27) "${stat.st_mtim.tv_sec}:${stat.st_mtim.tv_nsec}" else stat.st_mtime.toString()
+        val changed = if (Build.VERSION.SDK_INT >= 27) "${stat.st_ctim.tv_sec}:${stat.st_ctim.tv_nsec}" else stat.st_ctime.toString()
+        return "${stat.st_dev}:${stat.st_ino}:${stat.st_size}:$modified:$changed"
+    }
+
+    private fun mutationAllowed(path: String): Boolean {
+        if (!path.startsWith('/') || path.split('/').any { it == ".." }) return false
+        // 关联清理只能操作图片缓存；即使调用方意外传入 QQ 数据库，也拒绝修改。
+        val resolved = File(path).canonicalPath
+        return !Regex("/data/(?:user/\\d+|user_de/\\d+|data)/com\\.tencent\\.mobileqq/databases(?:/|$)").containsMatchIn(resolved)
     }
 
     // ---- 内部实现 ----

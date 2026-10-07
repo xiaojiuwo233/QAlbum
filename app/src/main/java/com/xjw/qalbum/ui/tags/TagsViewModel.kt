@@ -10,6 +10,7 @@ import com.xjw.qalbum.data.db.entity.TAG_USER_KEEP
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.data.repository.ImageRepository
 import com.xjw.qalbum.service.cleanup.CleanupController
+import com.xjw.qalbum.service.cleanup.PictureDeleteOptions
 import com.xjw.qalbum.service.cleanup.ExternalViewTarget
 import com.xjw.qalbum.service.cleanup.ImageFileManager
 import com.xjw.qalbum.ui.cleanup.PurgeProgress
@@ -165,7 +166,7 @@ class TagsViewModel(
      * 移入回收站：[selectedIds] 非空时删这些选中图，为空时删该标签下全部图片。
      * [onDone] 回调实际移动成功的张数。
      */
-    fun moveToTrash(tag: TagDao.TagWithCount, selectedIds: Set<Long>, onDone: (Int) -> Unit = {}) {
+    fun moveToTrash(tag: TagDao.TagWithCount, selectedIds: Set<Long>, options: PictureDeleteOptions = PictureDeleteOptions(), onDone: (Int) -> Unit = {}) {
         if (_busy.value) return
         _busy.value = true
         appScope.launch {
@@ -174,6 +175,7 @@ class TagsViewModel(
                     _progress.value = PurgeProgress(0, selectedIds.size, PROGRESS_LABEL)
                     cleanupController.moveToTrash(
                         selectedIds.map { it to reasonFor(tag) },
+                        options,
                     ) { done, total -> _progress.value = PurgeProgress(done, total, PROGRESS_LABEL) }
                 } else {
                     deleteWholeTag(tag)

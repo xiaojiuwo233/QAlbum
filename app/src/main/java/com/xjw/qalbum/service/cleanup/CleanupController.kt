@@ -52,8 +52,14 @@ class CleanupController(
      */
     suspend fun moveToTrash(
         items: List<Pair<Long, String>>,
+        options: PictureDeleteOptions = PictureDeleteOptions(),
         onProgress: (done: Int, total: Int) -> Unit = { _, _ -> },
-    ): Int = quarantineManager.quarantineBatch(items, onProgress)
+    ): Int {
+        onProgress(0,items.size)
+        val result=quarantineManager.quarantinePictures(items.map { it.first },options,items.firstOrNull()?.second.orEmpty())
+        onProgress(items.size,items.size)
+        return result.selectedProcessed
+    }
 
     fun observeRecentBatches(): Flow<List<CleanupBatchEntity>> = cleanupDao.observeRecentBatches()
 

@@ -73,6 +73,7 @@ import com.xjw.qalbum.ui.common.formatBytes
 import com.xjw.qalbum.ui.common.formatTitleDate
 import com.xjw.qalbum.ui.common.sourceLabel
 import com.xjw.qalbum.ui.components.DeleteImagesDialog
+import com.xjw.qalbum.service.cleanup.PictureDeleteOptions
 import com.xjw.qalbum.ui.components.PreviewAction
 import com.xjw.qalbum.ui.components.SaveToAlbumSheet
 import com.xjw.qalbum.ui.components.ViewerActionBar
@@ -137,8 +138,8 @@ fun ImageDetailScreen(
                         }
                     }
                 },
-                onMoveToTrash = { viewModel.moveCurrentToTrash(onExhausted = onBack) },
-                onDeletePermanently = { viewModel.deleteCurrentPermanently(onExhausted = onBack) },
+                onMoveToTrash = { options -> viewModel.moveCurrentToTrash(options,onExhausted = onBack) },
+                onDeletePermanently = { options -> viewModel.deleteCurrentPermanently(options,onExhausted = onBack) },
                 sharedScope = sharedScope,
                 animatedScope = animatedScope,
             )
@@ -168,8 +169,8 @@ private fun ImmersivePhotoViewer(
     onToggleFavorite: () -> Unit,
     onExport: () -> Unit,
     onOpenExternal: () -> Unit,
-    onMoveToTrash: () -> Unit,
-    onDeletePermanently: () -> Unit,
+    onMoveToTrash: (PictureDeleteOptions) -> Unit,
+    onDeletePermanently: (PictureDeleteOptions) -> Unit,
     sharedScope: SharedTransitionScope? = null,
     animatedScope: AnimatedVisibilityScope? = null,
 ) {
@@ -397,15 +398,18 @@ private fun ImmersivePhotoViewer(
         if (confirmDelete) {
             DeleteImagesDialog(
                 count = 1,
+                imageIds=listOf(state.current.id),
+                onTrashOptions={ options -> confirmDelete=false;onMoveToTrash(options) },
+                onPermanentOptions={ options -> confirmDelete=false;onDeletePermanently(options) },
                 note = if (state.current.isFavorite || state.current.userKeep == true) "这张图片已收藏或标记为保留，不会被删除；请先取消收藏。" else null,
                 onDismiss = { confirmDelete = false },
                 onTrash = {
                     confirmDelete = false
-                    onMoveToTrash()
+                    onMoveToTrash(PictureDeleteOptions())
                 },
                 onPermanent = {
                     confirmDelete = false
-                    onDeletePermanently()
+                    onDeletePermanently(PictureDeleteOptions())
                 },
             )
         }

@@ -38,6 +38,7 @@ data class CleanupCandidateEntity(
     indices = [
         Index(value = ["image_id"], unique = true),
         Index("state"),
+        Index("group_id"),
     ],
 )
 data class QuarantineEntity(
@@ -56,4 +57,9 @@ data class QuarantineEntity(
     @ColumnInfo(name = "expires_at") val expiresAt: Long,
     /** pending=移入前日志，ready=可恢复，restoring=恢复前日志。 */
     @ColumnInfo(name = "state") val state: String = "ready",
+    /** 关联缓存一次操作的同组标识；旧记录为 null，仍按单文件恢复。 */
+    @ColumnInfo(name = "group_id") val groupId: String? = null,
+    @ColumnInfo(name = "file_count", defaultValue = "1") val fileCount: Int = 1,
+    /** 移动前的 inode/大小/纳秒时间戳，用于中断后的副本安全核查。 */
+    @ColumnInfo(name = "source_stamp") val sourceStamp: String? = null,
 )

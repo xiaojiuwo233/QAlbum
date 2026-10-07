@@ -220,6 +220,21 @@ fun GalleryScreen(
         val ids = selectedIds
         DeleteImagesDialog(
             count = ids.size,
+            imageIds = ids,
+            onTrashOptions = { options ->
+                showDeleteConfirm=false
+                viewModel.moveImagesToTrash(ids,options) { count ->
+                    Toast.makeText(context,"已移入回收站 $count 张；未处理的图片保留",Toast.LENGTH_SHORT).show()
+                    clearSelection();items.refresh()
+                }
+            },
+            onPermanentOptions = { options ->
+                showDeleteConfirm=false
+                viewModel.deleteImagesPermanently(ids,options) { count ->
+                    Toast.makeText(context,"已永久删除 $count 张；未处理的图片保留",Toast.LENGTH_SHORT).show()
+                    clearSelection();items.refresh()
+                }
+            },
             sizeOf = { viewModel.selectedSize(ids) },
             onDismiss = { showDeleteConfirm = false },
             onTrash = {
@@ -401,6 +416,21 @@ fun FavoriteGalleryScreen(
         val ids = selectedIds
         DeleteImagesDialog(
             count = ids.size,
+            imageIds = ids,
+            onTrashOptions = { options ->
+                showDeleteConfirm=false
+                viewModel.moveImagesToTrash(ids,options) { count ->
+                    Toast.makeText(context,"已移入回收站 $count 张；未处理的图片保留",Toast.LENGTH_SHORT).show()
+                    clearSelection();items.refresh()
+                }
+            },
+            onPermanentOptions = { options ->
+                showDeleteConfirm=false
+                viewModel.deleteImagesPermanently(ids,options) { count ->
+                    Toast.makeText(context,"已永久删除 $count 张；未处理的图片保留",Toast.LENGTH_SHORT).show()
+                    clearSelection();items.refresh()
+                }
+            },
             sizeOf = { viewModel.selectedSize(ids) },
             note = "收藏的图片受保护：请先取消收藏，再执行删除。",
             onDismiss = { showDeleteConfirm = false },

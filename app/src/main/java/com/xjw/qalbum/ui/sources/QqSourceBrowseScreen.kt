@@ -133,6 +133,7 @@ fun QqSourceBrowseScreen(
     val sort by viewModel.sort.collectAsState()
     val columns by viewModel.columns.collectAsState()
     val filter by viewModel.filter.collectAsState()
+    val deleteScope by viewModel.scope.collectAsState()
     val filterOptions by viewModel.filterOptions.collectAsState()
     val confirmation by viewModel.confirmation.collectAsState()
     val progress by viewModel.progress.collectAsState()
@@ -336,6 +337,10 @@ fun QqSourceBrowseScreen(
         val ids = selectedIds
         DeleteImagesDialog(
             count = ids.size,
+            imageIds=ids,
+            sourceScope=deleteScope,
+            onTrashOptions={ options -> showDelete=false;viewModel.moveToTrash(ids,options=options) { clearSelection();items.refresh() } },
+            onPermanentOptions={ options -> showDelete=false;viewModel.deletePermanently(ids,options=options) { clearSelection();items.refresh() } },
             sizeOf = { viewModel.sizeOf(ids) },
             note = "收藏或标记为保留的图片会被跳过。删除 QQ 缓存后，聊天里对应的图片可能需要重新下载。",
             onDismiss = { showDelete = false },
@@ -387,14 +392,14 @@ fun QqSourceBrowseScreen(
     }
 
     confirmation?.let { request ->
-        ScopeTrashDialog(
-            request = request,
-            title = title,
-            filterName = filter?.let { facetDisplayName(it, if (target.kind == SourceKind.SENDER) SourceKind.CONVERSATION else SourceKind.SENDER) },
-            running = progress != null,
-            onIncludeShared = viewModel::updateShared,
-            onConfirm = viewModel::confirmScopeTrash,
-            onDismiss = viewModel::dismissScopeTrash,
+        if(request.ids==null) {
+            androidx.compose.material3.AlertDialog(onDismissRequest=viewModel::dismissScopeTrash,
+                title={ Text(title) },text={ Text("正在准备关联图片…") },confirmButton={},
+                dismissButton={ TextButton(onClick=viewModel::dismissScopeTrash) { Text("取消") } })
+        } else DeleteImagesDialog(
+            count=request.ids.size,imageIds=request.ids,sourceScope=request.scope,note=title,
+            onTrash={ viewModel.confirmScopeTrash() },onTrashOptions=viewModel::confirmScopeTrash,
+            onPermanent=null,onDismiss=viewModel::dismissScopeTrash,
         )
     }
 
@@ -438,6 +443,20 @@ fun QqSourceBrowseScreen(
                 confirmDeleteFor?.let { pending ->
                     DeleteImagesDialog(
                         count = 1,
+                        imageIds=listOf(pending.id),
+                        sourceScope=deleteScope,
+                        onTrashOptions={ options ->
+                            confirmDeleteFor=null
+                            viewModel.moveToTrash(listOf(pending.id),options=options) { moved ->
+                                if(moved>0) { preview=preview?.withoutImage(pending.id);items.refresh() }
+                            }
+                        },
+                        onPermanentOptions={ options ->
+                            confirmDeleteFor=null
+                            viewModel.deletePermanently(listOf(pending.id),options=options) { moved ->
+                                if(moved>0) { preview=preview?.withoutImage(pending.id);items.refresh() }
+                            }
+                        },
                         note = if (pending.isFavorite || pending.userKeep == true) "这张图片已收藏或标记为保留，不会被删除；请先取消收藏。" else null,
                         onDismiss = { confirmDeleteFor = null },
                         onTrash = {

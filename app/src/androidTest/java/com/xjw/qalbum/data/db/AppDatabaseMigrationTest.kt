@@ -25,8 +25,23 @@ class AppDatabaseMigrationTest {
 
     @Test
     fun migrationEdgesCoverEveryPublishedVersion() {
-        assertEquals((1..14).toList(), allMigrations.map { it.startVersion })
-        assertEquals((2..15).toList(), allMigrations.map { it.endVersion })
+        assertEquals((1..15).toList(), allMigrations.map { it.startVersion })
+        assertEquals((2..16).toList(), allMigrations.map { it.endVersion })
+    }
+
+    @Test
+    fun migrate15To16_keepsOldQuarantineRecordsAndAddsGroupJournalColumns() {
+        val name="migration-15-16"
+        helper.createDatabase(name,15).use { db ->
+            insertImage(db,1,"qalbum-internal://quarantine/1","quarantined",0,null,1000)
+            db.execSQL("""INSERT INTO quarantine(id,image_id,original_path,quarantine_path,thumbnail_path,reason,ocr_summary,size,quarantined_at,expires_at,state)
+                VALUES(1,1,'/chatpic/chatraw/retained','/quarantine/retained',NULL,'test',NULL,100,1000,999999,'ready')""")
+        }
+        helper.runMigrationsAndValidate(name,16,true,AppDatabase.MIGRATION_15_16).use { db ->
+            assertEquals(1L,scalarLong(db,"SELECT COUNT(*) FROM quarantine WHERE group_id IS NULL AND source_stamp IS NULL AND file_count=1 AND state='ready'"))
+            assertEquals("/quarantine/retained",scalarString(db,"SELECT quarantine_path FROM quarantine WHERE id=1"))
+            assertEquals(1L,scalarLong(db,"SELECT COUNT(*) FROM images"))
+        }
     }
 
     @Test
@@ -274,6 +289,7 @@ class AppDatabaseMigrationTest {
             AppDatabase.MIGRATION_12_13,
             AppDatabase.MIGRATION_13_14,
             AppDatabase.MIGRATION_14_15,
+            AppDatabase.MIGRATION_15_16,
         )
 
         private const val TEST_DB_V1 = "migration-1-11"

@@ -401,6 +401,14 @@ private fun TagImagesContent(
         val ids = selectedIds
         DeleteImagesDialog(
             count = ids.size,
+            imageIds=ids,
+            onTrashOptions={ options ->
+                showDeleteSelected=false
+                selectedIds=emptySet()
+                viewModel.moveToTrash(tag,ids,options) { moved ->
+                    Toast.makeText(context,"已移入回收站 $moved 张；未处理的图片保留",Toast.LENGTH_SHORT).show()
+                }
+            },
             note = "收藏或标记保留的图片会被跳过。",
             onDismiss = { showDeleteSelected = false },
             onTrash = {

@@ -19,6 +19,20 @@ import kotlinx.coroutines.flow.Flow
 @Dao
 interface ImageDao {
 
+    @Query("SELECT * FROM images WHERE id IN (:ids)")
+    suspend fun getAnyByIds(ids: List<Long>): List<ImageEntity>
+
+    @Query("SELECT * FROM images WHERE path IN (:paths)")
+    suspend fun getAnyByPaths(paths: List<String>): List<ImageEntity>
+
+    @Query("""SELECT * FROM images WHERE id IN (:ids) AND status IN ('active','thumbnail_trash')
+        AND is_protected=0 AND (user_keep IS NULL OR user_keep=0)""")
+    suspend fun getLinkedCleanupEligible(ids: List<Long>): List<ImageEntity>
+
+    @Query("""UPDATE images SET status='quarantine_pending' WHERE id IN (:ids)
+        AND status IN ('active','thumbnail_trash') AND is_protected=0 AND (user_keep IS NULL OR user_keep=0)""")
+    suspend fun markLinkedQuarantinePending(ids: List<Long>): Int
+
     // ---- 写入 ----
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -79,7 +93,7 @@ interface ImageDao {
     """)
     suspend fun finalizeQuarantine(ids: List<Long>): Int
 
-    @Query("UPDATE images SET status = 'active' WHERE id IN (:ids) AND status = 'quarantine_pending'")
+    @Query("UPDATE images SET status = CASE WHEN source_type='chatthumb' THEN 'thumbnail_trash' ELSE 'active' END WHERE id IN (:ids) AND status = 'quarantine_pending'")
     suspend fun rollbackQuarantinePending(ids: List<Long>): Int
 
     /** 恢复前先在唯一索引中占住目标 path；失败/进程中断可由持久化日志回滚或完成。 */
@@ -90,7 +104,7 @@ interface ImageDao {
     suspend fun markRestorePending(id: Long, targetPath: String): Int
 
     @Query("""
-        UPDATE images SET status = 'active', last_seen = :lastSeen
+        UPDATE images SET status = CASE WHEN source_type='chatthumb' THEN 'thumbnail_trash' ELSE 'active' END, last_seen = :lastSeen
         WHERE id = :id AND status = 'restore_pending'
     """)
     suspend fun finalizeRestore(id: Long, lastSeen: Long): Int

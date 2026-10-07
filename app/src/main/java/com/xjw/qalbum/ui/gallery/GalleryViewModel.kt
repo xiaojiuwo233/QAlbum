@@ -12,6 +12,7 @@ import com.xjw.qalbum.data.repository.ImageRepository
 import com.xjw.qalbum.domain.model.GallerySort
 import com.xjw.qalbum.service.cleanup.ImageFileManager
 import com.xjw.qalbum.service.cleanup.QuarantineManager
+import com.xjw.qalbum.service.cleanup.PictureDeleteOptions
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -173,16 +174,16 @@ class GalleryViewModel(
     // 用户确认后返回上一页（压栈路由弹出）会把协程连同 QuarantineManager 的滚动推进一起取消，
     // 留下「文件已移动但 DB 未写」的孤儿块；appScope 随进程存活，完成后回主线程通知 UI。
 
-    fun moveImagesToTrash(ids: Set<Long>, onDone: (Int) -> Unit = {}) {
+    fun moveImagesToTrash(ids: Set<Long>, options: PictureDeleteOptions = PictureDeleteOptions(), onDone: (Int) -> Unit = {}) {
         appScope.launch {
-            val count = quarantineManager.quarantineBatch(ids.map { it to "用户批量删除" })
+            val count = quarantineManager.quarantinePictures(ids,options,"用户批量删除").selectedProcessed
             withContext(Dispatchers.Main) { onDone(count) }
         }
     }
 
-    fun deleteImagesPermanently(ids: Set<Long>, onDone: (Int) -> Unit = {}) {
+    fun deleteImagesPermanently(ids: Set<Long>, options: PictureDeleteOptions = PictureDeleteOptions(), onDone: (Int) -> Unit = {}) {
         appScope.launch {
-            val count = quarantineManager.deletePermanentlyBatch(ids.toList())
+            val count = quarantineManager.deletePicturesPermanently(ids,options).selectedProcessed
             withContext(Dispatchers.Main) { onDone(count) }
         }
     }

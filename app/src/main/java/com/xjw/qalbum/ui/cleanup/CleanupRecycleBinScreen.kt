@@ -70,6 +70,9 @@ import coil3.request.ImageRequest
 import coil3.request.crossfade
 import com.xjw.qalbum.ThumbnailTrashActivity
 import com.xjw.qalbum.data.db.entity.QuarantineEntity
+import com.xjw.qalbum.data.db.AppDatabase
+import com.xjw.qalbum.data.db.dao.CleanupDao
+import org.koin.compose.koinInject
 import com.xjw.qalbum.ui.common.formatBytes
 import com.xjw.qalbum.ui.components.BackButton
 import com.xjw.qalbum.ui.components.ConfirmDialog
@@ -178,7 +181,7 @@ fun CleanupRecycleBinScreen(
         ConfirmDialog(
             icon = Icons.Outlined.DeleteForever,
             title = "清空回收站？",
-            text = "将永久删除回收站中的 $totalCount 项（${formatBytes(totalBytes)}），无法恢复。QQ 缩略图不受影响。",
+            text = "将永久删除回收站中的 $totalCount 组图片（${formatBytes(totalBytes)}），包括随图片移入的关联缓存，无法恢复。其他 QQ 预览缓存不受影响。",
             confirmLabel = "永久删除",
             destructive = true,
             onDismiss = { showClearConfirm = false },
@@ -235,6 +238,9 @@ private fun QuarantinePreviewDialog(
 ) {
     val context = LocalContext.current
     var confirmPurge by remember { mutableStateOf(false) }
+    val database=koinInject<AppDatabase>()
+    val groupStats by remember(record.id,record.groupId) { database.cleanupDao().observeGroupStats(record.id,record.groupId) }
+        .collectAsState(initial=CleanupDao.QuarantineStatsRow(record.fileCount,record.size))
     val sheetVisible = remember { androidx.compose.animation.core.MutableTransitionState(false).apply { targetState = true } }
 
     Dialog(
@@ -307,7 +313,8 @@ private fun QuarantinePreviewDialog(
                             }
                         }
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                        QuarantineInfoRow("大小", formatBytes(record.size))
+                        QuarantineInfoRow("大小", formatBytes(groupStats.bytes))
+                        if(record.groupId!=null)QuarantineInfoRow("关联文件", "${groupStats.count} 个，将一并恢复或删除")
                         QuarantineInfoRow("自动删除", autoDeleteText(record.expiresAt))
                         QuarantineInfoRow("原位置", record.originalPath.substringBeforeLast('/').ifBlank { record.originalPath })
                         Spacer(Modifier.height(4.dp))
@@ -320,7 +327,7 @@ private fun QuarantinePreviewDialog(
                             ) {
                                 Icon(Icons.Outlined.Restore, contentDescription = null, modifier = Modifier.size(ButtonDefaults.IconSize))
                                 Spacer(Modifier.width(ButtonDefaults.IconSpacing))
-                                Text("恢复")
+                                Text(if(record.groupId!=null)"恢复整组" else "恢复")
                             }
                             Button(
                                 onClick = { confirmPurge = true },

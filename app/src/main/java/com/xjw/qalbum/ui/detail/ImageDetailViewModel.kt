@@ -11,6 +11,7 @@ import com.xjw.qalbum.data.repository.ImageRepository
 import com.xjw.qalbum.domain.model.GallerySort
 import com.xjw.qalbum.service.cleanup.ImageFileManager
 import com.xjw.qalbum.service.cleanup.QuarantineManager
+import com.xjw.qalbum.service.cleanup.PictureDeleteOptions
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -200,17 +201,18 @@ class ImageDetailViewModel(
         }
     }
 
-    fun moveCurrentToTrash(onExhausted: () -> Unit = {}) {
+    fun moveCurrentToTrash(options: PictureDeleteOptions = PictureDeleteOptions(), onExhausted: () -> Unit = {}) {
         val image = (_state.value as? ImageDetailState.Ready)?.current ?: return
         if (!_operationBusy.compareAndSet(expect = false, update = true)) return
         viewModelScope.launch {
             try {
-                val ok = quarantineManager.quarantine(image.id, "用户手动删除")
+                val result = quarantineManager.quarantinePictures(listOf(image.id),options,"用户手动删除")
+                val ok=result.selectedProcessed>0
                 if (ok) {
-                    _toast.value = "已移到回收站"
+                    _toast.value = result.message()
                     advanceAfterRemoval(image.id, onExhausted)
                 } else {
-                    _toast.value = "移动到回收站失败"
+                    _toast.value = result.message()
                 }
             } finally {
                 _operationBusy.value = false
@@ -218,17 +220,18 @@ class ImageDetailViewModel(
         }
     }
 
-    fun deleteCurrentPermanently(onExhausted: () -> Unit = {}) {
+    fun deleteCurrentPermanently(options: PictureDeleteOptions = PictureDeleteOptions(), onExhausted: () -> Unit = {}) {
         val image = (_state.value as? ImageDetailState.Ready)?.current ?: return
         if (!_operationBusy.compareAndSet(expect = false, update = true)) return
         viewModelScope.launch {
             try {
-                val ok = quarantineManager.deletePermanently(image.id)
+                val result=quarantineManager.deletePicturesPermanently(listOf(image.id),options)
+                val ok=result.selectedProcessed>0
                 if (ok) {
-                    _toast.value = "已永久删除"
+                    _toast.value = result.message(permanent=true)
                     advanceAfterRemoval(image.id, onExhausted)
                 } else {
-                    _toast.value = "永久删除失败"
+                    _toast.value = result.message(permanent=true)
                 }
             } finally {
                 _operationBusy.value = false

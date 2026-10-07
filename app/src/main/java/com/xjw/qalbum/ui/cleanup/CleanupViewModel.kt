@@ -244,7 +244,7 @@ class CleanupViewModel(
         launchGuarded(appScope, "恢复") {
             val ok = cleanupController.restore(quarantineId)
             CleanupOpState.message.value =
-                if (ok) "已恢复到原位置" else "恢复失败：回收站文件缺失或文件访问未就绪"
+                if (ok) "已恢复到原位置" else "恢复未完成：原路径可能已有新文件，或文件访问未就绪。隔离文件仍保留，请稍后重试。"
         }
     }
 

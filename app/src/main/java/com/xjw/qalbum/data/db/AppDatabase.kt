@@ -62,7 +62,7 @@ import com.xjw.qalbum.data.db.entity.TagEntity
         QqSourceFacetCacheEntity::class,
         QqSourceCacheEntity::class,
     ],
-    version = 15,
+    version = 16,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -78,6 +78,15 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun qqSourceDao(): QqSourceDao
 
     companion object {
+
+        val MIGRATION_15_16 = object : Migration(15, 16) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE quarantine ADD COLUMN group_id TEXT")
+                db.execSQL("ALTER TABLE quarantine ADD COLUMN file_count INTEGER NOT NULL DEFAULT 1")
+                db.execSQL("ALTER TABLE quarantine ADD COLUMN source_stamp TEXT")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_quarantine_group_id ON quarantine(group_id)")
+            }
+        }
         const val DB_NAME = "qalbum.db"
 
         /** v1 → v2：Phase 3 增加 Room FTS4 OCR 索引。 */
@@ -637,6 +646,7 @@ abstract class AppDatabase : RoomDatabase() {
                     MIGRATION_12_13,
                     MIGRATION_13_14,
                     MIGRATION_14_15,
+                    MIGRATION_15_16,
                 )
                 .addCallback(object : Callback() {
                     override fun onCreate(db: SupportSQLiteDatabase) {
