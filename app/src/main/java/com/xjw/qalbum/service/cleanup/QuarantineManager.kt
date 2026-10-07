@@ -107,6 +107,11 @@ class QuarantineManager(
             finally { bound.close() }
         }
 
+    /** 文件访问是否就绪：未就绪时返回可读原因（大量选择时删除弹窗用它代替逐个核对） */
+    suspend fun fileAccessError(): String? = withContext(Dispatchers.IO) {
+        if (accessManager.current().isAvailable()) null else "文件访问未授权，请先在设置中连接 Root 或 Shizuku"
+    }
+
     suspend fun quarantinePictures(ids: Collection<Long>, options: PictureDeleteOptions, reason: String, scope: QqSourceScope? = null): PictureDeleteResult =
         performPictures(ids,options,reason,scope,permanent=false)
 

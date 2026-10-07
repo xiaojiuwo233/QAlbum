@@ -24,13 +24,16 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
+import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.CleaningServices
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Delete
@@ -38,10 +41,13 @@ import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Favorite
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.FilterList
+import androidx.compose.material.icons.outlined.HourglassTop
 import androidx.compose.material.icons.outlined.ImageNotSupported
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.SelectAll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.ButtonGroupDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -57,6 +63,8 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.ToggleButton
+import androidx.compose.material3.ToggleButtonDefaults
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -72,14 +80,20 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.paging.LoadState
 import androidx.paging.compose.collectAsLazyPagingItems
+import com.xjw.qalbum.data.db.dao.QqContent
 import com.xjw.qalbum.data.db.dao.QqSourceFacet
 import com.xjw.qalbum.data.db.entity.ImageEntity
+import com.xjw.qalbum.service.cleanup.PictureDeleteOptions
 import com.xjw.qalbum.ui.cleanup.shareChooser
 import com.xjw.qalbum.ui.common.formatBytes
 import com.xjw.qalbum.ui.common.formatCountExact
@@ -96,6 +110,7 @@ import com.xjw.qalbum.ui.components.SaveToAlbumSheet
 import com.xjw.qalbum.ui.components.SearchField
 import com.xjw.qalbum.ui.components.SegmentPosition
 import com.xjw.qalbum.ui.components.SegmentedDefaults
+import com.xjw.qalbum.ui.components.SegmentedListItem
 import com.xjw.qalbum.ui.components.SelectionTopBar
 import com.xjw.qalbum.ui.components.ToolbarIconAction
 import com.xjw.qalbum.ui.components.ToolbarPrimaryAction
@@ -112,11 +127,12 @@ private data class SourcePreview(val images: List<ImageEntity>, val start: Int)
 
 /**
  * 来源浏览页：
- * - 会话：顶部成员筛选条（群名片 / 昵称、图片数、占用空间），可展开全部成员并搜索；
+ * - 内容切换：图片 / QQ 缩略图，各自显示数量与占用；
+ * - 会话：顶部成员筛选条（群名片 / 昵称、数量、占用空间），可展开全部成员并搜索；
  * - 发送人：按会话筛选；全部来源：不再细分；
  * - 排序：日期 / 大小 × 升序 / 降序，网格带分组标题；
  * - 长按进入多选（可拖动连续勾选），浮动工具栏收藏 / 保存 / 删除；
- * - 看图页可收藏、删除（移入回收站或永久删除）。
+ * - 看图页可收藏、删除，上滑查看详情。
  */
 @Composable
 fun QqSourceBrowseScreen(
@@ -127,9 +143,11 @@ fun QqSourceBrowseScreen(
 ) {
     val context = LocalContext.current
     val items = viewModel.photos.collectAsLazyPagingItems()
-    val info by viewModel.info.collectAsState()
+    val lookup by viewModel.lookup.collectAsState()
+    val base by viewModel.baseFacet.collectAsState()
+    val content by viewModel.content.collectAsState()
     val stats by viewModel.stats.collectAsState()
-    val totalStats by viewModel.totalStats.collectAsState()
+    val current by viewModel.currentFacet.collectAsState()
     val sort by viewModel.sort.collectAsState()
     val columns by viewModel.columns.collectAsState()
     val filter by viewModel.filter.collectAsState()
@@ -152,30 +170,36 @@ fun QqSourceBrowseScreen(
     var preview by remember { mutableStateOf<SourcePreview?>(null) }
     val selectionMode = selectedIds.isNotEmpty()
     val clearSelection = { selectedIds = emptySet() }
+    // 只删缩略图时默认不连带原图 / 预览图；删图片时默认整组处理
+    val deleteDefaults = PictureDeleteOptions(linkedVersions = content != QqContent.THUMBNAILS)
 
     BackHandler(enabled = selectionMode) { clearSelection() }
     LaunchedEffect(message) {
         val text = message ?: return@LaunchedEffect
         viewModel.consumeMessage()
-        snackbar.showSnackbar(text)
+        // 在页面作用域里显示：清空消息会重启本副作用，直接 show 会被立刻取消
+        scope.launch { snackbar.showSnackbar(text) }
     }
     LaunchedEffect(repositoryMessage) {
         val text = repositoryMessage ?: return@LaunchedEffect
         viewModel.acknowledgeRepositoryMessage()
-        snackbar.showSnackbar(text)
+        scope.launch { snackbar.showSnackbar(text) }
     }
+    // 换内容后旧的选择不再对应当前网格
+    LaunchedEffect(content) { clearSelection() }
 
     val filterNoun = when {
         target.kind == SourceKind.SENDER -> "会话"
-        info?.chatType == 1 -> "发送人"
-        info?.chatType == 3 -> "转发者"
+        base?.chatType == 1 -> "发送人"
+        base?.chatType == 3 -> "转发者"
         else -> "成员"
     }
-    val title = info?.name?.ifBlank { null } ?: when (target.kind) {
+    val title = base?.name?.ifBlank { null } ?: when (target.kind) {
         SourceKind.SENDER -> "发送人名称未缓存"
-        SourceKind.CONVERSATION -> if (info?.chatType == 1) "会话名称未缓存" else "群名称未缓存"
+        SourceKind.CONVERSATION -> if (base?.chatType == 1) "会话名称未缓存" else "群名称未缓存"
         SourceKind.ALL -> "全部来源图片"
     }
+    val noun = if (content == QqContent.THUMBNAILS) "缩略图" else "图片"
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
 
     val topBarEnter = MaterialTheme.motionScheme.defaultEffectsSpec<Float>()
@@ -229,7 +253,7 @@ fun QqSourceBrowseScreen(
                                         DropdownMenuItem(
                                             text = { Text(if (filter == null) "清理这里的全部图片…" else "清理当前筛选的图片…") },
                                             leadingIcon = { Icon(Icons.Outlined.CleaningServices, contentDescription = null) },
-                                            enabled = progress == null,
+                                            enabled = progress == null && base != null,
                                             onClick = { menuOpen = false; viewModel.requestScopeTrash() },
                                         )
                                     }
@@ -260,8 +284,31 @@ fun QqSourceBrowseScreen(
                         )
                     }
                 }
+                val currentBase = base
+                AnimatedVisibility(
+                    visible = currentBase != null && (currentBase.thumbCount > 0 || content == QqContent.THUMBNAILS),
+                    enter = expandVertically() + fadeIn(),
+                    exit = shrinkVertically() + fadeOut(),
+                ) {
+                    if (currentBase != null) {
+                        ContentToggle(
+                            facet = current ?: currentBase,
+                            selected = content,
+                            enabled = !selectionMode,
+                            onSelect = viewModel::setContent,
+                            modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 4.dp),
+                        )
+                    }
+                }
                 val bottomInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+                val found = lookup
                 when {
+                    found == null -> LoadingState()
+                    found.facet == null && target.kind != SourceKind.ALL -> EmptyState(
+                        icon = Icons.Outlined.HourglassTop,
+                        title = if (progress != null) "来源统计整理中" else "没有找到这个来源",
+                        message = if (progress != null) "整理完成后会自动显示" else "可能已被清除，请返回来源列表重新进入",
+                    )
                     items.loadState.refresh is LoadState.Loading && items.itemCount == 0 -> LoadingState()
                     items.loadState.refresh is LoadState.Error && items.itemCount == 0 -> EmptyState(
                         icon = Icons.Outlined.ImageNotSupported,
@@ -292,9 +339,10 @@ fun QqSourceBrowseScreen(
                                     FilterChipsRow(
                                         noun = filterNoun,
                                         kind = target.kind,
+                                        content = content,
                                         options = filterOptions,
                                         selected = filter,
-                                        totalCount = totalStats?.count,
+                                        totalCount = base?.countOf(content),
                                         onSelect = viewModel::selectFilter,
                                         onShowAll = { showFilterSheet = true },
                                     )
@@ -305,8 +353,8 @@ fun QqSourceBrowseScreen(
                                     Box(Modifier.fillMaxWidth().height(360.dp)) {
                                         EmptyState(
                                             icon = Icons.Outlined.ImageNotSupported,
-                                            title = "没有图片",
-                                            message = if (filter != null) "换一个${filterNoun}看看" else "这里的图片可能已被清理或尚未扫描",
+                                            title = "没有$noun",
+                                            message = if (filter != null) "换一个${filterNoun}看看" else "这里的${noun}可能已被清理或尚未扫描",
                                         )
                                     }
                                 }
@@ -337,10 +385,11 @@ fun QqSourceBrowseScreen(
         val ids = selectedIds
         DeleteImagesDialog(
             count = ids.size,
-            imageIds=ids,
-            sourceScope=deleteScope,
-            onTrashOptions={ options -> showDelete=false;viewModel.moveToTrash(ids,options=options) { clearSelection();items.refresh() } },
-            onPermanentOptions={ options -> showDelete=false;viewModel.deletePermanently(ids,options=options) { clearSelection();items.refresh() } },
+            imageIds = ids,
+            sourceScope = deleteScope,
+            initialOptions = deleteDefaults,
+            onTrashOptions = { options -> showDelete = false; viewModel.moveToTrash(ids, options = options) { clearSelection(); items.refresh() } },
+            onPermanentOptions = { options -> showDelete = false; viewModel.deletePermanently(ids, options = options) { clearSelection(); items.refresh() } },
             sizeOf = { viewModel.sizeOf(ids) },
             note = "收藏或标记为保留的图片会被跳过。删除 QQ 缓存后，聊天里对应的图片可能需要重新下载。",
             onDismiss = { showDelete = false },
@@ -373,10 +422,11 @@ fun QqSourceBrowseScreen(
         FilterSheet(
             noun = filterNoun,
             kind = target.kind,
+            content = content,
             options = filterOptions,
             selected = filter,
             search = viewModel.filterSearch.collectAsState().value,
-            totalCount = totalStats?.count,
+            totalCount = base?.countOf(content),
             onSearch = { viewModel.filterSearch.value = it },
             onSelect = {
                 viewModel.selectFilter(it)
@@ -392,14 +442,15 @@ fun QqSourceBrowseScreen(
     }
 
     confirmation?.let { request ->
-        if(request.ids==null) {
-            androidx.compose.material3.AlertDialog(onDismissRequest=viewModel::dismissScopeTrash,
-                title={ Text(title) },text={ Text("正在准备关联图片…") },confirmButton={},
-                dismissButton={ TextButton(onClick=viewModel::dismissScopeTrash) { Text("取消") } })
-        } else DeleteImagesDialog(
-            count=request.ids.size,imageIds=request.ids,sourceScope=request.scope,note=title,
-            onTrash={ viewModel.confirmScopeTrash() },onTrashOptions=viewModel::confirmScopeTrash,
-            onPermanent=null,onDismiss=viewModel::dismissScopeTrash,
+        ScopeTrashDialog(
+            request = request,
+            title = title,
+            filterName = filter?.let { facetDisplayName(it, if (target.kind == SourceKind.SENDER) SourceKind.CONVERSATION else SourceKind.SENDER) },
+            available = current,
+            running = progress != null,
+            onChange = viewModel::updateScopeTrash,
+            onConfirm = viewModel::confirmScopeTrash,
+            onDismiss = viewModel::dismissScopeTrash,
         )
     }
 
@@ -441,43 +492,35 @@ fun QqSourceBrowseScreen(
                     )
                 }
                 confirmDeleteFor?.let { pending ->
+                    fun removed(count: Int, action: String) {
+                        Toast.makeText(context, removalMessage(action, count, 1), Toast.LENGTH_SHORT).show()
+                        if (count > 0) {
+                            preview = preview?.withoutImage(pending.id)
+                            items.refresh()
+                        }
+                    }
                     DeleteImagesDialog(
                         count = 1,
-                        imageIds=listOf(pending.id),
-                        sourceScope=deleteScope,
-                        onTrashOptions={ options ->
-                            confirmDeleteFor=null
-                            viewModel.moveToTrash(listOf(pending.id),options=options) { moved ->
-                                if(moved>0) { preview=preview?.withoutImage(pending.id);items.refresh() }
-                            }
+                        imageIds = listOf(pending.id),
+                        sourceScope = deleteScope,
+                        initialOptions = deleteDefaults,
+                        onTrashOptions = { options ->
+                            confirmDeleteFor = null
+                            viewModel.moveToTrash(listOf(pending.id), notify = false, options = options) { removed(it, "已移入回收站") }
                         },
-                        onPermanentOptions={ options ->
-                            confirmDeleteFor=null
-                            viewModel.deletePermanently(listOf(pending.id),options=options) { moved ->
-                                if(moved>0) { preview=preview?.withoutImage(pending.id);items.refresh() }
-                            }
+                        onPermanentOptions = { options ->
+                            confirmDeleteFor = null
+                            viewModel.deletePermanently(listOf(pending.id), notify = false, options = options) { removed(it, "已永久删除") }
                         },
                         note = if (pending.isFavorite || pending.userKeep == true) "这张图片已收藏或标记为保留，不会被删除；请先取消收藏。" else null,
                         onDismiss = { confirmDeleteFor = null },
                         onTrash = {
                             confirmDeleteFor = null
-                            viewModel.moveToTrash(listOf(pending.id), notify = false) { moved ->
-                                Toast.makeText(context, removalMessage("已移入回收站", moved, 1), Toast.LENGTH_SHORT).show()
-                                if (moved > 0) {
-                                    preview = preview?.withoutImage(pending.id)
-                                    items.refresh()
-                                }
-                            }
+                            viewModel.moveToTrash(listOf(pending.id), notify = false) { removed(it, "已移入回收站") }
                         },
                         onPermanent = {
                             confirmDeleteFor = null
-                            viewModel.deletePermanently(listOf(pending.id), notify = false) { deleted ->
-                                Toast.makeText(context, removalMessage("已永久删除", deleted, 1), Toast.LENGTH_SHORT).show()
-                                if (deleted > 0) {
-                                    preview = preview?.withoutImage(pending.id)
-                                    items.refresh()
-                                }
-                            }
+                            viewModel.deletePermanently(listOf(pending.id), notify = false) { removed(it, "已永久删除") }
                         },
                     )
                 }
@@ -486,7 +529,7 @@ fun QqSourceBrowseScreen(
     }
 }
 
-/** 从看图快照移除一张：保持当前位置（删的是末张则后退一张），删空后关闭 */
+/** 从看图快照移除一张：保持当前位置，即显示下一张（删的是末张则后退一张），删空后关闭 */
 private fun SourcePreview.withoutImage(id: Long): SourcePreview? {
     val index = images.indexOfFirst { it.id == id }
     if (index < 0) return this
@@ -495,11 +538,49 @@ private fun SourcePreview.withoutImage(id: Long): SourcePreview? {
     return SourcePreview(remaining, index.coerceAtMost(remaining.lastIndex))
 }
 
+/** 图片 / 缩略图切换（连接式按钮组），各自带数量与占用 */
+@Composable
+private fun ContentToggle(
+    facet: QqSourceFacet,
+    selected: QqContent,
+    enabled: Boolean,
+    onSelect: (QqContent) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(ButtonGroupDefaults.ConnectedSpaceBetween),
+    ) {
+        QqContent.entries.forEachIndexed { index, option ->
+            val checked = option == selected
+            ToggleButton(
+                checked = checked,
+                onCheckedChange = { onSelect(option) },
+                enabled = enabled,
+                shapes = if (index == 0) ButtonGroupDefaults.connectedLeadingButtonShapes() else ButtonGroupDefaults.connectedTrailingButtonShapes(),
+                colors = ToggleButtonDefaults.toggleButtonColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHighest),
+                modifier = Modifier.weight(1f).semantics { role = Role.RadioButton },
+            ) {
+                if (checked) {
+                    Icon(Icons.Outlined.Check, contentDescription = null, modifier = Modifier.size(ButtonDefaults.IconSize))
+                    Spacer(Modifier.width(ButtonDefaults.IconSpacing))
+                }
+                Text(
+                    "${if (option == QqContent.IMAGES) "图片" else "缩略图"} · ${formatBytes(facet.bytesOf(option))}",
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
 /** 网格顶部的筛选条：「全部」+ 占用最多的若干个，末尾「全部成员」打开完整列表 */
 @Composable
 private fun FilterChipsRow(
     noun: String,
     kind: SourceKind,
+    content: QqContent,
     options: List<QqSourceFacet>?,
     selected: QqSourceFacet?,
     totalCount: Int?,
@@ -509,7 +590,7 @@ private fun FilterChipsRow(
     val optionKind = if (kind == SourceKind.SENDER) SourceKind.CONVERSATION else SourceKind.SENDER
     val top = remember(options, selected) {
         val list = options.orEmpty().take(12)
-        if (selected != null && list.none { it.key == selected.key }) listOf(selected) + list else list
+        if (selected != null && list.none { it.id == selected.id }) listOf(selected) + list else list
     }
     Row(
         modifier = Modifier
@@ -525,13 +606,13 @@ private fun FilterChipsRow(
             label = { Text(if (totalCount != null) "全部 · ${formatCountExact(totalCount)}" else "全部") },
         )
         top.forEach { option ->
-            val isSelected = option.key == selected?.key
+            val isSelected = option.id == selected?.id
             FilterChip(
                 selected = isSelected,
                 onClick = { onSelect(if (isSelected) null else option) },
                 label = {
                     Text(
-                        "${facetDisplayName(option, optionKind)} · ${formatBytes(option.bytes)}",
+                        "${facetDisplayName(option, optionKind)} · ${formatBytes(option.bytesOf(content))}",
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -560,11 +641,12 @@ private fun FilterChipsRow(
     }
 }
 
-/** 完整的二级筛选列表：可搜索；每项显示图片数与占用空间，并可直接跳到该成员 / 会话的全部图片 */
+/** 完整的二级筛选列表：可搜索；每项显示数量与占用空间，并可直接跳到该成员 / 会话的全部图片 */
 @Composable
 private fun FilterSheet(
     noun: String,
     kind: SourceKind,
+    content: QqContent,
     options: List<QqSourceFacet>?,
     selected: QqSourceFacet?,
     search: String,
@@ -597,14 +679,14 @@ private fun FilterSheet(
         if (list == null) {
             Box(Modifier.fillMaxWidth().height(200.dp)) { LoadingState() }
         } else {
-            val maxBytes = list.maxOfOrNull { it.bytes } ?: 0L
+            val maxBytes = list.maxOfOrNull { it.bytesOf(content) } ?: 0L
             LazyColumn(
                 modifier = Modifier.fillMaxWidth(),
                 contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 24.dp),
                 verticalArrangement = Arrangement.spacedBy(SegmentedDefaults.Gap),
             ) {
                 item(key = "all") {
-                    com.xjw.qalbum.ui.components.SegmentedListItem(
+                    SegmentedListItem(
                         position = SegmentPosition(0, list.size + 1),
                         selected = selected == null,
                         onClick = { onSelect(null) },
@@ -612,14 +694,15 @@ private fun FilterSheet(
                         supporting = { Text(if (totalCount != null) "${formatCountExact(totalCount)} 张" else "…") },
                     )
                 }
-                itemsIndexed(list, key = { _, facet -> facet.key }) { index, facet ->
+                itemsIndexed(list, key = { _, facet -> facet.id }) { index, facet ->
                     SourceFacetRow(
                         facet = facet,
                         kind = optionKind,
                         position = SegmentPosition(index + 1, list.size + 1),
                         maxBytes = maxBytes,
                         showAccount = false,
-                        selected = facet.key == selected?.key,
+                        selected = facet.id == selected?.id,
+                        content = content,
                         onClick = { onSelect(facet) },
                         modifier = Modifier.animateItem(),
                     )
@@ -649,14 +732,18 @@ private fun FilterSheet(
     }
 }
 
-/** 按范围整体移入回收站的确认（含共用、受保护统计） */
+/**
+ * 按范围整体移入回收站的确认：选择清理图片 / 缩略图，是否包含共用图片、是否连带同一张图的其他缓存版本。
+ * 数字直接查库得出；逐个文件的核对放到后台执行时，不在弹窗里等待。
+ */
 @Composable
 private fun ScopeTrashDialog(
     request: QqTrashConfirmation,
     title: String,
     filterName: String?,
+    available: QqSourceFacet?,
     running: Boolean,
-    onIncludeShared: (Boolean) -> Unit,
+    onChange: ((QqTrashConfirmation) -> QqTrashConfirmation) -> Unit,
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -666,37 +753,76 @@ private fun ScopeTrashDialog(
         icon = { Icon(Icons.Outlined.CleaningServices, contentDescription = null) },
         title = { Text("清理这些图片？") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(
-                    if (filterName != null) "「$title」中「$filterName」的图片" else "「$title」中的全部图片",
+                    if (filterName != null) "「$title」中「$filterName」的内容" else "「$title」中的全部内容",
                     style = MaterialTheme.typography.bodyLarge,
                 )
+                Spacer(Modifier.height(4.dp))
+                QqContent.entries.forEach { option ->
+                    val checked = option in request.contents
+                    OptionRow(
+                        checked = checked,
+                        label = buildString {
+                            append(if (option == QqContent.IMAGES) "图片" else "QQ 缩略图")
+                            available?.let { append("（${formatCountExact(it.countOf(option))} 张 · ${formatBytes(it.bytesOf(option))}）") }
+                        },
+                        onChange = { on -> onChange { it.copy(contents = if (on) it.contents + option else it.contents - option) } },
+                    )
+                }
+                OptionRow(
+                    checked = request.includeShared,
+                    label = "也清理与其他会话 / 发送人共用的图片",
+                    onChange = { on -> onChange { it.copy(includeShared = on) } },
+                )
+                OptionRow(
+                    checked = request.linkedVersions,
+                    label = "同时清理同一张图的其他缓存版本（原图、预览图、缩略图）",
+                    onChange = { on -> onChange { it.copy(linkedVersions = on) } },
+                )
+                Spacer(Modifier.height(4.dp))
                 if (counts == null) {
                     WavyProgress(fraction = null)
                 } else {
-                    InfoLine("共 ${formatCountExact(counts.total)} 张 · ${formatBytes(counts.totalBytes)}")
-                    InfoLine("其中 ${formatCountExact(counts.shared)} 张也出现在其他会话或发送人中")
-                    InfoLine("${formatCountExact(counts.protectedCount)} 张已收藏或保留，将跳过")
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(checked = request.includeShared, onCheckedChange = onIncludeShared)
-                    Text("也清理与其他会话共用的图片", style = MaterialTheme.typography.bodyMedium)
+                    InfoLine("可清理 ${formatCountExact(counts.removable)} 张 · ${formatBytes(counts.removableBytes)}", MaterialTheme.colorScheme.primary)
+                    if (counts.shared > 0) {
+                        InfoLine(
+                            "${formatCountExact(counts.shared)} 张也出现在其他会话或发送人中" +
+                                if (request.includeShared) "，将一并清理" else "，将跳过",
+                        )
+                    }
+                    if (counts.protectedCount > 0) InfoLine("${formatCountExact(counts.protectedCount)} 张已收藏或保留，将跳过")
                 }
                 Text(
-                    "图片会先移入回收站，可在保留期内恢复。删除 QQ 缓存后，聊天里对应的图片可能需要重新下载，过期的将无法再查看。",
+                    "先移入回收站，保留期内可恢复；在后台进行，可以离开本页。删除 QQ 缓存后，聊天里对应的图片可能需要重新下载，过期的将无法再查看。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp),
                 )
             }
         },
         confirmButton = {
             TextButton(onClick = onConfirm, enabled = counts != null && counts.removable > 0 && !running) {
                 Text(
-                    if (counts == null) "统计中…" else "移入回收站 ${formatCountExact(counts.removable)} 张（${formatBytes(counts.removableBytes)}）",
+                    if (counts == null) "统计中…" else "移入回收站",
                     color = MaterialTheme.colorScheme.error,
                 )
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
+}
+
+@Composable
+private fun OptionRow(checked: Boolean, label: String, onChange: (Boolean) -> Unit) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(MaterialTheme.shapes.small)
+            .toggleable(value = checked, role = Role.Checkbox, onValueChange = onChange),
+    ) {
+        Checkbox(checked = checked, onCheckedChange = null, modifier = Modifier.padding(12.dp))
+        Text(label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+    }
 }

@@ -10,8 +10,11 @@ import androidx.paging.cachedIn
 import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.db.dao.QqScopeStats
 import com.xjw.qalbum.data.db.dao.QqSourceCounts
+import com.xjw.qalbum.data.db.dao.QqContent
+import com.xjw.qalbum.data.db.dao.QqScopeIds
+import com.xjw.qalbum.data.db.dao.QqScopeOrder
+import com.xjw.qalbum.data.db.dao.QqScopeSql
 import com.xjw.qalbum.data.db.dao.QqSourceFacet
-import com.xjw.qalbum.data.db.dao.QqSourceName
 import com.xjw.qalbum.data.db.entity.OcrTextEntity
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.data.repository.ImageRepository
@@ -33,7 +36,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
@@ -42,18 +45,24 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/** 按来源范围整体清理前的确认状态 */
+/** 按来源范围整体清理前的确认状态：[counts] 为 null 表示正在统计 */
 data class QqTrashConfirmation(
     val scope: QqSourceScope,
+    val ids: QqScopeIds,
     val counts: QqSourceCounts?,
     val includeShared: Boolean = false,
-    val ids: List<Long>? = null,
+    val contents: Set<QqContent> = setOf(QqContent.IMAGES, QqContent.THUMBNAILS),
+    val linkedVersions: Boolean = true,
 )
+
+/** 分类查找结果：外层 null = 仍在读取；[facet] 为 null = 没有这个分类（或统计尚未整理出来） */
+data class FacetLookup(val facet: QqSourceFacet?)
 
 /**
  * 来源浏览页：某个会话（可再按成员筛选）/ 某个发送人（可再按会话筛选）/ 全部已关联图片。
  *
- * 排序（日期 / 大小 × 升降序）持久化；列表按排序插入日期或大小分组标题。
+ * 内容分「图片 / QQ 缩略图」两类；数量与占用直接取增量维护的分类统计，不再逐次聚合。
+ * 网格按范围从关联表取图（索引范围 + 主键回表），排序（日期 / 大小 × 升降序）持久化并插入分组标题。
  * 多选与看图页的删除、收藏、保存都在这里执行；批量文件操作跑在 App 级作用域，返回上一页不中断。
  */
 class QqSourceBrowseViewModel(
@@ -66,6 +75,8 @@ class QqSourceBrowseViewModel(
     private val appScope: CoroutineScope,
 ) : ViewModel() {
     private val dao = repository.dao
+
+    val content = MutableStateFlow(QqContent.IMAGES)
 
     /** 二级筛选：会话页为成员，发送人页为会话；null = 不筛选 */
     val filter = MutableStateFlow<QqSourceFacet?>(null)
@@ -83,65 +94,85 @@ class QqSourceBrowseViewModel(
     val exportSubdirs: StateFlow<List<String>> = settings.exportSubdirs
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    val info: StateFlow<QqSourceName?> = when (target.kind) {
-        SourceKind.CONVERSATION -> dao.observeConversationName(target.key)
-        SourceKind.SENDER -> dao.observeSenderName(target.key)
-        SourceKind.ALL -> flowOf(QqSourceName("全部来源图片", 0))
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+    /** 当前分类；「全部」用汇总合成一个 */
+    val lookup: StateFlow<FacetLookup?> = when (target.kind) {
+        SourceKind.CONVERSATION -> dao.observeFacet(0, target.key)
+        SourceKind.SENDER -> dao.observeFacet(1, target.key)
+        SourceKind.ALL -> dao.observeSummary().map { summary ->
+            QqSourceFacet(
+                id = 0, key = "all", name = "全部来源图片", alias = "",
+                count = summary?.imageCount ?: 0, bytes = summary?.imageBytes ?: 0,
+                thumbCount = summary?.thumbCount ?: 0, thumbBytes = summary?.thumbBytes ?: 0,
+                chatType = 0, latestTime = 0, accountName = "",
+            )
+        }
+    }.map { FacetLookup(it) }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
-    private val baseScope: QqSourceScope = when (target.kind) {
-        SourceKind.CONVERSATION -> QqSourceScope(groupKey = target.key)
-        SourceKind.SENDER -> QqSourceScope(senderKey = target.key)
-        SourceKind.ALL -> QqSourceScope()
-    }
+    private val baseId: Flow<Long?> = lookup.map { it?.facet?.id }.distinctUntilChanged()
 
+    /** 浏览范围（分类 id）；分类还没找到时为 null */
+    val scopeIds: StateFlow<QqScopeIds?> = combine(baseId, filter) { id, selected ->
+        when (target.kind) {
+            SourceKind.ALL -> QqScopeIds()
+            SourceKind.CONVERSATION -> id?.let { QqScopeIds(conversationId = it, senderId = selected?.id) }
+            SourceKind.SENDER -> id?.let { QqScopeIds(senderId = it, conversationId = selected?.id) }
+        }
+    }.distinctUntilChanged().stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    /** 删除核查用的来源键（同一张图的其他消息是否在范围外） */
     val scope: StateFlow<QqSourceScope> = filter.map { selected ->
         when (target.kind) {
-            SourceKind.CONVERSATION -> baseScope.copy(senderKey = selected?.key)
-            SourceKind.SENDER -> baseScope.copy(groupKey = selected?.key)
-            SourceKind.ALL -> baseScope
+            SourceKind.CONVERSATION -> QqSourceScope(groupKey = target.key, senderKey = selected?.key)
+            SourceKind.SENDER -> QqSourceScope(senderKey = target.key, groupKey = selected?.key)
+            SourceKind.ALL -> QqSourceScope()
         }
-    }.stateIn(viewModelScope, SharingStarted.Eagerly, baseScope)
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, QqSourceScope())
 
-    /** 不含二级筛选的总量（筛选条「全部」标签用） */
-    val totalStats: StateFlow<QqScopeStats?> = dao.observeScopeStats(baseScope.groupKey, baseScope.senderKey)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+    /** 二级筛选候选（成员或会话）的全部统计 */
+    private val options: StateFlow<List<QqSourceFacet>?> = baseId.flatMapLatest { id ->
+        when {
+            target.kind == SourceKind.ALL -> flowOf(emptyList())
+            id == null -> flowOf(null)
+            target.kind == SourceKind.CONVERSATION -> dao.observeConversationMembers(id)
+            else -> dao.observeSenderConversations(id)
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
-    /** 当前筛选结果的数量与占用空间 */
-    val stats: StateFlow<QqScopeStats?> = scope.flatMapLatest { dao.observeScopeStats(it.groupKey, it.senderKey) }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+    /** 当前内容下的筛选候选：按占用降序，可按名称 / 群名片 / 昵称搜索 */
+    val filterOptions: StateFlow<List<QqSourceFacet>?> = combine(options, content, filterSearch) { list, kind, query ->
+        val q = query.trim()
+        list?.filter { option ->
+            option.countOf(kind) > 0 &&
+                (q.isEmpty() || option.name.contains(q, ignoreCase = true) || option.alias.contains(q, ignoreCase = true))
+        }?.sortedByDescending { it.bytesOf(kind) }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
-    /** 二级筛选候选（成员或会话），按占用空间降序 */
-    val filterOptions: StateFlow<List<QqSourceFacet>?> =
-        filterSearch.debounce { if (it.isBlank()) 0L else 180L }.map { it.trim() }.distinctUntilChanged()
-            .flatMapLatest { query ->
-                when (target.kind) {
-                    SourceKind.CONVERSATION -> dao.observeConversationMembers(target.key, query)
-                    SourceKind.SENDER -> dao.observeSenderConversations(target.key, query)
-                    SourceKind.ALL -> flowOf(emptyList())
-                }
-            }
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+    /** 不含二级筛选的总量（筛选条「全部」与内容切换上显示） */
+    val baseFacet: StateFlow<QqSourceFacet?> = lookup.map { it?.facet }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    /** 当前范围（含二级筛选）的分类统计：筛选时取该成员 / 会话的最新聚合，否则为整个分类 */
+    val currentFacet: StateFlow<QqSourceFacet?> = combine(baseFacet, options, filter) { base, list, selected ->
+        if (selected == null) base else list?.firstOrNull { it.id == selected.id } ?: selected
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    /** 当前范围在当前内容下的数量与占用 */
+    val stats: StateFlow<QqScopeStats?> = combine(currentFacet, content) { facet, kind ->
+        facet?.let { QqScopeStats(it.countOf(kind), it.bytesOf(kind)) }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     val photos: Flow<PagingData<GalleryTimelineItem>> =
-        combine(scope, sort) { s, order -> s to order }
+        combine(scopeIds.filterNotNull(), content, sort) { ids, kind, order -> Triple(ids, kind, order) }
             .distinctUntilChanged()
-            .flatMapLatest { (s, order) ->
+            .flatMapLatest { (ids, kind, order) ->
                 val pager = Pager(
                     PagingConfig(pageSize = 60, prefetchDistance = 120, initialLoadSize = 60, enablePlaceholders = false),
-                ) {
-                    when (order) {
-                        SourceSort.DATE_DESC -> dao.imagesNewest(s.groupKey, s.senderKey)
-                        SourceSort.DATE_ASC -> dao.imagesOldest(s.groupKey, s.senderKey)
-                        SourceSort.SIZE_DESC -> dao.imagesLargest(s.groupKey, s.senderKey)
-                        SourceSort.SIZE_ASC -> dao.imagesSmallest(s.groupKey, s.senderKey)
-                    }
-                }.flow
+                ) { dao.pagingScope(QqScopeSql.page(ids, kind, QqScopeOrder.valueOf(order.name))) }.flow
                 // 分组计数固化为热流：分析 / 扫描期间 PagingSource 频繁失效，每代分页只取缓存值
                 if (order.byDate) {
-                    pager.withDateHeaders(bucketCounts { dao.observeDateBuckets(s.groupKey, s.senderKey) })
+                    pager.withDateHeaders(bucketCounts { dao.observeBuckets(QqScopeSql.dateBuckets(ids, kind)) })
                 } else {
-                    pager.withSizeHeaders(bucketCounts { dao.observeSizeBuckets(s.groupKey, s.senderKey) })
+                    pager.withSizeHeaders(bucketCounts { dao.observeBuckets(QqScopeSql.sizeBuckets(ids, kind)) })
                 }
             }
             .cachedIn(viewModelScope)
@@ -160,6 +191,10 @@ class QqSourceBrowseViewModel(
         viewModelScope.launch { settings.setGalleryColumns(next) }
     }
 
+    fun setContent(next: QqContent) {
+        content.value = next
+    }
+
     fun selectFilter(next: QqSourceFacet?) {
         filter.value = next
     }
@@ -174,8 +209,11 @@ class QqSourceBrowseViewModel(
 
     suspend fun sizeOf(ids: Collection<Long>): Long = images.sumSizeByIds(ids.toList())
 
-    /** 当前筛选范围内全部图片（全选） */
-    suspend fun allIds(): Set<Long> = scope.value.let { dao.scopeIds(it.groupKey, it.senderKey).toSet() }
+    /** 当前筛选范围、当前内容下的全部图片（全选） */
+    suspend fun allIds(): Set<Long> {
+        val ids = scopeIds.value ?: return emptySet()
+        return dao.queryIds(QqScopeSql.ids(ids, content.value)).toSet()
+    }
 
     suspend fun ocr(id: Long): OcrTextEntity? = images.getOcr(id)
 
@@ -196,20 +234,18 @@ class QqSourceBrowseViewModel(
     fun moveToTrash(ids: Collection<Long>, notify: Boolean = true, options: PictureDeleteOptions = PictureDeleteOptions(), onDone: (Int) -> Unit = {}) {
         if (ids.isEmpty()) return
         appScope.launch {
-            val result=quarantine.quarantinePictures(ids,options,"按 QQ 来源手动删除",scope.value)
-            val moved=result.selectedProcessed
+            val result = quarantine.quarantinePictures(ids, options, "按 QQ 来源手动删除", scope.value)
             if (notify) _message.value = result.message()
-            withContext(Dispatchers.Main) { onDone(moved) }
+            withContext(Dispatchers.Main) { onDone(result.selectedProcessed) }
         }
     }
 
     fun deletePermanently(ids: Collection<Long>, notify: Boolean = true, options: PictureDeleteOptions = PictureDeleteOptions(), onDone: (Int) -> Unit = {}) {
         if (ids.isEmpty()) return
         appScope.launch {
-            val result=quarantine.deletePicturesPermanently(ids,options,scope.value)
-            val deleted=result.selectedProcessed
-            if (notify) _message.value = result.message(permanent=true)
-            withContext(Dispatchers.Main) { onDone(deleted) }
+            val result = quarantine.deletePicturesPermanently(ids, options, scope.value)
+            if (notify) _message.value = result.message(permanent = true)
+            withContext(Dispatchers.Main) { onDone(result.selectedProcessed) }
         }
     }
 
@@ -237,7 +273,7 @@ class QqSourceBrowseViewModel(
         }
     }
 
-    // ---- 按范围整体清理（含共用图片统计） ----
+    // ---- 按范围整体清理（统计直接查库，文件逐组核查放到实际执行时） ----
 
     val confirmation = MutableStateFlow<QqTrashConfirmation?>(null)
     private var countsGeneration = 0L
@@ -248,20 +284,29 @@ class QqSourceBrowseViewModel(
 
     fun requestScopeTrash() {
         if (!canTrashScope || repository.progress.value != null) return
-        confirmation.value = QqTrashConfirmation(scope.value, null)
-        updateShared(false)
+        val ids = scopeIds.value ?: return
+        confirmation.value = QqTrashConfirmation(scope.value, ids, counts = null)
+        refreshCounts()
     }
 
-    fun updateShared(include: Boolean) {
+    /** 调整清理选项（内容、共用、关联版本）后重新统计 */
+    fun updateScopeTrash(transform: (QqTrashConfirmation) -> QqTrashConfirmation) {
+        val current = confirmation.value ?: return
+        confirmation.value = transform(current).copy(counts = null)
+        refreshCounts()
+    }
+
+    private fun refreshCounts() {
         val request = confirmation.value ?: return
-        val next = request.copy(counts = null, includeShared = include)
         val generation = ++countsGeneration
-        confirmation.value = next
         viewModelScope.launch {
-            val counts = dao.counts(next.scope.groupKey, next.scope.senderKey, include)
-            val ids = dao.scopeIds(next.scope.groupKey,next.scope.senderKey)
+            val counts = if (request.contents.isEmpty()) {
+                QqSourceCounts(0, 0, 0, 0, 0, 0)
+            } else {
+                dao.queryCounts(QqScopeSql.counts(request.ids, request.contents, request.includeShared))
+            }
             // 世代号拒绝过期查询；值相等判断弹窗是否仍对应同一请求
-            if (generation == countsGeneration && confirmation.value == next) confirmation.value = next.copy(counts = counts,ids=ids)
+            if (generation == countsGeneration && confirmation.value == request) confirmation.value = request.copy(counts = counts)
         }
     }
 
@@ -269,11 +314,11 @@ class QqSourceBrowseViewModel(
         confirmation.value = null
     }
 
-    fun confirmScopeTrash(options: PictureDeleteOptions = PictureDeleteOptions()) {
+    fun confirmScopeTrash() {
         val request = confirmation.value ?: return
         if (request.counts == null) return
         confirmation.value = null
-        repository.trash(request.scope, options.includeShared,options.linkedVersions)
+        repository.trash(request.scope, request.includeShared, request.linkedVersions, request.contents)
     }
 
     fun acknowledgeRepositoryMessage() = repository.acknowledgeMessage()

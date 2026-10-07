@@ -41,6 +41,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.xjw.qalbum.data.db.dao.QqContent
 import com.xjw.qalbum.data.db.dao.QqSourceFacet
 import com.xjw.qalbum.domain.model.SourceSort
 import com.xjw.qalbum.ui.common.formatBytes
@@ -112,8 +113,22 @@ internal fun ShareBar(fraction: Float, modifier: Modifier = Modifier, color: Col
     }
 }
 
+/** 分类在某类内容下的数量与占用：null = 图片与缩略图合计 */
+internal fun QqSourceFacet.countOf(content: QqContent?): Int = when (content) {
+    QqContent.IMAGES -> count
+    QqContent.THUMBNAILS -> thumbCount
+    null -> totalCount
+}
+
+internal fun QqSourceFacet.bytesOf(content: QqContent?): Long = when (content) {
+    QqContent.IMAGES -> bytes
+    QqContent.THUMBNAILS -> thumbBytes
+    null -> totalBytes
+}
+
 /**
- * 分类行：头像 + 名称 + 「N 张 · 最近」+ 占用比例条，尾部是占用空间。
+ * 分类行：头像 + 名称 + 「N 张 · 缩略图 M · 最近」+ 占用比例条，尾部是占用空间。
+ * [content] 为 null 时显示图片与缩略图合计（来源首页），否则只看当前浏览的内容。
  */
 @Composable
 internal fun SourceFacetRow(
@@ -125,6 +140,7 @@ internal fun SourceFacetRow(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     selected: Boolean = false,
+    content: QqContent? = null,
 ) {
     val name = facetDisplayName(facet, kind)
     SegmentedListItem(
@@ -132,7 +148,7 @@ internal fun SourceFacetRow(
         modifier = modifier,
         selected = selected,
         onClick = onClick,
-        leading = { SourceAvatar(name, facet.key, group = kind != SourceKind.SENDER && facet.chatType in 2..3) },
+        leading = { SourceAvatar(name, facet.key, group = kind != SourceKind.SENDER && facet.chatType == 2) },
         headline = {
             Text(name, maxLines = 1, overflow = TextOverflow.Ellipsis)
         },
@@ -140,19 +156,25 @@ internal fun SourceFacetRow(
             Column {
                 val parts = buildList {
                     if (facet.alias.isNotBlank()) add(facet.alias)
-                    if (facet.chatType == 3) add("按转发者归类")
-                    add("${formatCountExact(facet.count)} 张")
+                    when (content) {
+                        null -> {
+                            if (facet.count > 0 || facet.thumbCount == 0) add("${formatCountExact(facet.count)} 张")
+                            if (facet.thumbCount > 0) add("缩略图 ${formatCountExact(facet.thumbCount)}")
+                        }
+                        QqContent.IMAGES -> add("${formatCountExact(facet.count)} 张")
+                        QqContent.THUMBNAILS -> add("缩略图 ${formatCountExact(facet.thumbCount)}")
+                    }
                     if (facet.latestTime > 0) add("最近 ${formatRelativeDay(facet.latestTime)}")
                     if (showAccount) add(facet.accountName)
                 }
                 Text(parts.joinToString(" · "), maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Spacer(Modifier.height(6.dp))
-                ShareBar(if (maxBytes > 0) facet.bytes.toFloat() / maxBytes else 0f)
+                ShareBar(if (maxBytes > 0) facet.bytesOf(content).toFloat() / maxBytes else 0f)
             }
         },
         trailing = {
             Text(
-                formatBytes(facet.bytes),
+                formatBytes(facet.bytesOf(content)),
                 style = MaterialTheme.typography.labelLargeEmphasized,
                 color = if (selected) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.primary,
             )

@@ -46,6 +46,8 @@ internal class QqSourceImporter(private val db: AppDatabase) {
         val conversationNames = mutableMapOf<String, String>()
         val senderNames = mutableMapOf<String, String>()
         db.withTransaction {
+            // 新来源批量写入期间暂停统计触发器，导入完成后由仓库整体重建
+            dao.markDirty()
             val displayName = names.person(account.uid, "").displayName.ifBlank { "QQ 账号 $accountNumber" }
             dao.putAccount(QqSourceAccountEntity(account.key, displayName, System.currentTimeMillis(), 0))
             val origins = mutableListOf<QqOriginEntity>()

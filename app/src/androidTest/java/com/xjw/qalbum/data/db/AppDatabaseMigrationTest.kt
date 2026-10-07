@@ -25,8 +25,42 @@ class AppDatabaseMigrationTest {
 
     @Test
     fun migrationEdgesCoverEveryPublishedVersion() {
-        assertEquals((1..15).toList(), allMigrations.map { it.startVersion })
-        assertEquals((2..16).toList(), allMigrations.map { it.endVersion })
+        assertEquals((1..16).toList(), allMigrations.map { it.startVersion })
+        assertEquals((2..17).toList(), allMigrations.map { it.endVersion })
+    }
+
+    @Test
+    fun migrate16To17_rebuildsSourceStatsTablesAndPausesTriggersUntilRebuilt() {
+        val name = "migration-16-17"
+        helper.createDatabase(name, 16).use { db ->
+            insertImage(db, 1, "/chatpic/chatimg/linked", "active", 0, null, 1000)
+            db.execSQL("INSERT INTO qq_source_accounts VALUES('a','账号',1,1)")
+            db.execSQL("INSERT INTO qq_origins VALUES('o','a','g','群名',2,'s','昵称','群名片',1000,'md5')")
+            db.execSQL("INSERT INTO qq_origin_paths VALUES('/chatpic/chatimg/linked','o')")
+            db.execSQL("INSERT INTO image_qq_origins VALUES(1,'o')")
+            db.execSQL("INSERT INTO qq_source_facets(kind,`key`,name,search_text,account_key,image_count,chat_type,total_bytes,latest_time) VALUES(0,'g','群名','群名','a',1,2,100,1000)")
+            db.execSQL("INSERT INTO qq_source_cache(id,dirty,linked_count,linked_bytes) VALUES(1,0,1,100)")
+            // v16 的整体重建触发器（迁移需要把它们换掉）
+            AppDatabase.createQqSourceCacheTriggers(db)
+            AppDatabase.createQqSourceSizeTrigger(db)
+        }
+        helper.runMigrationsAndValidate(name, 17, true, AppDatabase.MIGRATION_16_17).use { db ->
+            // 来源本身原样保留；统计是缓存，清空后标脏等待分段重建
+            assertEquals(1L, scalarLong(db, "SELECT COUNT(*) FROM qq_origins"))
+            assertEquals(1L, scalarLong(db, "SELECT COUNT(*) FROM image_qq_origins"))
+            assertEquals(0L, scalarLong(db, "SELECT COUNT(*) FROM qq_source_facets"))
+            assertEquals(1L, scalarLong(db, "SELECT dirty FROM qq_source_cache WHERE id=1"))
+            QqSourceStatsSql.legacyTriggers.forEach { trigger ->
+                assertEquals(0L, scalarLong(db, "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='$trigger'"))
+            }
+            listOf("qq_stats_image_update", "qq_stats_image_insert", "qq_stats_image_path", "qq_stats_image_delete").forEach { trigger ->
+                assertEquals(1L, scalarLong(db, "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='$trigger'"))
+            }
+            // 标脏期间触发器不做增量：删图不改统计，也不再触发整体重建
+            db.execSQL("UPDATE images SET status='quarantine_pending' WHERE id=1")
+            assertEquals(0L, scalarLong(db, "SELECT image_count FROM qq_source_cache WHERE id=1"))
+            assertEquals(1L, scalarLong(db, "SELECT dirty FROM qq_source_cache WHERE id=1"))
+        }
     }
 
     @Test
@@ -290,6 +324,7 @@ class AppDatabaseMigrationTest {
             AppDatabase.MIGRATION_13_14,
             AppDatabase.MIGRATION_14_15,
             AppDatabase.MIGRATION_15_16,
+            AppDatabase.MIGRATION_16_17,
         )
 
         private const val TEST_DB_V1 = "migration-1-11"

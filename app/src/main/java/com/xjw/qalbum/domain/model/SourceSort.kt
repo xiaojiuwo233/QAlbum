@@ -18,7 +18,7 @@ enum class SourceSort(val label: String, val byDate: Boolean, val descending: Bo
 /** QQ 来源分类（群聊 / 私聊 / 发送人）列表的排序 */
 enum class SourceFacetOrder(val label: String) {
     BYTES("占用空间"),
-    COUNT("图片数量"),
+    COUNT("数量"),
     RECENT("最近活跃"),
     NAME("名称");
 

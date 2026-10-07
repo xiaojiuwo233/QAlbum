@@ -40,6 +40,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
+import com.xjw.qalbum.ui.common.formatCountExact
 
 /**
  * 多选态顶栏：关闭 + 「已选 N 张」（数字变化时上下滚动）+ 副标题 + 操作。
@@ -68,7 +69,7 @@ fun SelectionTopBar(
                         (slideOutVertically { if (up) -it else it } + fadeOut())
                 },
                 label = "selectionCount",
-            ) { value -> Text("已选 $value $unit") }
+            ) { value -> Text("已选 ${formatCountExact(value)} $unit") }
         },
         subtitle = { if (subtitle != null) Text(subtitle) },
         navigationIcon = {

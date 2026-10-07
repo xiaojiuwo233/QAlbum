@@ -14,11 +14,11 @@ object FileClassifier {
         val newFiles: List<FileInfo>,
         /** size/mtime 变了 → 重新识别 + update（updateFromScanByPath 会重置分析状态） */
         val changedFiles: List<FileInfo>,
-        /** 文件以相同 size/mtime 重新出现且行是 missing → 仅恢复 active */
+        /** 文件以相同 size/mtime 重新出现且行是 missing → 仅恢复（缩略图恢复为 thumbnail_trash，其余为 active） */
         val reviveIds: List<Long>,
         /** 旧版 deleted/quarantined 行仍占真实 path：事务内先迁走该 path，再把当前文件作为新增插入。 */
         val retireTerminalIds: List<Long>,
-        /** 行是 active 但磁盘上已不存在 → 标记 missing */
+        /** 行是 active（含 QQ 缩略图 thumbnail_trash）但磁盘上已不存在 → 标记 missing */
         val missingIds: List<Long>,
         /** 未变化的 (文件, 行) 配对 —— 深度校验时用来复核 mime */
         val unchangedPairs: List<Pair<FileInfo, ScanRow>>,
@@ -65,10 +65,10 @@ object FileClassifier {
             }
         }
 
-        // 行存在但文件没了 → missing。只动 active：
-        // deleted/quarantined 是用户操作结果；thumbnail_trash 由回收站流程自管。
+        // 行存在但文件没了 → missing。只动 active 与 QQ 缩略图（被 QQ 自己清掉后不应继续计入来源统计）；
+        // deleted/quarantined 是用户操作结果，pending 状态由文件操作日志处理。
         val missingIds = dbRows.asSequence()
-            .filter { it.status == STATUS_ACTIVE && it.path !in seenPaths }
+            .filter { (it.status == STATUS_ACTIVE || it.status == STATUS_THUMBNAIL) && it.path !in seenPaths }
             .map { it.id }
             .toList()
 
@@ -84,6 +84,7 @@ object FileClassifier {
     }
 
     private const val STATUS_ACTIVE = "active"
+    private const val STATUS_THUMBNAIL = "thumbnail_trash"
     private const val STATUS_MISSING = "missing"
     private const val STATUS_DELETED = "deleted"
     private const val STATUS_QUARANTINED = "quarantined"

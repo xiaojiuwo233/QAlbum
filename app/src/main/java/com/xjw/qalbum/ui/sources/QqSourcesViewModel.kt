@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.xjw.qalbum.data.db.dao.QqFacetKindCount
 import com.xjw.qalbum.data.db.dao.QqSourceFacet
 import com.xjw.qalbum.data.db.dao.QqSourceSummary
+import com.xjw.qalbum.data.db.entity.QqSourceAccountEntity
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.domain.model.SourceFacetOrder
 import com.xjw.qalbum.qq.QqSourceRepository
@@ -64,8 +65,9 @@ class QqSourcesViewModel(
     val summary: StateFlow<QqSourceSummary?> = repository.dao.observeSummary()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
-    val accounts = repository.dao.observeAccounts()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    /** null = 仍在读取（不能当成「还没有导入」显示） */
+    val accounts: StateFlow<List<QqSourceAccountEntity>?> = repository.dao.observeAccounts()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     /** 每个页签的分类数（页签标签上显示） */
     val tabCounts: StateFlow<Map<SourceTab, Int>> = repository.dao.observeFacetKindCounts()

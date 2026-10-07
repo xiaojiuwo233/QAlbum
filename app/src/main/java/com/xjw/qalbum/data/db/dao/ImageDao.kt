@@ -160,15 +160,15 @@ interface ImageDao {
      * `last_seen < :scanStart` 守卫：回收站恢复会在成功事务内 touchLastSeen（恢复时刻），
      * 进行中的扫描批次拿的是恢复前的文件快照，不得把刚恢复的行覆盖成 missing。
      */
-    @Query("UPDATE images SET status = 'missing' WHERE id IN (:ids) AND status = 'active' AND last_seen < :scanStart")
+    @Query("UPDATE images SET status = 'missing' WHERE id IN (:ids) AND status IN ('active', 'thumbnail_trash') AND last_seen < :scanStart")
     suspend fun markMissingByIds(ids: List<Long>, scanStart: Long)
 
     /** 整个三字符目录消失时按 path 范围批量标记 missing（last_seen 守卫同 [markMissingByIds]） */
-    @Query("UPDATE images SET status = 'missing' WHERE path >= :low AND path < :high AND status = 'active' AND last_seen < :scanStart")
+    @Query("UPDATE images SET status = 'missing' WHERE path >= :low AND path < :high AND status IN ('active', 'thumbnail_trash') AND last_seen < :scanStart")
     suspend fun markMissingInPathRange(low: String, high: String, scanStart: Long)
 
-    /** 文件以相同 size/mtime 重新出现：仅恢复 missing → active，不重置分析状态 */
-    @Query("UPDATE images SET status = 'active' WHERE id IN (:ids) AND status = 'missing'")
+    /** 文件以相同 size/mtime 重新出现：仅恢复 missing（缩略图回到 thumbnail_trash，其余 active），不重置分析状态 */
+    @Query("UPDATE images SET status = CASE WHEN source_type = 'chatthumb' THEN 'thumbnail_trash' ELSE 'active' END WHERE id IN (:ids) AND status = 'missing'")
     suspend fun reviveByIds(ids: List<Long>)
 
     /** 深度校验：仅修正 mime / 动图标记，不动分析状态 */
@@ -307,6 +307,21 @@ interface ImageDao {
         WHERE source_type = 'chatthumb' AND status = 'thumbnail_trash'
     """)
     suspend fun countThumbnailTrash(): Int
+
+    /** QQ 缩略图按日期分组的数量（缩略图页的日期标题） */
+    @Query("""
+        SELECT date_bucket AS bucketKey, COUNT(*) AS count FROM images
+        WHERE source_type = 'chatthumb' AND status = 'thumbnail_trash'
+        GROUP BY date_bucket
+    """)
+    fun observeThumbnailBuckets(): Flow<List<BucketCountRow>>
+
+    /** 修改时间早于 [before] 的 QQ 缩略图（缩略图页「全选 / 选择 N 天前」） */
+    @Query("""
+        SELECT id FROM images
+        WHERE source_type = 'chatthumb' AND status = 'thumbnail_trash' AND mtime < :before
+    """)
+    suspend fun thumbnailIdsBefore(before: Long): List<Long>
 
     /**
      * 缩略图回收站分页拉取（keyset 分页，id 升序游标）：一键清理时逐页取，每页 ≤ [limit] 行，

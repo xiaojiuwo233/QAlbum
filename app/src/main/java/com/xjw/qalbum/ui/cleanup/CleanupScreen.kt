@@ -34,7 +34,7 @@ import androidx.compose.material.icons.outlined.CleaningServices
 import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material.icons.outlined.Inventory2
 import androidx.compose.material.icons.outlined.RateReview
-import androidx.compose.material.icons.outlined.Shield
+import androidx.compose.material.icons.outlined.PhotoSizeSelectSmall
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -79,6 +79,7 @@ import com.xjw.qalbum.ui.anim.sharedAxisXPopEnter
 import com.xjw.qalbum.ui.anim.sharedAxisXPopExit
 import com.xjw.qalbum.ui.common.formatBytes
 import com.xjw.qalbum.ui.common.formatCount
+import com.xjw.qalbum.ui.common.formatCountExact
 import com.xjw.qalbum.ui.common.formatDateTime
 import com.xjw.qalbum.ui.components.SegmentPosition
 import com.xjw.qalbum.ui.components.SegmentedGroup
@@ -518,7 +519,7 @@ private fun ReviewSummaryCard(
     }
 }
 
-/** QQ 缩略图（chatthumb）入口：只浏览、受保护 */
+/** QQ 缩略图（chatthumb）入口：按时间浏览与批量清理 */
 @Composable
 internal fun ThumbnailEntryItem(
     position: SegmentPosition,
@@ -528,9 +529,9 @@ internal fun ThumbnailEntryItem(
 ) {
     SegmentedNavigationItem(
         position = position,
-        icon = Icons.Outlined.Shield,
-        title = "QQ 缩略图（受保护）",
-        subtitle = "$count 项 · ${formatBytes(bytes)}，QQ 聊天里的图片预览靠它显示，只可浏览",
+        icon = Icons.Outlined.PhotoSizeSelectSmall,
+        title = "QQ 缩略图",
+        subtitle = "${formatCountExact(count)} 项 · ${formatBytes(bytes)}，聊天预览缓存，可按时间批量清理",
         onClick = onOpen,
         iconContainerColor = MaterialTheme.colorScheme.secondaryContainer,
         iconContentColor = MaterialTheme.colorScheme.onSecondaryContainer,

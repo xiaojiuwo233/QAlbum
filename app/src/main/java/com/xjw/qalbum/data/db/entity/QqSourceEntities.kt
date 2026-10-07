@@ -65,29 +65,72 @@ data class ImageQqOriginEntity(
     @ColumnInfo(name = "origin_id") val originId: String,
 )
 
-@Entity(tableName = "qq_source_facets", primaryKeys = ["kind", "key"],
-    foreignKeys = [ForeignKey(entity = QqSourceAccountEntity::class,
-        parentColumns = ["account_key"], childColumns = ["account_key"], onDelete = ForeignKey.CASCADE)],
-    indices = [Index("account_key")])
+/**
+ * 来源分类：会话（群聊 / 私聊 / 转发记录，见 [chatType]）或发送人。
+ *
+ * [id] 供 [QqImageContextEntity] 引用；名称、成员名片在导入后整体重建，图片数 / 占用空间由
+ * images 上的触发器随状态变化增量维护（缓存未标脏时），删图不再触发全量重建。
+ */
+@Entity(
+    tableName = "qq_source_facets",
+    foreignKeys = [ForeignKey(
+        entity = QqSourceAccountEntity::class,
+        parentColumns = ["account_key"], childColumns = ["account_key"], onDelete = ForeignKey.CASCADE,
+    )],
+    indices = [Index(value = ["kind", "key"], unique = true), Index("account_key")],
+)
 data class QqSourceFacetCacheEntity(
-    // 0 = 会话（群聊 / 私聊，见 chat_type），1 = 发送人
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    // 0 = 会话，1 = 发送人
     val kind: Int,
     val key: String,
     val name: String,
     @ColumnInfo(name = "search_text") val searchText: String,
     @ColumnInfo(name = "account_key") val accountKey: String,
-    @ColumnInfo(name = "image_count") val imageCount: Int,
     // 会话：1 私聊 / 2 群聊 / 3 转发的聊天记录；发送人恒为 0
-    @ColumnInfo(name = "chat_type", defaultValue = "0") val chatType: Int = 0,
-    // 去重后图片的字节总和（一张图被同一分类多条消息引用只算一次）
-    @ColumnInfo(name = "total_bytes", defaultValue = "0") val totalBytes: Long = 0,
-    @ColumnInfo(name = "latest_time", defaultValue = "0") val latestTime: Long = 0,
+    @ColumnInfo(name = "chat_type") val chatType: Int = 0,
+    // 图片（chatimg / chatraw 等，status = active）与 QQ 缩略图（chatthumb）分开统计，各自按图片去重
+    @ColumnInfo(name = "image_count") val imageCount: Int = 0,
+    @ColumnInfo(name = "image_bytes") val imageBytes: Long = 0,
+    @ColumnInfo(name = "thumb_count") val thumbCount: Int = 0,
+    @ColumnInfo(name = "thumb_bytes") val thumbBytes: Long = 0,
+    @ColumnInfo(name = "latest_time") val latestTime: Long = 0,
 )
 
+/**
+ * 图片与（会话, 发送人）的去重关联：image_qq_origins × qq_origins 的紧凑投影。
+ * 一张热门图片可能被上千条消息引用，这里每个（会话, 发送人）只留一行；浏览、筛选与统计都走它。
+ */
+@Entity(
+    tableName = "qq_image_contexts",
+    primaryKeys = ["image_id", "conversation_id", "sender_id"],
+    indices = [
+        Index(value = ["conversation_id", "sender_id", "image_id"]),
+        Index(value = ["sender_id", "conversation_id", "image_id"]),
+    ],
+)
+data class QqImageContextEntity(
+    @ColumnInfo(name = "image_id") val imageId: Long,
+    @ColumnInfo(name = "conversation_id") val conversationId: Long,
+    @ColumnInfo(name = "sender_id") val senderId: Long,
+)
+
+/** 成员在某个会话里的群名片（取自消息记录），成员筛选用 */
+@Entity(tableName = "qq_source_members", primaryKeys = ["conversation_id", "sender_id"])
+data class QqSourceMemberEntity(
+    @ColumnInfo(name = "conversation_id") val conversationId: Long,
+    @ColumnInfo(name = "sender_id") val senderId: Long,
+    val card: String,
+    @ColumnInfo(name = "latest_time") val latestTime: Long,
+)
+
+/** 全部已关联图片的汇总；[dirty] 为真时触发器暂停增量维护，等待整体重建 */
 @Entity(tableName = "qq_source_cache")
 data class QqSourceCacheEntity(
     @PrimaryKey val id: Int = 1,
     val dirty: Boolean = true,
-    @ColumnInfo(name = "linked_count") val linkedCount: Int = 0,
-    @ColumnInfo(name = "linked_bytes", defaultValue = "0") val linkedBytes: Long = 0,
+    @ColumnInfo(name = "image_count") val imageCount: Int = 0,
+    @ColumnInfo(name = "image_bytes") val imageBytes: Long = 0,
+    @ColumnInfo(name = "thumb_count") val thumbCount: Int = 0,
+    @ColumnInfo(name = "thumb_bytes") val thumbBytes: Long = 0,
 )

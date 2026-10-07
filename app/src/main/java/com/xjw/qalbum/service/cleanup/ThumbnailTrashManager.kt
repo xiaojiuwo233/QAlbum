@@ -7,7 +7,7 @@ import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import kotlinx.coroutines.flow.Flow
 
-/** 沿用历史索引名称，实际仅浏览受保护的 QQ 预览缓存。 */
+/** 沿用历史索引名称（thumbnail_trash），实际是 QQ 聊天预览缓存 chatthumb。 */
 class ThumbnailTrashManager(private val imageDao: ImageDao) {
     fun observeSummary(): Flow<ImageDao.ThumbnailTrashSummary> = imageDao.observeThumbnailTrashSummary()
     fun pagingItems(): Flow<PagingData<ImageEntity>> = Pager(

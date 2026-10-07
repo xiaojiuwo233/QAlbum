@@ -43,7 +43,7 @@ import androidx.compose.material.icons.outlined.HealthAndSafety
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Inventory2
 import androidx.compose.material.icons.outlined.RocketLaunch
-import androidx.compose.material.icons.outlined.Shield
+import androidx.compose.material.icons.outlined.PhotoSizeSelectSmall
 import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material.icons.outlined.TravelExplore
 import androidx.compose.material3.Button
@@ -320,9 +320,9 @@ private fun MetricsGrid(state: DashboardUiState) {
         }
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             MetricCard(
-                icon = Icons.Outlined.Shield,
+                icon = Icons.Outlined.PhotoSizeSelectSmall,
                 value = formatCount(state.thumbnailTrashCount),
-                label = "QQ 缩略图 · 受保护",
+                label = "QQ 缩略图",
                 subtitle = if (state.thumbnailTrashBytes > 0) formatBytes(state.thumbnailTrashBytes) else null,
                 containerColor = MaterialTheme.colorScheme.secondaryContainer,
                 contentColor = MaterialTheme.colorScheme.onSecondaryContainer,

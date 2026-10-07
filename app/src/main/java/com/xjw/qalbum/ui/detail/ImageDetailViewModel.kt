@@ -240,8 +240,8 @@ class ImageDetailViewModel(
     }
 
     /**
-     * 删除 / 移入回收站成功后：基于**最新** state 把该图从窗口移除。删的是当前图则跳上一张
-     * （删的是首张则停在新的首张）；删的不是当前图（挂起期间用户已滑走）则只平移下标、
+     * 删除 / 移入回收站成功后：基于**最新** state 把该图从窗口移除。删的是当前图则停在原位置，
+     * 即显示下一张（删的是末张才退到上一张）；删的不是当前图（挂起期间用户已滑走）则只平移下标、
      * 不打断浏览。若已无图可显示，回调 [onExhausted]（由 UI 返回图库）。
      */
     private suspend fun advanceAfterRemoval(
@@ -260,7 +260,7 @@ class ImageDetailViewModel(
             return
         }
         val newIndex = when {
-            ready.currentIndex == removedIndex -> (removedIndex - 1).coerceIn(0, newIds.size - 1)
+            ready.currentIndex == removedIndex -> removedIndex.coerceAtMost(newIds.size - 1)
             ready.currentIndex > removedIndex -> ready.currentIndex - 1
             else -> ready.currentIndex
         }

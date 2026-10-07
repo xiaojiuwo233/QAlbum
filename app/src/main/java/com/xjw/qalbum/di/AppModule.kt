@@ -256,6 +256,16 @@ val appModule = module {
         )
     }
     viewModel { LogViewModel() }
+    viewModel {
+        com.xjw.qalbum.ui.cleanup.ThumbnailCacheViewModel(
+            imageDao = get(),
+            images = get(),
+            imageFiles = get(),
+            quarantine = get(),
+            settings = get(),
+            appScope = get(),
+        )
+    }
     viewModel { QqSourcesViewModel(repository = get(), settings = get()) }
     viewModel { params ->
         com.xjw.qalbum.ui.sources.QqSourceBrowseViewModel(

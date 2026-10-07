@@ -10,6 +10,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -35,6 +36,8 @@ import com.xjw.qalbum.ui.common.formatBytes
  * 删除图片的确认：默认「移入回收站」（可恢复），次选「永久删除」（错误色，[onPermanent] 为 null 时不提供）。
  *
  * [sizeOf] 异步统计所选图片的总大小，算出前显示「计算中…」。[note] 用于补充来源相关的提醒。
+ * 传入 [imageIds] 时提供「关联版本 / 共用图片」选项，初值为 [initialOptions]；所选不超过
+ * [DETAILED_PREVIEW_LIMIT] 张时逐个核对关联文件并列出，更多时只显示数量与大小，核对放到实际执行时。
  */
 @Composable
 fun DeleteImagesDialog(
@@ -49,15 +52,22 @@ fun DeleteImagesDialog(
     onPermanentOptions: ((PictureDeleteOptions) -> Unit)? = null,
     sourceScope: QqSourceScope? = null,
     previewOf: (suspend (PictureDeleteOptions) -> PictureDeletePreview)? = null,
+    initialOptions: PictureDeleteOptions = PictureDeleteOptions(),
 ) {
     val bytes by produceState(initialValue = -1L, count) { value = sizeOf?.invoke() ?: -1L }
-    var options by remember(imageIds) { mutableStateOf(PictureDeleteOptions()) }
+    var options by remember(imageIds) { mutableStateOf(initialOptions) }
+    val detailed = imageIds != null && imageIds.size <= DETAILED_PREVIEW_LIMIT
     val manager = if(imageIds!=null && previewOf==null)koinInject<QuarantineManager>() else null
     val plan by produceState<PictureDeletePreview?>(null,imageIds,options,sourceScope) {
         value=null
-        if(imageIds!=null)value=previewOf?.invoke(options)?:manager!!.previewDeletion(imageIds,options,sourceScope)
+        if(detailed)value=previewOf?.invoke(options)?:manager!!.previewDeletion(imageIds!!,options,sourceScope)
     }
-    val ready=imageIds==null || (plan?.error==null && (plan?.removablePictures?:0)>0)
+    // 大量选择不逐个核对，但仍要先确认文件访问可用，否则执行时会整批跳过
+    val access by produceState<AccessCheck>(AccessCheck.Checking, imageIds) {
+        value = if (imageIds == null || detailed || manager == null) AccessCheck.Ready
+            else manager.fileAccessError()?.let { AccessCheck.Failed(it) } ?: AccessCheck.Ready
+    }
+    val ready = if (detailed) plan?.error==null && (plan?.removablePictures?:0)>0 else access == AccessCheck.Ready
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = { Icon(Icons.Outlined.Delete, contentDescription = null) },
@@ -82,6 +92,8 @@ fun DeleteImagesDialog(
                     }
                     val current=plan
                     Text(when {
+                        !detailed -> (access as? AccessCheck.Failed)?.message
+                            ?: if (bytes >= 0) "已选 $count 张 · ${formatBytes(bytes)}，执行时逐组核对关联文件" else "已选 $count 张"
                         current==null -> "正在核对关联文件…"
                         current.error!=null -> current.error
                         else -> "${current.pictures} 张图片 · ${current.files} 个文件 · ${formatBytes(current.bytes)}"
@@ -111,10 +123,24 @@ fun DeleteImagesDialog(
         dismissButton = {
             Row {
                 if (onPermanent != null) {
-                    TextButton(onClick = { onPermanentOptions?.invoke(options)?:onPermanent() },enabled=ready) { Text("永久删除", color = MaterialTheme.colorScheme.error) }
+                    TextButton(
+                        onClick = { onPermanentOptions?.invoke(options)?:onPermanent() },
+                        enabled = ready,
+                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                    ) { Text("永久删除") }
                 }
                 TextButton(onClick = onDismiss) { Text("取消") }
             }
         },
     )
+}
+
+/** 超过这个数量不再逐个预先核对关联文件（大量选择时核对本身要很久） */
+private const val DETAILED_PREVIEW_LIMIT = 300
+
+/** 大量选择时的文件访问检查结果 */
+private sealed interface AccessCheck {
+    data object Checking : AccessCheck
+    data object Ready : AccessCheck
+    data class Failed(val message: String) : AccessCheck
 }

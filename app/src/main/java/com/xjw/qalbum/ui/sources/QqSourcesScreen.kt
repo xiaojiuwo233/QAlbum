@@ -64,6 +64,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -86,6 +87,7 @@ import com.xjw.qalbum.ui.components.SegmentPosition
 import com.xjw.qalbum.ui.components.SegmentedDefaults
 import com.xjw.qalbum.ui.components.ShapeIcon
 import com.xjw.qalbum.ui.components.WavyProgress
+import kotlinx.coroutines.launch
 import org.koin.androidx.compose.koinViewModel
 
 /**
@@ -110,6 +112,7 @@ fun QqSourcesScreen(
     val report by viewModel.report.collectAsState()
     val sourcesComplete by viewModel.sourcesComplete.collectAsState(initial = true)
     val snackbar = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
     var menuOpen by remember { mutableStateOf(false) }
     var clearConfirm by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
@@ -118,7 +121,8 @@ fun QqSourcesScreen(
     LaunchedEffect(message) {
         val text = message ?: return@LaunchedEffect
         viewModel.acknowledgeMessage()
-        snackbar.showSnackbar(text)
+        // 在页面作用域里显示：清空消息会重启本副作用，直接 show 会被立刻取消
+        scope.launch { snackbar.showSnackbar(text) }
     }
 
     Scaffold(
@@ -141,7 +145,7 @@ fun QqSourcesScreen(
                         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                             DropdownMenuItem(
                                 text = { Text("清除来源索引") },
-                                enabled = progress == null && accounts.isNotEmpty(),
+                                enabled = progress == null && !accounts.isNullOrEmpty(),
                                 onClick = { menuOpen = false; clearConfirm = true },
                             )
                         }
@@ -178,7 +182,7 @@ fun QqSourcesScreen(
                     modifier = Modifier.animateItem().padding(bottom = 12.dp),
                 )
             }
-            if (accounts.isNotEmpty()) {
+            if (!accounts.isNullOrEmpty()) {
                 item(key = "controls", contentType = "controls") {
                     FacetControls(
                         tab = tab,
@@ -202,11 +206,12 @@ fun QqSourcesScreen(
                         EmptyFacets(
                             searching = search.isNotBlank(),
                             tab = tab,
+                            organizing = summary?.dirty != false,
                             modifier = Modifier.animateItem(),
                         )
                     }
                     else -> {
-                        val maxBytes = list.maxOf { it.bytes }
+                        val maxBytes = list.maxOf { it.totalBytes }
                         val kind = if (tab == SourceTab.SENDERS) SourceKind.SENDER else SourceKind.CONVERSATION
                         itemsIndexed(list, key = { _, facet -> "${tab.name}-${facet.key}" }) { index, facet ->
                             SourceFacetRow(
@@ -214,7 +219,7 @@ fun QqSourcesScreen(
                                 kind = kind,
                                 position = SegmentPosition(index, list.size),
                                 maxBytes = maxBytes,
-                                showAccount = accounts.size > 1,
+                                showAccount = (accounts?.size ?: 0) > 1,
                                 onClick = { onBrowse(SourceBrowseTarget(kind, facet.key)) },
                                 modifier = Modifier.animateItem(),
                             )
@@ -241,7 +246,7 @@ fun QqSourcesScreen(
 private fun StatusCard(
     progress: QqSourceProgress?,
     summary: QqSourceSummary?,
-    accounts: List<QqSourceAccountEntity>,
+    accounts: List<QqSourceAccountEntity>?,
     report: String?,
     complete: Boolean,
     onRefresh: () -> Unit,
@@ -251,6 +256,7 @@ private fun StatusCard(
 ) {
     val state = when {
         progress != null -> 0
+        accounts == null -> 3
         accounts.isEmpty() -> 1
         else -> 2
     }
@@ -265,7 +271,10 @@ private fun StatusCard(
         when (current) {
             0 -> progress?.let { RunningCard(it, onCancel) } ?: Spacer(Modifier.height(1.dp))
             1 -> IntroCard(onRefresh)
-            else -> SummaryCard(summary, accounts, report, complete, onBrowseAll)
+            3 -> Box(Modifier.fillMaxWidth().height(160.dp), contentAlignment = Alignment.Center) {
+                androidx.compose.material3.LoadingIndicator()
+            }
+            else -> SummaryCard(summary, accounts.orEmpty(), report, complete, onBrowseAll)
         }
     }
 }
@@ -322,7 +331,8 @@ private fun RunningCard(progress: QqSourceProgress, onCancel: () -> Unit) {
                 fraction = if (progress.total > 0) progress.done.toFloat() / progress.total else null,
             )
             Text(
-                "可以离开本页，读取会在后台继续。",
+                if (progress.label == "整理来源统计") "首次使用或读取新来源后需要整理一次，之后删除图片会即时更新统计。"
+                else "可以离开本页，任务会在后台继续。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f),
             )
@@ -344,17 +354,23 @@ private fun SummaryCard(
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("已关联图片", style = MaterialTheme.typography.labelLarge)
+            Text("聊天来源占用", style = MaterialTheme.typography.labelLarge)
             Row(verticalAlignment = Alignment.Bottom) {
                 Text(
-                    summary?.let { formatBytes(it.linkedBytes) } ?: "…",
+                    summary?.let { formatBytes(it.imageBytes + it.thumbBytes) } ?: "…",
                     style = MaterialTheme.typography.displaySmallEmphasized,
                 )
                 Spacer(Modifier.width(10.dp))
                 Text(
-                    summary?.let { "${formatCountExact(it.linkedCount)} 张" } ?: "",
+                    summary?.let { "${formatCountExact(it.imageCount)} 张" } ?: "",
                     style = MaterialTheme.typography.titleMedium,
                     modifier = Modifier.padding(bottom = 6.dp),
+                )
+            }
+            summary?.takeIf { it.thumbCount > 0 }?.let {
+                Text(
+                    "图片 ${formatBytes(it.imageBytes)} · QQ 缩略图 ${formatCountExact(it.thumbCount)} 张 ${formatBytes(it.thumbBytes)}",
+                    style = MaterialTheme.typography.bodyMedium,
                 )
             }
             val updated = accounts.maxOfOrNull { it.importedAt } ?: 0L
@@ -369,7 +385,7 @@ private fun SummaryCard(
                 exit = shrinkVertically() + fadeOut(),
             ) {
                 Text(
-                    "统计更新中…",
+                    "统计待整理，数字可能不是最新",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f),
                 )
@@ -494,7 +510,7 @@ private fun OrderMenu(order: SourceFacetOrder, onOrder: (SourceFacetOrder) -> Un
 }
 
 @Composable
-private fun EmptyFacets(searching: Boolean, tab: SourceTab, modifier: Modifier = Modifier) {
+private fun EmptyFacets(searching: Boolean, tab: SourceTab, organizing: Boolean, modifier: Modifier = Modifier) {
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -509,11 +525,15 @@ private fun EmptyFacets(searching: Boolean, tab: SourceTab, modifier: Modifier =
             modifier = Modifier.size(40.dp),
         )
         Text(
-            if (searching) "没有匹配的${tab.label}" else "没有已关联图片的${tab.label}",
+            when {
+                searching -> "没有匹配的${tab.label}"
+                organizing -> "来源统计整理中，完成后显示"
+                else -> "没有已关联图片的${tab.label}"
+            },
             style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        if (!searching) {
+        if (!searching && !organizing) {
             Text(
                 "QQ 有新消息后，点右上角的刷新重新读取",
                 style = MaterialTheme.typography.bodySmall,

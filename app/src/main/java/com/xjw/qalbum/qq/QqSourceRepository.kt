@@ -4,6 +4,10 @@ import android.content.Context
 import android.database.sqlite.SQLiteDatabaseCorruptException
 import androidx.room.withTransaction
 import com.xjw.qalbum.data.db.AppDatabase
+import com.xjw.qalbum.data.db.QqSourceStatsSql
+import com.xjw.qalbum.data.db.dao.QqContent
+import com.xjw.qalbum.data.db.dao.QqScopeIds
+import com.xjw.qalbum.data.db.dao.QqScopeSql
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.fileops.FileOpsClient
 import com.xjw.qalbum.service.cleanup.QuarantineManager
@@ -18,8 +22,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.debounce
-import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import timber.log.Timber
 
@@ -44,24 +47,41 @@ class QqSourceRepository(
     private val _report = MutableStateFlow<String?>(null)
     val report = _report.asStateFlow()
     private var job: Job? = null
-    private var facetJob: Job? = null
+    private var statsJob: Job? = null
+    private val stats = QqSourceStatsBuilder(db)
+    @Volatile private var statsFailed = false
 
+    /**
+     * 统计维护：缓存标脏（导入、升级、名称变化后）且没有其他来源任务时，在后台分段重建。
+     * 删图不再标脏——触发器已随状态变化增量更新，因此这里不会在每次删除后重算。
+     */
     fun startFacetCache() {
-        if (facetJob?.isActive == true) return
-        facetJob = appScope.launch(Dispatchers.IO) {
-            dao.ensureCache()
-            // 导入/回收站处理中不反复聚合；变更只标记脏位，完成后一次刷新持久化统计。
-            combine(dao.observeCacheDirty(), progress) { dirty, running -> dirty == true && running == null }
-                .debounce(400).collectLatest { refresh ->
-                    if (refresh) db.withTransaction {
-                        if (dao.cacheDirty() == true) {
-                            dao.clearFacets()
-                            dao.cacheConversations()
-                            dao.cacheSenders()
-                            dao.finishCache()
-                        }
-                    }
-                }
+        if (statsJob?.isActive == true) return
+        statsJob = appScope.launch(Dispatchers.IO) {
+            combine(dao.observeCacheDirty(), progress) { dirty, running -> dirty != false && running == null }
+                .distinctUntilChanged()
+                .collect { needed -> if (needed && !statsFailed) rebuildStats() }
+        }
+    }
+
+    private suspend fun rebuildStats() {
+        val label = "整理来源统计"
+        if (!_progress.compareAndSet(null, QqSourceProgress(label, cancellable = false))) return
+        val started = System.currentTimeMillis()
+        try {
+            stats.rebuild { fraction ->
+                _progress.value = QqSourceProgress(label, ((fraction ?: 0f) * 1000).toLong(), if (fraction == null) 0 else 1000, false)
+            }
+            Timber.i("QQ source stats rebuilt in %d ms", System.currentTimeMillis() - started)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // 失败后不自动重试（避免循环），下次读取来源时再整理
+            statsFailed = true
+            logFailure(e, "stats_rebuild")
+            _message.value = "来源统计整理失败，可重新读取来源后重试"
+        } finally {
+            _progress.value = null
         }
     }
 
@@ -71,6 +91,8 @@ class QqSourceRepository(
 
     fun refresh() {
         if (!_progress.compareAndSet(null, QqSourceProgress("获取 Root 权限"))) return
+        statsFailed = false
+        startFacetCache()
         job = appScope.launch(Dispatchers.IO) {
             var bound: com.xjw.qalbum.fileops.BoundFileOps? = null
             var successful = 0
@@ -185,26 +207,45 @@ class QqSourceRepository(
         }
     }
 
-    /** 按来源范围整体移入回收站（收藏 / 保留的图片跳过；[includeShared] 决定是否包含也出现在其他会话的图片） */
-    fun trash(scope: QqSourceScope, includeShared: Boolean, linkedVersions: Boolean = true) {
-        if (scope.groupKey == null && scope.senderKey == null) return
+    /**
+     * 按来源范围整体移入回收站（收藏 / 保留的图片跳过）。[includeShared] 决定是否包含也出现在其他会话 /
+     * 发送人的图片，[contents] 决定清理图片、QQ 缩略图或两者；[linkedVersions] 同时处理同一张图的其他缓存版本。
+     */
+    fun trash(
+        scope: QqSourceScope,
+        includeShared: Boolean,
+        linkedVersions: Boolean = true,
+        contents: Set<QqContent> = setOf(QqContent.IMAGES),
+    ) {
+        if (scope.groupKey == null && scope.senderKey == null || contents.isEmpty()) return
         if (!_progress.compareAndSet(null, QqSourceProgress("准备移入回收站", cancellable = false))) return
         job = appScope.launch(Dispatchers.IO) {
             var moved = 0
             try {
-                val counts = dao.counts(scope.groupKey, scope.senderKey, includeShared)
+                quarantine.fileAccessError()?.let { reason ->
+                    _message.value = reason
+                    return@launch
+                }
+                val ids = scopeIds(scope) ?: run {
+                    _message.value = "来源统计还在整理，请稍后再试"
+                    return@launch
+                }
+                val counts = dao.queryCounts(QqScopeSql.counts(ids, contents, includeShared))
                 val maxId = dao.maxImageId() ?: 0L
                 var afterId = 0L
                 var processed = 0L
+                _progress.value = QqSourceProgress("移入回收站", 0, counts.removable.toLong(), false)
                 while (true) {
-                    val ids = dao.removableIds(scope.groupKey, scope.senderKey, includeShared, afterId, maxId, 200)
-                    if (ids.isEmpty()) break
-                    moved += quarantine.quarantinePictures(ids,PictureDeleteOptions(linkedVersions,includeShared),"按 QQ 图片来源清理",scope).selectedProcessed
-                    _progress.value = QqSourceProgress("移入回收站", processed + ids.size, counts.removable.toLong(), false)
-                    processed += ids.size
-                    afterId = ids.last()
+                    val batch = dao.queryIds(QqScopeSql.removableIds(ids, contents, includeShared, afterId, maxId, 200))
+                    if (batch.isEmpty()) break
+                    moved += quarantine.quarantinePictures(batch, PictureDeleteOptions(linkedVersions, includeShared), "按 QQ 图片来源清理", scope).selectedProcessed
+                    processed += batch.size
+                    _progress.value = QqSourceProgress("移入回收站", processed, counts.removable.toLong(), false)
+                    afterId = batch.last()
                 }
-                _message.value = "已移入回收站 $moved 张" + if (moved < counts.removable) "；部分图片未移动，仍保留在原处" else ""
+                _message.value = "已移入回收站 $moved 张" + if (moved < counts.removable) "；部分图片因共用、保护或文件变化未移动" else ""
+            } catch (e: CancellationException) {
+                throw e
             } catch (_: Exception) {
                 _message.value = "已移入回收站 $moved 张，操作未全部完成"
             } finally {
@@ -213,12 +254,23 @@ class QqSourceRepository(
         }
     }
 
+    /** 来源键 → 分类 id；分类尚未整理出来时返回 null */
+    suspend fun scopeIds(scope: QqSourceScope): QqScopeIds? {
+        val conversation = scope.groupKey?.let { dao.facetId(0, it) ?: return null }
+        val sender = scope.senderKey?.let { dao.facetId(1, it) ?: return null }
+        return QqScopeIds(conversation, sender)
+    }
+
     fun clear() {
         if (!_progress.compareAndSet(null, QqSourceProgress("清除来源索引", cancellable = false))) return
         job = appScope.launch(Dispatchers.IO) {
             try {
                 settings.setQqSourcesComplete(false)
-                db.withTransaction { dao.clear() }
+                val sql = db.openHelper.writableDatabase
+                db.withTransaction {
+                    dao.clear()
+                    QqSourceStatsSql.clearDerived.forEach(sql::execSQL)
+                }
                 _report.value = null
                 _message.value = "已清除来源索引"
             } catch (_: Exception) {

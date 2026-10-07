@@ -15,6 +15,8 @@ import com.xjw.qalbum.data.db.entity.QqOriginPathEntity
 import com.xjw.qalbum.data.db.entity.ImageQqOriginEntity
 import com.xjw.qalbum.data.db.entity.QqSourceFacetCacheEntity
 import com.xjw.qalbum.data.db.entity.QqSourceCacheEntity
+import com.xjw.qalbum.data.db.entity.QqImageContextEntity
+import com.xjw.qalbum.data.db.entity.QqSourceMemberEntity
 import com.xjw.qalbum.data.db.dao.DedupExclusionDao
 import com.xjw.qalbum.data.db.dao.DirSnapshotDao
 import com.xjw.qalbum.data.db.dao.EmbeddingDao
@@ -61,8 +63,10 @@ import com.xjw.qalbum.data.db.entity.TagEntity
         ImageQqOriginEntity::class,
         QqSourceFacetCacheEntity::class,
         QqSourceCacheEntity::class,
+        QqImageContextEntity::class,
+        QqSourceMemberEntity::class,
     ],
-    version = 16,
+    version = 17,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -87,6 +91,43 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_quarantine_group_id ON quarantine(group_id)")
             }
         }
+        /**
+         * v16 → v17：来源统计改为增量维护。
+         *
+         * 旧版任何关联图片的状态变化都会把分类缓存标脏、整体重建（大图库上一次重建要几十秒，
+         * 期间写锁被占住，删图要排队等它）。新版增加去重关联表 qq_image_contexts 与成员名片表，
+         * 分类计数分「图片 / 缩略图」两类，由 images 上的触发器随状态变化增量更新。
+         * 分类与汇总都是可重建的缓存：这里只重建表结构并标脏，首次进入来源页时在后台分段重建。
+         */
+        val MIGRATION_16_17 = object : Migration(16, 17) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                QqSourceStatsSql.legacyTriggers.forEach { db.execSQL("DROP TRIGGER IF EXISTS $it") }
+                db.execSQL("DROP TABLE IF EXISTS qq_source_facets")
+                db.execSQL("DROP TABLE IF EXISTS qq_source_cache")
+                db.execSQL("""CREATE TABLE IF NOT EXISTS `qq_source_facets` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `kind` INTEGER NOT NULL, `key` TEXT NOT NULL, `name` TEXT NOT NULL, `search_text` TEXT NOT NULL,
+                    `account_key` TEXT NOT NULL, `chat_type` INTEGER NOT NULL, `image_count` INTEGER NOT NULL,
+                    `image_bytes` INTEGER NOT NULL, `thumb_count` INTEGER NOT NULL, `thumb_bytes` INTEGER NOT NULL,
+                    `latest_time` INTEGER NOT NULL,
+                    FOREIGN KEY(`account_key`) REFERENCES `qq_source_accounts`(`account_key`) ON UPDATE NO ACTION ON DELETE CASCADE )""")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_qq_source_facets_kind_key` ON `qq_source_facets` (`kind`, `key`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_qq_source_facets_account_key` ON `qq_source_facets` (`account_key`)")
+                db.execSQL("""CREATE TABLE IF NOT EXISTS `qq_image_contexts` (`image_id` INTEGER NOT NULL,
+                    `conversation_id` INTEGER NOT NULL, `sender_id` INTEGER NOT NULL,
+                    PRIMARY KEY(`image_id`, `conversation_id`, `sender_id`))""")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_qq_image_contexts_conversation_id_sender_id_image_id` ON `qq_image_contexts` (`conversation_id`, `sender_id`, `image_id`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_qq_image_contexts_sender_id_conversation_id_image_id` ON `qq_image_contexts` (`sender_id`, `conversation_id`, `image_id`)")
+                db.execSQL("""CREATE TABLE IF NOT EXISTS `qq_source_members` (`conversation_id` INTEGER NOT NULL,
+                    `sender_id` INTEGER NOT NULL, `card` TEXT NOT NULL, `latest_time` INTEGER NOT NULL,
+                    PRIMARY KEY(`conversation_id`, `sender_id`))""")
+                db.execSQL("""CREATE TABLE IF NOT EXISTS `qq_source_cache` (`id` INTEGER NOT NULL, `dirty` INTEGER NOT NULL,
+                    `image_count` INTEGER NOT NULL, `image_bytes` INTEGER NOT NULL, `thumb_count` INTEGER NOT NULL,
+                    `thumb_bytes` INTEGER NOT NULL, PRIMARY KEY(`id`))""")
+                db.execSQL(QqSourceStatsSql.ENSURE_CACHE_ROW)
+                QqSourceStatsSql.createTriggers(db)
+            }
+        }
+
         const val DB_NAME = "qalbum.db"
 
         /** v1 → v2：Phase 3 增加 Room FTS4 OCR 索引。 */
@@ -356,7 +397,7 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
-        private fun createQqSourceTriggers(db: SupportSQLiteDatabase) {
+        internal fun createQqSourceTriggers(db: SupportSQLiteDatabase) {
             listOf("INSERT", "UPDATE OF path").forEachIndexed { index, operation ->
                 db.execSQL("""CREATE TRIGGER IF NOT EXISTS link_qq_image_origin_$index
                     AFTER $operation ON images BEGIN
@@ -625,6 +666,16 @@ abstract class AppDatabase : RoomDatabase() {
             db.execSQL("DROP TABLE image_path_survivors")
         }
 
+        /** 新建数据库时补上 Room 不负责的触发器（升级路径由各 Migration 建立同一套） */
+        val creationCallback = object : Callback() {
+            override fun onCreate(db: SupportSQLiteDatabase) {
+                createAnalysisInvalidationTrigger(db)
+                createQqSourceTriggers(db)
+                db.execSQL(QqSourceStatsSql.ENSURE_CACHE_ROW)
+                QqSourceStatsSql.createTriggers(db)
+            }
+        }
+
         fun build(context: Context): AppDatabase {
             return Room.databaseBuilder(
                 context.applicationContext,
@@ -647,15 +698,9 @@ abstract class AppDatabase : RoomDatabase() {
                     MIGRATION_13_14,
                     MIGRATION_14_15,
                     MIGRATION_15_16,
+                    MIGRATION_16_17,
                 )
-                .addCallback(object : Callback() {
-                    override fun onCreate(db: SupportSQLiteDatabase) {
-                        createAnalysisInvalidationTrigger(db)
-                        createQqSourceTriggers(db)
-                        createQqSourceCacheTriggers(db)
-                        createQqSourceSizeTrigger(db)
-                    }
-                })
+                .addCallback(creationCallback)
                 // 刻意不配置任何 destructive 回退：未覆盖的版本跳变（含降级）宁可 fail-fast
                 // 抛异常，也不允许静默清掉 200w 行索引与「已清理」统计（quarantine 被清后
                 // 回收站文件会成为无法恢复的孤儿）。新增版本必须同步补显式 Migration。

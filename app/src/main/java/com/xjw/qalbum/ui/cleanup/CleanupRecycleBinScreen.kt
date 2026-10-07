@@ -64,6 +64,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.paging.LoadState
 import androidx.paging.compose.collectAsLazyPagingItems
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
@@ -77,6 +78,7 @@ import com.xjw.qalbum.ui.common.formatBytes
 import com.xjw.qalbum.ui.components.BackButton
 import com.xjw.qalbum.ui.components.ConfirmDialog
 import com.xjw.qalbum.ui.components.EmptyState
+import com.xjw.qalbum.ui.components.LoadingState
 import com.xjw.qalbum.ui.components.SegmentPosition
 import com.xjw.qalbum.ui.components.ViewerIconButton
 import java.io.File
@@ -144,13 +146,19 @@ fun CleanupRecycleBinScreen(
             }
 
             if (items.itemCount == 0) {
-                item(span = { GridItemSpan(maxLineSpan) }, key = "empty") {
+                // 首次读取完成前显示加载中，不能当成「回收站是空的」
+                val loading = items.loadState.refresh is LoadState.Loading
+                item(span = { GridItemSpan(maxLineSpan) }, key = if (loading) "loading" else "empty") {
                     Box(Modifier.fillMaxWidth().height(320.dp)) {
-                        EmptyState(
-                            icon = Icons.Outlined.Inventory2,
-                            title = "回收站是空的",
-                            message = "从图库、审核或聊天来源删除的图片会先来到这里。",
-                        )
+                        if (loading) {
+                            LoadingState()
+                        } else {
+                            EmptyState(
+                                icon = Icons.Outlined.Inventory2,
+                                title = "回收站是空的",
+                                message = "从图库、审核或聊天来源删除的图片会先来到这里。",
+                            )
+                        }
                     }
                 }
             } else {

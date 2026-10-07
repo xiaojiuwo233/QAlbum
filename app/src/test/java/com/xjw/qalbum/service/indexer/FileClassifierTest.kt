@@ -84,15 +84,25 @@ class FileClassifierTest {
     }
 
     @Test
-    fun `非 active 行(deleted-quarantined-thumbnail_trash)消失时不动`() {
+    fun `终态与 missing 行消失时不动`() {
         val rows = listOf(
             row("Cache_d", 1, status = "deleted"),
             row("Cache_q", 2, status = "quarantined"),
-            row("Cache_t", 3, status = "thumbnail_trash"),
             row("Cache_m", 4, status = "missing"),
+            row("Cache_p", 5, status = "quarantine_pending"),
         )
         val r = FileClassifier.classify(emptyList(), rows)
         assertTrue(r.missingIds.isEmpty())
+    }
+
+    @Test
+    fun `QQ 缩略图被 QQ 清掉后标记 missing，不再计入来源统计`() {
+        val rows = listOf(
+            row("Cache_t", 3, status = "thumbnail_trash"),
+            row("Cache_kept", 6, status = "thumbnail_trash"),
+        )
+        val r = FileClassifier.classify(listOf(file("Cache_kept")), rows)
+        assertEquals(listOf(3L), r.missingIds)
     }
 
     @Test

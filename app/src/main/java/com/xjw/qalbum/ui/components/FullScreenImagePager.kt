@@ -2,12 +2,16 @@ package com.xjw.qalbum.ui.components
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,6 +26,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Download
@@ -41,13 +46,20 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.util.VelocityTracker
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -58,12 +70,14 @@ import com.xjw.qalbum.ui.common.formatTitleDate
 import com.xjw.qalbum.ui.common.imageMeta
 import com.xjw.qalbum.ui.detail.PhotoDetailsSheet
 import com.xjw.qalbum.ui.imageloading.ImageEntityModel
+import kotlinx.coroutines.launch
 
 /** 看图页浮层统一用深色半透明容器，保证在任何图片上都清晰 */
 internal val ViewerChromeColor = Color(0xFF1E1F22).copy(alpha = 0.82f)
 
 /**
  * 全屏图片预览：左右滑动切换、双指 / 双击缩放（见 [ZoomableImage]），单击显隐浮层。
+ * 与图库看图页手势一致：上滑查看详情、详情打开时下滑收起；未缩放时下滑可拖动关闭。
  * 顶部「关闭 + 时间 + 详情 + 保存 + 分享」；底部操作由调用方经 [bottomBar] 提供，
  * 放在胶囊形浮动操作栏里（审核页：收藏 / 勾选 / 清理 / 保留；来源与标签页：收藏 / 删除等）。
  *
@@ -93,6 +107,17 @@ internal fun FullScreenImagePager(
     var zoom by remember { mutableFloatStateOf(1f) }
     var zoomReset by remember { mutableIntStateOf(0) }
     val fade = MaterialTheme.motionScheme.defaultEffectsSpec<Float>()
+    val scope = rememberCoroutineScope()
+    val density = LocalDensity.current
+    val dismissDistance = with(density) { 120.dp.toPx() }
+    val dismissVelocity = with(density) { 600.dp.toPx() }
+    val dismissRange = with(density) { 400.dp.toPx() }
+    val velocityTracker = remember { VelocityTracker() }
+    var dragOffset by remember { mutableFloatStateOf(0f) }
+    var draggingClose by remember { mutableStateOf(false) }
+    var directionDecided by remember { mutableStateOf(false) }
+    val springBack = remember { Animatable(0f) }
+    val latestOnClose by rememberUpdatedState(onClose)
 
     Dialog(
         onDismissRequest = onClose,
@@ -101,8 +126,82 @@ internal fun FullScreenImagePager(
         BackHandler(enabled = detailsVisible || zoom > 1f) {
             if (detailsVisible) detailsVisible = false else zoomReset++
         }
-        Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
-            HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize(), key = { images[it].id }) { page ->
+        fun settleBack(from: Float) {
+            draggingClose = false
+            scope.launch {
+                springBack.snapTo(from)
+                springBack.animateTo(0f, spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMedium))
+            }
+            chromeVisible = true
+        }
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .drawBehind {
+                    val offset = if (draggingClose) dragOffset else springBack.value
+                    drawRect(Color.Black.copy(alpha = 1f - (offset / dismissRange).coerceIn(0f, 1f) * 0.7f))
+                }
+                // 竖向手势：上滑打开详情、详情中下滑收起；未缩放时下滑拖动关闭（横向交给 pager）
+                .pointerInput(density.density) {
+                    detectVerticalDragGestures(
+                        onDragStart = {
+                            directionDecided = false
+                            draggingClose = false
+                            dragOffset = 0f
+                            velocityTracker.resetTracking()
+                        },
+                        onDragEnd = {
+                            directionDecided = false
+                            if (!draggingClose) return@detectVerticalDragGestures
+                            val velocity = runCatching { velocityTracker.calculateVelocity().y }.getOrDefault(0f)
+                            if (dragOffset > dismissDistance || (dragOffset > 0f && velocity > dismissVelocity)) {
+                                latestOnClose()
+                            } else {
+                                settleBack(dragOffset)
+                            }
+                        },
+                        onDragCancel = {
+                            directionDecided = false
+                            if (draggingClose) settleBack(dragOffset)
+                        },
+                    ) { change, amount ->
+                        if (!directionDecided) {
+                            directionDecided = true
+                            draggingClose = !detailsVisible && zoom <= 1.05f && amount > 0f
+                        }
+                        if (draggingClose) {
+                            change.consume()
+                            chromeVisible = false
+                            velocityTracker.addPosition(change.uptimeMillis, change.position)
+                            dragOffset = (dragOffset + amount).coerceAtLeast(0f)
+                        } else if (zoom <= 1.01f && amount < -8f && !detailsVisible) {
+                            change.consume()
+                            chromeVisible = true
+                            detailsVisible = true
+                        } else if (amount > 8f && detailsVisible) {
+                            change.consume()
+                            detailsVisible = false
+                        }
+                    }
+                },
+        ) {
+            HorizontalPager(
+                state = pagerState,
+                key = { images[it].id },
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        // 下滑关闭时图片跟手下移、缩小并圆角；在图层里读偏移，拖动不触发重组
+                        val offset = if (draggingClose) dragOffset else springBack.value
+                        val progress = (offset / dismissRange).coerceIn(0f, 1f)
+                        translationY = offset
+                        scaleX = 1f - progress * 0.15f
+                        scaleY = 1f - progress * 0.15f
+                        val radius = progress * 24.dp.toPx()
+                        shape = RoundedCornerShape(radius)
+                        clip = radius > 0f
+                    },
+            ) { page ->
                 ZoomableImage(
                     model = ImageEntityModel(images[page]),
                     contentDescription = images[page].filename,
@@ -110,7 +209,10 @@ internal fun FullScreenImagePager(
                     stateKey = images[page].id,
                     isActive = page == pagerState.currentPage,
                     resetSignal = zoomReset,
-                    onTap = { chromeVisible = !chromeVisible },
+                    onTap = {
+                        chromeVisible = !chromeVisible
+                        if (!chromeVisible) detailsVisible = false
+                    },
                     onZoomChanged = { if (page == pagerState.currentPage) zoom = it },
                 )
             }
@@ -119,7 +221,7 @@ internal fun FullScreenImagePager(
             val current = images[page]
 
             AnimatedVisibility(
-                visible = chromeVisible,
+                visible = chromeVisible && !draggingClose,
                 enter = fadeIn(fade),
                 exit = fadeOut(fade),
                 modifier = Modifier.align(Alignment.TopCenter),
@@ -156,7 +258,7 @@ internal fun FullScreenImagePager(
             }
 
             AnimatedVisibility(
-                visible = chromeVisible && !detailsVisible,
+                visible = chromeVisible && !detailsVisible && !draggingClose,
                 enter = slideInVertically(MaterialTheme.motionScheme.defaultSpatialSpec()) { it / 2 } + fadeIn(fade),
                 exit = slideOutVertically(MaterialTheme.motionScheme.fastSpatialSpec()) { it / 2 } + fadeOut(fade),
                 modifier = Modifier.align(Alignment.BottomCenter),
