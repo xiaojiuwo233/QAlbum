@@ -9,17 +9,16 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.navigationBars
-import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.ShortNavigationBar
+import androidx.compose.material3.ShortNavigationBarItem
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -27,8 +26,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
@@ -55,8 +54,8 @@ import com.xjw.qalbum.ui.cleanup.CleanupScreen
 import com.xjw.qalbum.ui.dashboard.DashboardScreen
 import com.xjw.qalbum.ui.detail.ImageDetailScreen
 import com.xjw.qalbum.ui.gallery.FavoriteGalleryScreen
-import com.xjw.qalbum.ui.logs.LogScreen
 import com.xjw.qalbum.ui.gallery.GalleryScreen
+import com.xjw.qalbum.ui.logs.LogScreen
 import com.xjw.qalbum.ui.search.SearchScreen
 import com.xjw.qalbum.ui.settings.AboutSettingsScreen
 import com.xjw.qalbum.ui.settings.AccessSettingsScreen
@@ -67,38 +66,40 @@ import com.xjw.qalbum.ui.settings.PersonalizationSettingsScreen
 import com.xjw.qalbum.ui.settings.ScanSettingsScreen
 import com.xjw.qalbum.ui.settings.SettingsCategory
 import com.xjw.qalbum.ui.settings.SettingsScreen
-import com.xjw.qalbum.ui.tags.TagsScreen
+import com.xjw.qalbum.ui.sources.QqSourceBrowseScreen
 import com.xjw.qalbum.ui.sources.QqSourcesScreen
+import com.xjw.qalbum.ui.sources.SourceBrowseTarget
+import com.xjw.qalbum.ui.tags.TagsScreen
 import org.koin.compose.koinInject
 
 /**
- * 应用根导航：底部 NavigationBar + Navigation Compose。
+ * 应用根导航：底部 M3 Expressive 短导航栏（ShortNavigationBar）+ Navigation Compose。
  *
  * 关键设计：
- * - **inset**：外层 Scaffold 不消费系统栏 inset，NavHost 永远铺满，不随 [showBottomBar] 临时加/去
- *   top padding；每页用自己的 TopAppBar 默认 inset 避让状态栏，转场期间顶部避让稳定（修复"顶到通知栏"）。
+ * - **inset**：NavHost 永远铺满，不随底栏显隐临时加/去 padding；每页用自己的顶栏避让状态栏。
  * - **转场**：
  *   - 一级 Tab 之间 → Fade Through；
- *   - 设置首页 ↔ 设置二级页 → Container Transform（[SharedTransitionLayout] + sharedBounds，
- *     点击的设置行"长大"成整页、返回收缩回去），转场本体走 fade 让 sharedBounds 边界变形主导；
- *   - 其它二级页（搜索/收藏/详情）→ Shared Axis X。
- *   底部栏进入二级页时滑出、返回时滑入。系统手势走预测式返回。
+ *   - 设置首页 ↔ 设置二级页、图库 ↔ 搜索 / 收藏 → Container Transform（sharedBounds）；
+ *   - 其它二级页（详情、QQ 来源、标签…）→ Shared Axis X；
+ *   - 底栏在进入二级页、清理审核、图库多选时滑出，返回时滑入。系统手势走预测式返回。
  */
-@OptIn(ExperimentalSharedTransitionApi::class, ExperimentalMaterial3ExpressiveApi::class)
+@OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 fun AppNavigation() {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
     val currentDestination = NavDestination.fromRoute(currentRoute)
-    // 审核 / 重复组详情 / 回收站是清理页内部子页（activePage 切换）：进入时隐藏底部导航栏做全屏专注。
+    // 审核 / 重复组 / 回收站是清理页内部子页；图库多选时底部换成浮动操作栏 —— 两种情况都隐藏底栏
     var cleanupReviewMode by remember { mutableStateOf(false) }
+    var gallerySelecting by remember { mutableStateOf(false) }
     val showBottomBar = currentRoute in bottomBarRoutes &&
-        (currentRoute != NavDestination.Cleanup.route || !cleanupReviewMode)
+        !(currentRoute == NavDestination.Cleanup.route && cleanupReviewMode) &&
+        !(currentRoute == NavDestination.Gallery.route && gallerySelecting)
     val density = LocalDensity.current
     val secondaryPadding = WindowInsets.navigationBars.asPaddingValues()
-    var bottomBarHeight by remember(density) { mutableStateOf(80.dp + secondaryPadding.calculateBottomPadding()) }
-    // 页面边距不随导航栏逐帧滑入/滑出改变，保持网格与转场起止位置稳定。
+    var bottomBarHeight by remember(density) { mutableStateOf(64.dp + secondaryPadding.calculateBottomPadding()) }
+    // 页面底部留白不随底栏逐帧滑入/滑出改变，网格与转场起止位置保持稳定
     val contentPadding = PaddingValues(bottom = bottomBarHeight)
 
     val slideSpec = MaterialTheme.motionScheme.defaultSpatialSpec<IntOffset>()
@@ -133,8 +134,8 @@ fun AppNavigation() {
                 },
                 popEnterTransition = {
                     when {
-                        // 从详情返回：off 时图库立即出现在下层（详情缩小淡出露出它，避免黑屏）；
-                        // on 时图库淡入，配合共享元素把大图缩回缩略图
+                        // 从详情返回：关闭共享元素时图库立即垫底（详情缩小淡出露出它，避免黑屏）；
+                        // 开启时图库淡入，配合共享元素把大图缩回缩略图
                         initialState.isImage() -> if (sharedTransition) fadeIn(fadeSpec) else EnterTransition.None
                         targetState.isImage() -> if (sharedTransition) fadeIn(fadeSpec) else imageDetailEnter(fadeSpec, scaleSpec)
                         isContainerTransition() -> fadeIn(fadeSpec)
@@ -156,6 +157,7 @@ fun AppNavigation() {
                     DashboardScreen(
                         contentPadding = contentPadding,
                         onOpenAccessSettings = { navController.navigate(SettingsCategory.ACCESS.route) },
+                        onOpenSources = { navController.navigate(QQ_SOURCES_ROUTE) },
                     )
                 }
                 composable(NavDestination.Gallery.route) {
@@ -164,7 +166,8 @@ fun AppNavigation() {
                         onImageClick = { id -> navController.navigate("image/$id") },
                         onOpenSearch = { navController.navigate(NavDestination.Search.route) },
                         onOpenFavorites = { navController.navigate("favorites") },
-                        onOpenSources = { navController.navigate("qq-sources") },
+                        onOpenSources = { navController.navigate(QQ_SOURCES_ROUTE) },
+                        onSelectionModeChange = { gallerySelecting = it },
                         sharedScope = this@SharedTransitionLayout,
                         animatedScope = this,
                         imageShared = sharedTransition,
@@ -180,8 +183,28 @@ fun AppNavigation() {
                         imageShared = sharedTransition,
                     )
                 }
-                composable("qq-sources") {
-                    QqSourcesScreen(contentPadding = secondaryPadding, onBack = { navController.popBackStack() })
+                composable(QQ_SOURCES_ROUTE) {
+                    QqSourcesScreen(
+                        onBack = { navController.popBackStack() },
+                        onBrowse = { target -> navController.navigate(target.route()) },
+                    )
+                }
+                composable(
+                    route = "$QQ_SOURCES_ROUTE/{kind}/{key}",
+                    arguments = listOf(
+                        navArgument("kind") { type = NavType.StringType },
+                        navArgument("key") { type = NavType.StringType },
+                    ),
+                ) { entry ->
+                    val target = SourceBrowseTarget.fromArgs(
+                        entry.arguments?.getString("kind"),
+                        entry.arguments?.getString("key"),
+                    )
+                    QqSourceBrowseScreen(
+                        target = target,
+                        onBack = { navController.popBackStack() },
+                        onBrowse = { next -> navController.navigate(next.route()) },
+                    )
                 }
                 composable(NavDestination.Search.route) {
                     SearchScreen(
@@ -197,6 +220,7 @@ fun AppNavigation() {
                     CleanupScreen(
                         contentPadding = contentPadding,
                         onOpenTags = { navController.navigate("tags") },
+                        onOpenSources = { navController.navigate(QQ_SOURCES_ROUTE) },
                         onReviewModeChange = { cleanupReviewMode = it },
                     )
                 }
@@ -298,10 +322,12 @@ fun AppNavigation() {
                 exit = slideOutVertically(slideSpec) { it } + fadeOut(fadeSpec),
                 modifier = Modifier.align(Alignment.BottomCenter),
             ) {
-                NavigationBar(modifier = Modifier.onSizeChanged { bottomBarHeight = with(density) { it.height.toDp() } }) {
+                ShortNavigationBar(
+                    modifier = Modifier.onSizeChanged { bottomBarHeight = with(density) { it.height.toDp() } },
+                ) {
                     NavDestination.bottomBarEntries.forEach { dest ->
                         val selected = dest == currentDestination
-                        NavigationBarItem(
+                        ShortNavigationBarItem(
                             selected = selected,
                             onClick = {
                                 if (!selected) navController.navigate(dest.route) {
@@ -313,11 +339,10 @@ fun AppNavigation() {
                             icon = {
                                 Icon(
                                     imageVector = if (selected) dest.filledIcon else dest.outlinedIcon,
-                                    contentDescription = stringResource(dest.labelRes),
+                                    contentDescription = null,
                                 )
                             },
                             label = { Text(stringResource(dest.labelRes)) },
-                            alwaysShowLabel = true,
                         )
                     }
                 }
@@ -326,6 +351,11 @@ fun AppNavigation() {
     }
 }
 
+/** QQ 来源首页路由；浏览页为 `qq-sources/{kind}/{key}` */
+private const val QQ_SOURCES_ROUTE = "qq-sources"
+
+private fun SourceBrowseTarget.route(): String = "$QQ_SOURCES_ROUTE/${kind.arg}/$key"
+
 /** 底部导航栏对应的一级路由集合 */
 private val bottomBarRoutes: Set<String> = NavDestination.bottomBarEntries.map { it.route }.toSet()
 
@@ -333,7 +363,7 @@ private val bottomBarRoutes: Set<String> = NavDestination.bottomBarEntries.map {
 private val settingsRoutes: Set<String> =
     setOf(NavDestination.Settings.route) + SettingsCategory.entries.map { it.route }
 
-/** 不在底部导航中的路由都视为"二级页"（设置子页、详情、搜索、收藏等） */
+/** 不在底部导航中的路由都视为"二级页"（设置子页、详情、搜索、收藏、QQ 来源等） */
 private fun NavBackStackEntry.isSecondary(): Boolean =
     (destination.route?.substringBefore("/") ?: "") !in bottomBarRoutes
 
@@ -343,7 +373,7 @@ private fun AnimatedContentTransitionScope<NavBackStackEntry>.involvesSecondary(
 
 /**
  * 本次转场是否走 Container Transform（转场本体用 fade，让共享元素 morph 主导）：
- * 设置域内、图库↔搜索/收藏、以及任一侧是图片详情（缩略图共享元素）。
+ * 设置域内、图库↔搜索/收藏。
  */
 private fun AnimatedContentTransitionScope<NavBackStackEntry>.isContainerTransition(): Boolean {
     val from = initialState.destination.route ?: return false

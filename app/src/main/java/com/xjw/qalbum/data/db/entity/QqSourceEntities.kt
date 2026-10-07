@@ -70,12 +70,18 @@ data class ImageQqOriginEntity(
         parentColumns = ["account_key"], childColumns = ["account_key"], onDelete = ForeignKey.CASCADE)],
     indices = [Index("account_key")])
 data class QqSourceFacetCacheEntity(
+    // 0 = 会话（群聊 / 私聊，见 chat_type），1 = 发送人
     val kind: Int,
     val key: String,
     val name: String,
     @ColumnInfo(name = "search_text") val searchText: String,
     @ColumnInfo(name = "account_key") val accountKey: String,
     @ColumnInfo(name = "image_count") val imageCount: Int,
+    // 会话：1 私聊 / 2 群聊 / 3 转发的聊天记录；发送人恒为 0
+    @ColumnInfo(name = "chat_type", defaultValue = "0") val chatType: Int = 0,
+    // 去重后图片的字节总和（一张图被同一分类多条消息引用只算一次）
+    @ColumnInfo(name = "total_bytes", defaultValue = "0") val totalBytes: Long = 0,
+    @ColumnInfo(name = "latest_time", defaultValue = "0") val latestTime: Long = 0,
 )
 
 @Entity(tableName = "qq_source_cache")
@@ -83,4 +89,5 @@ data class QqSourceCacheEntity(
     @PrimaryKey val id: Int = 1,
     val dirty: Boolean = true,
     @ColumnInfo(name = "linked_count") val linkedCount: Int = 0,
+    @ColumnInfo(name = "linked_bytes", defaultValue = "0") val linkedBytes: Long = 0,
 )

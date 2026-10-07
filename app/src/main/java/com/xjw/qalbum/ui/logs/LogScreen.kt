@@ -3,7 +3,6 @@ package com.xjw.qalbum.ui.logs
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -19,24 +18,17 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.ArrowBack
-import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.DeleteSweep
 import androidx.compose.material.icons.outlined.IosShare
-import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.VerticalAlignBottom
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -47,7 +39,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -58,6 +49,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.material.icons.automirrored.outlined.Article
+import androidx.compose.material.icons.outlined.SearchOff
+import androidx.compose.material3.IconButtonDefaults
+import com.xjw.qalbum.ui.components.BackButton
+import com.xjw.qalbum.ui.components.ConfirmDialog
+import com.xjw.qalbum.ui.components.EmptyState
+import com.xjw.qalbum.ui.components.SearchField
 import com.xjw.qalbum.log.AppLog
 import com.xjw.qalbum.log.LogEntry
 import com.xjw.qalbum.log.LogLevel
@@ -65,7 +63,7 @@ import kotlinx.coroutines.launch
 import org.koin.androidx.compose.koinViewModel
 
 /**
- * 日志查看页（仿 logcat）：级别过滤 + 文字搜索 + 自动跟随底部 + 导出 / 清空。
+ * 日志查看页（仿 logcat）：级别过滤 + 文字搜索 + 自动跟随最新 + 导出 / 清空。
  * 文本可长按选择复制。进入「设置 → 日志」打开；遵循各页自管状态栏 inset 的约定。
  */
 @Composable
@@ -99,32 +97,35 @@ fun LogScreen(
         topBar = {
             TopAppBar(
                 title = { Text("日志") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
-                    }
-                },
+                subtitle = { Text("共 ${ui.totalCount} 条 · 占用 ${formatBytes(ui.diskSizeBytes)}") },
+                navigationIcon = { BackButton(onBack) },
                 actions = {
-                    IconButton(onClick = {
-                        scope.launch {
-                            if (ui.entries.isNotEmpty()) listState.scrollToItem(ui.entries.lastIndex)
-                        }
-                    }) {
-                        Icon(Icons.Outlined.VerticalAlignBottom, contentDescription = "跳到底部")
-                    }
-                    IconButton(onClick = {
-                        viewModel.export { uri ->
-                            if (uri != null) {
-                                runCatching { context.startActivity(shareLogChooser(uri)) }
-                                    .onFailure { scope.launch { snackbarHostState.showSnackbar("无可分享的应用") } }
-                            } else {
-                                scope.launch { snackbarHostState.showSnackbar("导出失败") }
+                    IconButton(
+                        onClick = {
+                            scope.launch {
+                                if (ui.entries.isNotEmpty()) listState.animateScrollToItem(ui.entries.lastIndex)
                             }
-                        }
-                    }) {
+                        },
+                        shapes = IconButtonDefaults.shapes(),
+                    ) {
+                        Icon(Icons.Outlined.VerticalAlignBottom, contentDescription = "跳到最新")
+                    }
+                    IconButton(
+                        onClick = {
+                            viewModel.export { uri ->
+                                if (uri != null) {
+                                    runCatching { context.startActivity(shareLogChooser(uri)) }
+                                        .onFailure { scope.launch { snackbarHostState.showSnackbar("没有可以接收日志的应用") } }
+                                } else {
+                                    scope.launch { snackbarHostState.showSnackbar("导出失败") }
+                                }
+                            }
+                        },
+                        shapes = IconButtonDefaults.shapes(),
+                    ) {
                         Icon(Icons.Outlined.IosShare, contentDescription = "导出")
                     }
-                    IconButton(onClick = { showClearDialog = true }) {
+                    IconButton(onClick = { showClearDialog = true }, shapes = IconButtonDefaults.shapes()) {
                         Icon(Icons.Outlined.DeleteSweep, contentDescription = "清空")
                     }
                 },
@@ -143,16 +144,12 @@ fun LogScreen(
                 onLevel = viewModel::setMinLevel,
                 onQuery = viewModel::setQuery,
             )
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
 
             if (ui.entries.isEmpty()) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text(
-                        if (ui.totalCount == 0) "暂无日志" else "无匹配的日志",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
+                EmptyState(
+                    icon = if (ui.totalCount == 0) Icons.AutoMirrored.Outlined.Article else Icons.Outlined.SearchOff,
+                    title = if (ui.totalCount == 0) "暂无日志" else "没有匹配的日志",
+                )
             } else {
                 SelectionContainer(modifier = Modifier.fillMaxSize()) {
                     LazyColumn(
@@ -171,25 +168,23 @@ fun LogScreen(
     }
 
     if (showClearDialog) {
-        AlertDialog(
-            onDismissRequest = { showClearDialog = false },
-            title = { Text("清空日志") },
-            text = { Text("将删除已保存的全部日志（含历史文件），不可恢复。") },
-            confirmButton = {
-                TextButton(onClick = {
-                    showClearDialog = false
-                    viewModel.clear()
-                    scope.launch { snackbarHostState.showSnackbar("已清空日志") }
-                }) { Text("清空") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showClearDialog = false }) { Text("取消") }
+        ConfirmDialog(
+            icon = Icons.Outlined.DeleteSweep,
+            title = "清空日志？",
+            text = "将删除已保存的全部日志（包括历史文件），无法恢复。",
+            confirmLabel = "清空",
+            destructive = true,
+            onDismiss = { showClearDialog = false },
+            onConfirm = {
+                showClearDialog = false
+                viewModel.clear()
+                scope.launch { snackbarHostState.showSnackbar("已清空日志") }
             },
         )
     }
 }
 
-/** 过滤控件：级别 chips + 搜索框 + 统计行。 */
+/** 过滤控件：级别 chips + 搜索框 */
 @Composable
 private fun LogControls(
     ui: LogUiState,
@@ -199,9 +194,10 @@ private fun LogControls(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        SearchField(value = ui.query, onValueChange = onQuery, placeholder = "搜索 TAG 或内容")
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -216,26 +212,13 @@ private fun LogControls(
                 )
             }
         }
-        OutlinedTextField(
-            value = ui.query,
-            onValueChange = onQuery,
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true,
-            placeholder = { Text("搜索 TAG / 内容") },
-            leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
-            trailingIcon = {
-                if (ui.query.isNotEmpty()) {
-                    IconButton(onClick = { onQuery("") }) {
-                        Icon(Icons.Outlined.Close, contentDescription = "清除")
-                    }
-                }
-            },
-        )
-        Text(
-            "共 ${ui.totalCount} 条（已显示 ${ui.entries.size}）· 磁盘 ${formatBytes(ui.diskSizeBytes)}",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        if (ui.entries.size < ui.totalCount) {
+            Text(
+                "显示 ${ui.entries.size} / ${ui.totalCount} 条",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 

@@ -2,6 +2,11 @@ package com.xjw.qalbum.ui.cleanup
 
 import android.content.Intent
 import android.widget.Toast
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -19,30 +24,29 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.DeleteForever
+import androidx.compose.material.icons.outlined.DeleteSweep
 import androidx.compose.material.icons.outlined.Inventory2
 import androidx.compose.material.icons.outlined.Restore
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -56,7 +60,6 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -67,9 +70,15 @@ import coil3.request.ImageRequest
 import coil3.request.crossfade
 import com.xjw.qalbum.ThumbnailTrashActivity
 import com.xjw.qalbum.data.db.entity.QuarantineEntity
+import com.xjw.qalbum.ui.common.formatBytes
+import com.xjw.qalbum.ui.components.BackButton
+import com.xjw.qalbum.ui.components.ConfirmDialog
+import com.xjw.qalbum.ui.components.EmptyState
+import com.xjw.qalbum.ui.components.SegmentPosition
+import com.xjw.qalbum.ui.components.ViewerIconButton
 import java.io.File
 
-/** 回收站页：已移入回收站的图片 + 缩略图入口；全屏、隐藏底部导航栏。 */
+/** 回收站：已移入回收站的图片，点按查看后可恢复或永久删除；全屏、隐藏底部导航栏。 */
 @Composable
 fun CleanupRecycleBinScreen(
     contentPadding: PaddingValues,
@@ -82,7 +91,7 @@ fun CleanupRecycleBinScreen(
     val thumbnailSummary by viewModel.thumbnailTrashSummary.collectAsState()
     val busy by viewModel.busy.collectAsState()
 
-    // 计数/总大小走 DB 聚合（stats），不再 items.size/sumOf —— 列表已分页，内存里没有全量项
+    // 计数 / 总大小走 DB 聚合：列表已分页，内存里没有全量项
     val totalCount = quarantineStats.count
     val totalBytes = quarantineStats.bytes
     var showClearConfirm by remember { mutableStateOf(false) }
@@ -91,27 +100,16 @@ fun CleanupRecycleBinScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
-                    }
-                },
-                title = {
-                    Column {
-                        Text("回收站", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-                        Text(
-                            "$totalCount 项 · ${formatBytes(totalBytes)}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                },
+                navigationIcon = { BackButton(onBack) },
+                title = { Text("回收站") },
+                subtitle = { Text("$totalCount 项 · ${formatBytes(totalBytes)}") },
                 actions = {
                     TextButton(onClick = { showClearConfirm = true }, enabled = totalCount > 0 && !busy) {
-                        Text("一键清理")
+                        Icon(Icons.Outlined.DeleteSweep, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("全部清空")
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
             )
         },
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
@@ -120,62 +118,46 @@ fun CleanupRecycleBinScreen(
             columns = GridCells.Fixed(3),
             modifier = Modifier.fillMaxSize().padding(top = topPadding.calculateTopPadding()),
             contentPadding = PaddingValues(
-                start = 10.dp,
-                end = 10.dp,
+                start = 12.dp,
+                end = 12.dp,
                 top = 4.dp,
                 bottom = contentPadding.calculateBottomPadding() + 16.dp,
             ),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            // 常驻告知：回收站在应用专属目录，数据随 App 数据一起消亡，用户须知
-            item(span = { GridItemSpan(maxLineSpan) }) {
-                Text(
-                    "回收站保存在应用专属目录：卸载或清除应用数据将永久丢失其中照片",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 2.dp, vertical = 6.dp),
-                )
+            item(span = { GridItemSpan(maxLineSpan) }, key = "notice") {
+                InfoBanner("回收站位于应用专属目录：到期会自动永久删除；卸载或清除应用数据时，其中的图片也会一并丢失。")
             }
-
-            item(span = { GridItemSpan(maxLineSpan) }) {
-                ThumbnailEntryCard(
-                    summary = thumbnailSummary,
-                    onOpen = { context.startActivity(Intent(context, ThumbnailTrashActivity::class.java)) },
-                )
+            item(span = { GridItemSpan(maxLineSpan) }, key = "thumbs") {
+                Box(Modifier.padding(bottom = 6.dp)) {
+                    ThumbnailEntryItem(
+                        position = SegmentPosition.Single,
+                        count = thumbnailSummary.count,
+                        bytes = thumbnailSummary.bytes,
+                        onOpen = { context.startActivity(Intent(context, ThumbnailTrashActivity::class.java)) },
+                    )
+                }
             }
 
             if (items.itemCount == 0) {
-                item(span = { GridItemSpan(maxLineSpan) }) {
-                    Box(modifier = Modifier.fillMaxWidth().padding(top = 56.dp), contentAlignment = Alignment.Center) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Icon(
-                                Icons.Outlined.Inventory2,
-                                contentDescription = null,
-                                modifier = Modifier.size(56.dp),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            Spacer(Modifier.height(8.dp))
-                            Text("没有已移入回收站的图片", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
+                item(span = { GridItemSpan(maxLineSpan) }, key = "empty") {
+                    Box(Modifier.fillMaxWidth().height(320.dp)) {
+                        EmptyState(
+                            icon = Icons.Outlined.Inventory2,
+                            title = "回收站是空的",
+                            message = "从图库、审核或聊天来源删除的图片会先来到这里。",
+                        )
                     }
                 }
             } else {
-                item(span = { GridItemSpan(maxLineSpan) }) {
-                    Text(
-                        "已删除图片 · 点按查看",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 8.dp, bottom = 2.dp),
-                    )
-                }
                 items(
                     count = items.itemCount,
                     key = { index -> items.peek(index)?.id ?: "loading-$index" },
                 ) { index ->
                     val record = items[index]
                     if (record != null) {
-                        QuarantineTile(record = record, onClick = { preview = record })
+                        QuarantineTile(record = record, onClick = { preview = record }, modifier = Modifier.animateItem())
                     }
                 }
             }
@@ -193,37 +175,36 @@ fun CleanupRecycleBinScreen(
     }
 
     if (showClearConfirm) {
-        AlertDialog(
-            onDismissRequest = { showClearConfirm = false },
-            title = { Text("清理整个回收站？") },
-            text = { Text("将永久删除已移入回收站的图片，删除后不可恢复。QQ 预览缓存不会被清理。") },
-            confirmButton = {
-                TextButton(onClick = {
-                    showClearConfirm = false
-                    viewModel.purgeAllRecycleBin { count ->
-                        Toast.makeText(context, "已清理 $count 项", Toast.LENGTH_SHORT).show()
-                    }
-                }) { Text("确认清理") }
+        ConfirmDialog(
+            icon = Icons.Outlined.DeleteForever,
+            title = "清空回收站？",
+            text = "将永久删除回收站中的 $totalCount 项（${formatBytes(totalBytes)}），无法恢复。QQ 缩略图不受影响。",
+            confirmLabel = "永久删除",
+            destructive = true,
+            onDismiss = { showClearConfirm = false },
+            onConfirm = {
+                showClearConfirm = false
+                viewModel.purgeAllRecycleBin { count ->
+                    Toast.makeText(context, "已永久删除 $count 项", Toast.LENGTH_SHORT).show()
+                }
             },
-            dismissButton = { TextButton(onClick = { showClearConfirm = false }) { Text("取消") } },
         )
     }
-    // 清理进度模态由 CleanupScreen 根部统一展示（重建后落回主页也不丢屏蔽）
+    // 清理进度模态由 CleanupScreen 根部统一展示
 }
 
 @Composable
-private fun QuarantineTile(record: QuarantineEntity, onClick: () -> Unit) {
+private fun QuarantineTile(record: QuarantineEntity, onClick: () -> Unit, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     Box(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .aspectRatio(1f)
-            .clip(RoundedCornerShape(10.dp))
+            .clip(MaterialTheme.shapes.medium)
             .background(MaterialTheme.colorScheme.surfaceContainerHigh)
             .clickable(onClick = onClick),
     ) {
-        // 新记录不再预生成缩略图，直接用移动后的原图（quarantinePath）；存量记录仍用其缩略图。
-        // 文件缺失时 Coil 加载失败，露出 Box 背景色作占位。
+        // 新记录直接用移动后的原图（quarantinePath）；存量记录用其缩略图。文件缺失时露出背景色占位
         val thumb = record.thumbnailPath ?: record.quarantinePath
         AsyncImage(
             model = ImageRequest.Builder(context).data(File(thumb)).crossfade(true).build(),
@@ -235,7 +216,7 @@ private fun QuarantineTile(record: QuarantineEntity, onClick: () -> Unit) {
             modifier = Modifier
                 .align(Alignment.BottomStart)
                 .padding(5.dp)
-                .clip(RoundedCornerShape(999.dp))
+                .clip(CircleShape)
                 .background(Color.Black.copy(alpha = 0.55f))
                 .padding(horizontal = 8.dp, vertical = 3.dp),
         ) {
@@ -254,13 +235,13 @@ private fun QuarantinePreviewDialog(
 ) {
     val context = LocalContext.current
     var confirmPurge by remember { mutableStateOf(false) }
+    val sheetVisible = remember { androidx.compose.animation.core.MutableTransitionState(false).apply { targetState = true } }
 
     Dialog(
         onDismissRequest = onClose,
         properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false, decorFitsSystemWindows = false),
     ) {
         Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
-            // 新记录不再预生成缩略图，直接用移动后的原图（quarantinePath）；存量记录仍用其缩略图。
             val thumb = record.thumbnailPath ?: record.quarantinePath
             AsyncImage(
                 model = ImageRequest.Builder(context).data(File(thumb)).crossfade(true).build(),
@@ -273,82 +254,89 @@ private fun QuarantinePreviewDialog(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .fillMaxWidth()
-                    .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.72f), Color.Transparent)))
+                    .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.7f), Color.Transparent)))
                     .statusBarsPadding()
                     .padding(start = 4.dp, top = 6.dp, end = 12.dp, bottom = 28.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                IconButton(onClick = onClose) {
-                    Icon(Icons.Outlined.Close, contentDescription = "关闭", tint = Color.White)
-                }
+                ViewerIconButton(Icons.Outlined.Close, "关闭", onClose)
                 Column(modifier = Modifier.weight(1f).padding(start = 4.dp)) {
                     Text(
                         record.originalPath.substringAfterLast('/').ifBlank { "图片" },
                         style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
                         color = Color.White,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                     Text(
-                        "删除于 ${formatQuarantineDate(record.quarantinedAt)}",
+                        "移入于 ${formatQuarantineDate(record.quarantinedAt)}",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color.White.copy(alpha = 0.72f),
                     )
                 }
             }
 
-            Column(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
-                    .background(MaterialTheme.colorScheme.surface)
-                    .navigationBarsPadding()
-                    .padding(20.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+            AnimatedVisibility(
+                visibleState = sheetVisible,
+                enter = slideInVertically(MaterialTheme.motionScheme.defaultSpatialSpec()) { it } + fadeIn(),
+                exit = slideOutVertically { it } + fadeOut(),
+                modifier = Modifier.align(Alignment.BottomCenter),
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        Icons.Outlined.Inventory2,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(20.dp),
-                    )
-                    Spacer(Modifier.size(8.dp))
-                    Text("删除原因", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                    Box(
+                Surface(
+                    shape = MaterialTheme.shapes.extraLarge.copy(
+                        bottomStart = androidx.compose.foundation.shape.CornerSize(0.dp),
+                        bottomEnd = androidx.compose.foundation.shape.CornerSize(0.dp),
+                    ),
+                    color = MaterialTheme.colorScheme.surfaceContainerLow,
+                ) {
+                    Column(
                         modifier = Modifier
-                            .clip(RoundedCornerShape(999.dp))
-                            .background(MaterialTheme.colorScheme.secondaryContainer)
-                            .padding(horizontal = 12.dp, vertical = 5.dp),
+                            .fillMaxWidth()
+                            .navigationBarsPadding()
+                            .padding(24.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
-                        Text(record.reason, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSecondaryContainer)
-                    }
-                }
-                HorizontalDivider()
-                QuarantineInfoRow("大小", formatBytes(record.size))
-                QuarantineInfoRow("自动删除", autoDeleteText(record.expiresAt))
-                QuarantineInfoRow("原位置", record.originalPath.substringBeforeLast('/').ifBlank { record.originalPath })
-                Spacer(Modifier.height(4.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    OutlinedButton(onClick = onRestore, enabled = !busy, modifier = Modifier.weight(1f)) {
-                        Icon(Icons.Outlined.Restore, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.size(6.dp))
-                        Text("恢复")
-                    }
-                    Button(
-                        onClick = { confirmPurge = true },
-                        enabled = !busy,
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.error,
-                            contentColor = MaterialTheme.colorScheme.onError,
-                        ),
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Icon(Icons.Outlined.Delete, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.size(6.dp))
-                        Text("永久删除")
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("删除原因", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                            Surface(shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer) {
+                                Text(
+                                    record.reason,
+                                    style = MaterialTheme.typography.labelLarge,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
+                                )
+                            }
+                        }
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        QuarantineInfoRow("大小", formatBytes(record.size))
+                        QuarantineInfoRow("自动删除", autoDeleteText(record.expiresAt))
+                        QuarantineInfoRow("原位置", record.originalPath.substringBeforeLast('/').ifBlank { record.originalPath })
+                        Spacer(Modifier.height(4.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            FilledTonalButton(
+                                onClick = onRestore,
+                                enabled = !busy,
+                                shapes = ButtonDefaults.shapes(),
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Icon(Icons.Outlined.Restore, contentDescription = null, modifier = Modifier.size(ButtonDefaults.IconSize))
+                                Spacer(Modifier.width(ButtonDefaults.IconSpacing))
+                                Text("恢复")
+                            }
+                            Button(
+                                onClick = { confirmPurge = true },
+                                enabled = !busy,
+                                shapes = ButtonDefaults.shapes(),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.error,
+                                    contentColor = MaterialTheme.colorScheme.onError,
+                                ),
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Icon(Icons.Outlined.Delete, contentDescription = null, modifier = Modifier.size(ButtonDefaults.IconSize))
+                                Spacer(Modifier.width(ButtonDefaults.IconSpacing))
+                                Text("永久删除")
+                            }
+                        }
                     }
                 }
             }
@@ -356,14 +344,14 @@ private fun QuarantinePreviewDialog(
     }
 
     if (confirmPurge) {
-        AlertDialog(
-            onDismissRequest = { confirmPurge = false },
-            title = { Text("永久删除这张图片？") },
-            text = { Text("删除后将无法恢复。") },
-            confirmButton = {
-                TextButton(onClick = { confirmPurge = false; onPurge() }) { Text("永久删除") }
-            },
-            dismissButton = { TextButton(onClick = { confirmPurge = false }) { Text("取消") } },
+        ConfirmDialog(
+            icon = Icons.Outlined.DeleteForever,
+            title = "永久删除这张图片？",
+            text = "删除后无法恢复。",
+            confirmLabel = "永久删除",
+            destructive = true,
+            onDismiss = { confirmPurge = false },
+            onConfirm = { confirmPurge = false; onPurge() },
         )
     }
 }
@@ -380,7 +368,6 @@ private fun QuarantineInfoRow(label: String, value: String) {
         Text(
             value,
             style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurface,
             modifier = Modifier.weight(0.7f),
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,

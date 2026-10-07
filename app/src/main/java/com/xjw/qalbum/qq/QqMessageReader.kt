@@ -11,6 +11,7 @@ internal data class QqMessageRecord(
     val values: List<String>,
     val sentAt: Long,
     val pictures: List<QqPictureElement>,
+    val forwardedPictures: List<QqForwardPicture> = emptyList(),
 )
 
 internal data class QqMessageReadStats(
@@ -28,8 +29,10 @@ internal class QqMessageReader(private val database: SQLiteDatabase) {
         consume: suspend (List<QqMessageRecord>, QqMessageReadStats) -> Unit,
     ): QqMessageReadStats {
         require(table in setOf("group_msg_table", "c2c_msg_table"))
-        val fields = listOf("40001", "40020", "40021", "40027", "40030", "40033", "40050", "40090", "40093")
+        val fields = listOf("40001", "40020", "40021", "40027", "40030", "40033", "40050", "40090", "40093", "40011")
         val select = fields.joinToString(",") { if (it in columns) "[$it]" else "NULL" }
+        val cache = if ("40900" in columns) "[40900]" else "NULL"
+        val forwardCandidate = if ("40011" in columns) "[40011] IN (8,11)" else "1"
         var after: Long? = null
         var stats = QqMessageReadStats()
 
@@ -37,18 +40,36 @@ internal class QqMessageReader(private val database: SQLiteDatabase) {
             currentCoroutineContext().ensureActive()
             return try {
                 // 强制走表，避免 QQ 历史索引异常影响本来可读的图片记录；不重建任何索引。
-                val sql = "SELECT $select, CASE WHEN length([40800]) <= ${QqPictureCodec.MAX_MESSAGE_BYTES} THEN [40800] ELSE NULL END " +
-                    "FROM $table NOT INDEXED WHERE rowid IN (${ids.joinToString(",") { "?" }}) AND [40800] IS NOT NULL ORDER BY rowid"
+                val sql = "SELECT $select, CASE WHEN length([40800]) <= ${QqPictureCodec.MAX_MESSAGE_BYTES} THEN [40800] ELSE NULL END, " +
+                    "CASE WHEN $forwardCandidate AND length($cache) <= $INLINE_CACHE_BYTES THEN $cache ELSE NULL END, length($cache), length([40800]), rowid " +
+                    "FROM $table NOT INDEXED WHERE rowid IN (${ids.joinToString(",") { "?" }}) AND ([40800] IS NOT NULL OR $cache IS NOT NULL) ORDER BY rowid"
                 val rows = mutableListOf<QqMessageRecord>()
                 var skipped = 0
                 database.rawQuery(sql, ids.map { it.toString() }.toTypedArray()).use { cursor ->
                     while (cursor.moveToNext()) {
                         currentCoroutineContext().ensureActive()
-                        if (cursor.isNull(9)) { skipped++; continue }
-                        val pictures = try { QqPictureCodec.decode(cursor.getBlob(9)) }
-                        catch (_: InvalidProtocolBufferException) { skipped++; continue }
-                        if (pictures.isNotEmpty()) {
-                            rows += QqMessageRecord(fields.indices.map { cursor.text(it) }, cursor.getLong(6), pictures)
+                        val decoded = if (cursor.isNull(10)) {
+                            if (cursor.getLong(13) > QqPictureCodec.MAX_MESSAGE_BYTES) skipped++
+                            QqDecodedElements(emptyList(), false)
+                        } else try { QqPictureCodec.decodeElements(cursor.getBlob(10)) }
+                        catch (_: InvalidProtocolBufferException) { skipped++; QqDecodedElements(emptyList(), false) }
+                        // 11 是合并转发；旧版用元素类型 16。回复（9）中的缓存不可归给回复者。
+                        val forwarded = if (cursor.getInt(9) == 11 || (cursor.getInt(9) != 9 && decoded.hasForward)) {
+                            val size = cursor.getLong(12)
+                            when {
+                                size <= 0 -> { skipped++; emptyList() }
+                                size > QqForwardPictureCodec.MAX_CACHE_BYTES -> { skipped++; emptyList() }
+                                else -> {
+                                    val bytes = if (!cursor.isNull(11)) cursor.getBlob(11)
+                                        else readCache(table, cursor.getLong(14), size.toInt())
+                                    val cached = QqForwardPictureCodec.decode(bytes)
+                                    if (cached.incomplete) skipped++
+                                    cached.pictures
+                                }
+                            }
+                        } else emptyList()
+                        if (decoded.pictures.isNotEmpty() || forwarded.isNotEmpty()) {
+                            rows += QqMessageRecord(fields.indices.map { cursor.text(it) }, cursor.getLong(6), decoded.pictures, forwarded)
                         }
                     }
                 }
@@ -142,6 +163,25 @@ internal class QqMessageReader(private val database: SQLiteDatabase) {
         }
     }
 
+    /** 大转发 BLOB 分块读取，避免单行超过 Android CursorWindow；SQL 仅对只读副本执行。 */
+    private suspend fun readCache(table: String, rowid: Long, size: Int): ByteArray {
+        val bytes = ByteArray(size)
+        var offset = 0
+        while (offset < size) {
+            currentCoroutineContext().ensureActive()
+            val count = minOf(CACHE_CHUNK_BYTES, size - offset)
+            database.rawQuery("SELECT substr([40900],?,?) FROM $table NOT INDEXED WHERE rowid=?",
+                arrayOf((offset + 1).toString(), count.toString(), rowid.toString())).use { cursor ->
+                if (!cursor.moveToFirst()) throw SQLiteDatabaseCorruptException("Copied message record missing")
+                val chunk = cursor.getBlob(0)
+                if (chunk.size != count) throw SQLiteDatabaseCorruptException("Copied message cache incomplete")
+                chunk.copyInto(bytes, offset)
+            }
+            offset += count
+        }
+        return bytes
+    }
+
     private fun coveringIndexes(table: String): List<String> = database.rawQuery("PRAGMA index_list($table)", emptyArray<String>()).use { cursor ->
         buildList {
             val partial = cursor.getColumnIndex("partial")
@@ -160,5 +200,7 @@ internal class QqMessageReader(private val database: SQLiteDatabase) {
 
     private companion object {
         const val BATCH_SIZE = 128
+        const val INLINE_CACHE_BYTES = 256 * 1024
+        const val CACHE_CHUNK_BYTES = 128 * 1024
     }
 }

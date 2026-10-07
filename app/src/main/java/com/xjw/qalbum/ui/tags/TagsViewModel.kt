@@ -191,6 +191,21 @@ class TagsViewModel(
         }
     }
 
+    /** 看图页「删除」：把这一张移入回收站（收藏 / 保留的图片会被跳过），[onDone] 回调是否成功 */
+    fun trashOne(tag: TagDao.TagWithCount, imageId: Long, onDone: (Boolean) -> Unit = {}) {
+        appScope.launch {
+            val moved = try {
+                cleanupController.moveToTrash(listOf(imageId to reasonFor(tag))) == 1
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                Timber.e(t, "移入回收站失败: tag=${tag.name}")
+                false
+            }
+            withContext(Dispatchers.Main.immediate) { onDone(moved) }
+        }
+    }
+
     /** 整标签全删：按 id 升序 keyset 分块，逐块移入回收站；已隔离的图自然退出活跃集，不会重复。 */
     private suspend fun deleteWholeTag(tag: TagDao.TagWithCount): Int {
         val total = imageRepository.countImagesByTag(tag.id)

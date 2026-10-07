@@ -78,7 +78,8 @@ class SearchViewModel(
             return
         }
         val mode = _mode.value
-        _state.value = SearchUiState.Idle
+        // 防抖期间保留上一次结果，避免逐键输入时结果区在「空闲 / 加载 / 结果」之间来回闪
+        if (_state.value is SearchUiState.Failed || _state.value is SearchUiState.Empty) _state.value = SearchUiState.Idle
         searchJob = viewModelScope.launch {
             if (!immediate) delay(250)
             _state.value = SearchUiState.Loading

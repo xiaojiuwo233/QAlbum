@@ -55,7 +55,7 @@ class QqSourceRepository(
                     if (refresh) db.withTransaction {
                         if (dao.cacheDirty() == true) {
                             dao.clearFacets()
-                            dao.cacheGroups()
+                            dao.cacheConversations()
                             dao.cacheSenders()
                             dao.finishCache()
                         }
@@ -184,6 +184,7 @@ class QqSourceRepository(
         }
     }
 
+    /** 按来源范围整体移入回收站（收藏 / 保留的图片跳过；[includeShared] 决定是否包含也出现在其他会话的图片） */
     fun trash(scope: QqSourceScope, includeShared: Boolean) {
         if (scope.groupKey == null && scope.senderKey == null) return
         if (!_progress.compareAndSet(null, QqSourceProgress("准备移入回收站", cancellable = false))) return
@@ -203,9 +204,9 @@ class QqSourceRepository(
                     processed += ids.size
                     afterId = ids.last()
                 }
-                report("已移入回收站 $moved 张" + if (moved < counts.removable) "；部分图片未移动，仍保留在原处" else "")
+                _message.value = "已移入回收站 $moved 张" + if (moved < counts.removable) "；部分图片未移动，仍保留在原处" else ""
             } catch (_: Exception) {
-                report("已移入回收站 $moved 张，操作未全部完成")
+                _message.value = "已移入回收站 $moved 张，操作未全部完成"
             } finally {
                 _progress.value = null
             }
@@ -218,9 +219,10 @@ class QqSourceRepository(
             try {
                 settings.setQqSourcesComplete(false)
                 db.withTransaction { dao.clear() }
-                report("已清除来源索引")
+                _report.value = null
+                _message.value = "已清除来源索引"
             } catch (_: Exception) {
-                report("来源索引清除失败")
+                _message.value = "来源索引清除失败"
             } finally { _progress.value = null }
         }
     }

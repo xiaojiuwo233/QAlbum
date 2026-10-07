@@ -249,7 +249,7 @@ internal fun Flow<PagingData<ImageEntity>>.withDateHeaders(
             }
     }
 
-private fun Flow<PagingData<ImageEntity>>.withSizeHeaders(
+internal fun Flow<PagingData<ImageEntity>>.withSizeHeaders(
     bucketCounts: Flow<Map<Long, Int>?>,
 ): Flow<PagingData<GalleryTimelineItem>> =
     flowMap { pagingData: PagingData<ImageEntity> ->

@@ -256,7 +256,18 @@ val appModule = module {
         )
     }
     viewModel { LogViewModel() }
-    viewModel { QqSourcesViewModel(repository = get(), settings = get(), images = get(), imageFiles = get()) }
+    viewModel { QqSourcesViewModel(repository = get(), settings = get()) }
+    viewModel { params ->
+        com.xjw.qalbum.ui.sources.QqSourceBrowseViewModel(
+            target = params.get(),
+            repository = get(),
+            settings = get(),
+            images = get(),
+            imageFiles = get(),
+            quarantine = get(),
+            appScope = get(),
+        )
+    }
 
     // ---- Worker ----
 

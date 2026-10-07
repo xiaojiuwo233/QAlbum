@@ -62,7 +62,7 @@ import com.xjw.qalbum.data.db.entity.TagEntity
         QqSourceFacetCacheEntity::class,
         QqSourceCacheEntity::class,
     ],
-    version = 14,
+    version = 15,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -391,6 +391,29 @@ abstract class AppDatabase : RoomDatabase() {
                 BEGIN $dirty END""")
         }
 
+        /**
+         * v14 → v15：来源统计增加占用空间。分类缓存补字节总和、会话类型（私聊也进入分类）
+         * 与最近消息时间；已关联图片的大小变化同样让缓存失效。只加列与触发器，来源索引原样保留，
+         * 缓存标脏后由来源页按新口径重建。
+         */
+        val MIGRATION_14_15 = object : Migration(14, 15) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE qq_source_facets ADD COLUMN chat_type INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE qq_source_facets ADD COLUMN total_bytes INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE qq_source_facets ADD COLUMN latest_time INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE qq_source_cache ADD COLUMN linked_bytes INTEGER NOT NULL DEFAULT 0")
+                createQqSourceSizeTrigger(db)
+                db.execSQL("UPDATE qq_source_cache SET dirty=1")
+            }
+        }
+
+        internal fun createQqSourceSizeTrigger(db: SupportSQLiteDatabase) {
+            db.execSQL("""CREATE TRIGGER IF NOT EXISTS dirty_qq_image_size
+                AFTER UPDATE OF size ON images
+                WHEN OLD.size <> NEW.size AND EXISTS(SELECT 1 FROM image_qq_origins WHERE image_id=NEW.id)
+                BEGIN UPDATE qq_source_cache SET dirty=1 WHERE id=1 AND dirty=0; END""")
+        }
+
         private fun createAnalysisInvalidationTrigger(db: SupportSQLiteDatabase) {
             // 文件被 QQ 重写时，标记和派生内容一起失效，避免旧 OCR/标签/向量污染新图片。
             db.execSQL("""
@@ -613,12 +636,14 @@ abstract class AppDatabase : RoomDatabase() {
                     MIGRATION_11_12,
                     MIGRATION_12_13,
                     MIGRATION_13_14,
+                    MIGRATION_14_15,
                 )
                 .addCallback(object : Callback() {
                     override fun onCreate(db: SupportSQLiteDatabase) {
                         createAnalysisInvalidationTrigger(db)
                         createQqSourceTriggers(db)
                         createQqSourceCacheTriggers(db)
+                        createQqSourceSizeTrigger(db)
                     }
                 })
                 // 刻意不配置任何 destructive 回退：未覆盖的版本跳变（含降级）宁可 fail-fast

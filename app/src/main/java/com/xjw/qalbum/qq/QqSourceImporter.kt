@@ -85,11 +85,20 @@ internal class QqSourceImporter(private val db: AppDatabase) {
                         val memberName = historicalCard.ifBlank { member.card }
                         val senderName = profile.displayName.ifBlank { historicalNickname.ifBlank { member.nickname.ifBlank { memberName } } }
                         if (senderName.isNotBlank()) senderNames[senderKey] = senderName
-                        if (conversationName.isNotBlank()) conversationNames[conversationKey] = conversationName
+                        if (record.pictures.isNotEmpty() && conversationName.isNotBlank()) conversationNames[conversationKey] = conversationName
                         record.pictures.forEachIndexed { index, picture ->
                             val id = opaqueKey(account.key, table, msgId, picture.elementId.ifBlank { index.toString() }, picture.md5s.joinToString(","))
                             origins += QqOriginEntity(id, account.key, conversationKey, conversationName, chatType,
                                 senderKey, senderName, memberName, record.sentAt * 1000L, picture.md5s.first())
+                            QqCachePaths.paths(chatpicRoot, picture).forEach { paths += QqOriginPathEntity(it, id) }
+                            pictures++
+                        }
+                        // 合并转发统一进入虚拟分类。所有层的图片使用最外层转发者，不借用内层人物或原群。
+                        record.forwardedPictures.forEach { forwarded ->
+                            val picture = forwarded.picture
+                            val id = opaqueKey(account.key, table, msgId, "forwarded", forwarded.identity, picture.md5s.joinToString(","))
+                            origins += QqOriginEntity(id, account.key, QqForwardSource.KEY, QqForwardSource.NAME, QqForwardSource.CHAT_TYPE,
+                                senderKey, senderName, "", record.sentAt * 1000L, picture.md5s.first())
                             QqCachePaths.paths(chatpicRoot, picture).forEach { paths += QqOriginPathEntity(it, id) }
                             pictures++
                         }

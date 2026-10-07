@@ -1,9 +1,12 @@
 package com.xjw.qalbum.ui.sources
 
-import android.widget.Toast
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,46 +14,50 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.ArrowBack
-import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.Delete
-import androidx.compose.material.icons.outlined.Favorite
-import androidx.compose.material.icons.outlined.FavoriteBorder
-import androidx.compose.material.icons.outlined.Groups
+import androidx.compose.material.icons.outlined.ArrowDropDown
+import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material.icons.outlined.MoreVert
-import androidx.compose.material.icons.outlined.Person
+import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.Refresh
-import androidx.compose.material.icons.outlined.Search
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Checkbox
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material.icons.outlined.SearchOff
+import androidx.compose.material.icons.outlined.Sync
+import androidx.compose.material.icons.outlined.WarningAmber
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.ButtonGroupDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.LargeFlexibleTopAppBar
+import androidx.compose.material3.MaterialShapes
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.ToggleButton
+import androidx.compose.material3.ToggleButtonDefaults
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.toShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -60,167 +67,157 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
-import androidx.paging.LoadState
-import androidx.paging.compose.collectAsLazyPagingItems
-import coil3.compose.AsyncImage
-import com.xjw.qalbum.data.db.dao.QqSourceFacet
-import com.xjw.qalbum.data.db.entity.ImageEntity
-import com.xjw.qalbum.ui.cleanup.shareChooser
-import com.xjw.qalbum.ui.components.FullScreenImagePager
-import com.xjw.qalbum.ui.components.PreviewAction
-import com.xjw.qalbum.ui.gallery.GalleryViewModel
-import com.xjw.qalbum.ui.imageloading.ImageEntityModel
+import com.xjw.qalbum.data.db.dao.QqSourceSummary
+import com.xjw.qalbum.data.db.entity.QqSourceAccountEntity
+import com.xjw.qalbum.domain.model.SourceFacetOrder
+import com.xjw.qalbum.qq.QqSourceProgress
+import com.xjw.qalbum.ui.common.formatBytes
+import com.xjw.qalbum.ui.common.formatCountExact
+import com.xjw.qalbum.ui.common.formatDateTime
+import com.xjw.qalbum.ui.components.BackButton
+import com.xjw.qalbum.ui.components.ConfirmDialog
+import com.xjw.qalbum.ui.components.SearchField
+import com.xjw.qalbum.ui.components.SegmentPosition
+import com.xjw.qalbum.ui.components.SegmentedDefaults
+import com.xjw.qalbum.ui.components.ShapeIcon
+import com.xjw.qalbum.ui.components.WavyProgress
 import org.koin.androidx.compose.koinViewModel
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
+/**
+ * QQ 来源首页：读取聊天记录的只读副本后，按群聊 / 私聊 / 发送人列出图片分类，
+ * 每类显示图片数、最近时间与占用空间（附占比条）。点分类进入浏览页再细分筛选与清理。
+ */
 @Composable
 fun QqSourcesScreen(
-    contentPadding: PaddingValues,
     onBack: () -> Unit,
+    onBrowse: (SourceBrowseTarget) -> Unit,
     viewModel: QqSourcesViewModel = koinViewModel(),
-    gallery: GalleryViewModel = koinViewModel(),
 ) {
-    val selected by viewModel.selection.collectAsState()
     val tab by viewModel.tab.collectAsState()
     val search by viewModel.search.collectAsState()
-    val groups by viewModel.groups.collectAsState()
-    val senders by viewModel.senders.collectAsState()
+    val order by viewModel.order.collectAsState()
+    val facets by viewModel.facets.collectAsState()
+    val tabCounts by viewModel.tabCounts.collectAsState()
+    val summary by viewModel.summary.collectAsState()
     val accounts by viewModel.accounts.collectAsState()
-    val linkedCount by viewModel.linkedCount.collectAsState()
-    val columns by viewModel.columns.collectAsState()
-    val progress by viewModel.repository.progress.collectAsState()
-    val message by viewModel.repository.message.collectAsState()
-    val report by viewModel.repository.report.collectAsState()
-    val sourcesComplete by viewModel.repository.sourcesComplete.collectAsState(initial = false)
-    val confirmation by viewModel.confirmation.collectAsState()
-    val subdirs by gallery.exportSubdirs.collectAsState()
-    val photos = viewModel.photos.collectAsLazyPagingItems()
-    val context = LocalContext.current
-    var menu by remember { mutableStateOf(false) }
+    val progress by viewModel.progress.collectAsState()
+    val message by viewModel.message.collectAsState()
+    val report by viewModel.report.collectAsState()
+    val sourcesComplete by viewModel.sourcesComplete.collectAsState(initial = true)
+    val snackbar = remember { SnackbarHostState() }
+    var menuOpen by remember { mutableStateOf(false) }
     var clearConfirm by remember { mutableStateOf(false) }
-    var preview by remember { mutableStateOf<Pair<List<ImageEntity>, Int>?>(null) }
+    val listState = rememberLazyListState()
+    val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
+
     LaunchedEffect(message) {
-        message?.let { Toast.makeText(context, it, Toast.LENGTH_LONG).show(); viewModel.repository.acknowledgeMessage() }
+        val text = message ?: return@LaunchedEffect
+        viewModel.acknowledgeMessage()
+        snackbar.showSnackbar(text)
     }
 
     Scaffold(
+        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
-            TopAppBar(
-                title = { Column {
-                    Text("QQ 图片来源", style = MaterialTheme.typography.titleLarge)
-                    Text("已关联 $linkedCount 张", style = MaterialTheme.typography.bodySmall)
-                } },
-                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回") } },
+            LargeFlexibleTopAppBar(
+                title = { Text("聊天来源") },
+                subtitle = { Text("按群聊、私聊和发送人整理 QQ 图片") },
+                navigationIcon = { BackButton(onBack) },
                 actions = {
-                    IconButton(onClick = viewModel.repository::refresh, enabled = progress == null) { Icon(Icons.Outlined.Refresh, "读取 QQ 来源（Root）") }
-                    if (selected.group != null || selected.sender != null) {
-                        IconButton(onClick = { viewModel.requestTrash(selected) }, enabled = progress == null) { Icon(Icons.Outlined.Delete, "清理筛选后的图片") }
-                    }
+                    IconButton(
+                        onClick = viewModel::refresh,
+                        enabled = progress == null,
+                        shapes = IconButtonDefaults.shapes(),
+                    ) { Icon(Icons.Outlined.Refresh, contentDescription = "重新读取来源") }
                     Box {
-                        IconButton(onClick = { menu = true }) { Icon(Icons.Outlined.MoreVert, "更多") }
-                        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                            DropdownMenuItem(text = { Text("清除来源索引") }, enabled = progress == null,
-                                onClick = { menu = false; clearConfirm = true })
+                        IconButton(onClick = { menuOpen = true }, shapes = IconButtonDefaults.shapes()) {
+                            Icon(Icons.Outlined.MoreVert, contentDescription = "更多")
+                        }
+                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                            DropdownMenuItem(
+                                text = { Text("清除来源索引") },
+                                enabled = progress == null && accounts.isNotEmpty(),
+                                onClick = { menuOpen = false; clearConfirm = true },
+                            )
                         }
                     }
                 },
+                scrollBehavior = scrollBehavior,
             )
         },
+        snackbarHost = { SnackbarHost(snackbar) },
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
     ) { padding ->
-        Column(Modifier.fillMaxSize().padding(top = padding.calculateTopPadding())) {
-            progress?.let { running ->
-                Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(running.label, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
-                        if (running.cancellable) TextButton(onClick = viewModel.repository::cancel) { Text("停止") }
-                    }
-                    if (running.total > 0) LinearProgressIndicator(progress = { (running.done.toFloat() / running.total).coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
-                    else LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+        val bottomInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(
+                start = 16.dp,
+                end = 16.dp,
+                top = padding.calculateTopPadding() + 4.dp,
+                bottom = bottomInset + 24.dp,
+            ),
+            verticalArrangement = Arrangement.spacedBy(SegmentedDefaults.Gap),
+        ) {
+            item(key = "status", contentType = "status") {
+                StatusCard(
+                    progress = progress,
+                    summary = summary,
+                    accounts = accounts,
+                    report = report,
+                    complete = sourcesComplete,
+                    onRefresh = viewModel::refresh,
+                    onCancel = viewModel::cancel,
+                    onBrowseAll = { onBrowse(SourceBrowseTarget.All) },
+                    modifier = Modifier.animateItem().padding(bottom = 12.dp),
+                )
+            }
+            if (accounts.isNotEmpty()) {
+                item(key = "controls", contentType = "controls") {
+                    FacetControls(
+                        tab = tab,
+                        counts = tabCounts,
+                        search = search,
+                        order = order,
+                        onTab = viewModel::selectTab,
+                        onSearch = { viewModel.search.value = it },
+                        onOrder = viewModel::setOrder,
+                        modifier = Modifier.padding(bottom = 8.dp),
+                    )
                 }
-            }
-            if (accounts.isEmpty() && progress == null) {
-                Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("尚未读取 QQ 图片来源", style = MaterialTheme.typography.titleMedium)
-                    Spacer(Modifier.height(12.dp))
-                    FilledTonalButton(onClick = viewModel.repository::refresh) {
-                        Icon(Icons.Outlined.Refresh, null, Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp)); Text("读取来源（Root）")
-                    }
-                }
-            } else if (accounts.isNotEmpty()) {
-                val updated = accounts.maxOf { it.importedAt }
-                Text("${accounts.size} 个账号 · ${SimpleDateFormat("MM-dd HH:mm", Locale.CHINA).format(Date(updated))}",
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
-            }
-            if (progress == null) report?.let {
-                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp))
-            }
-            if (progress == null && accounts.isNotEmpty() && !sourcesComplete && report == null) {
-                Text("部分来源未能读取，筛选和清理仅覆盖已关联图片；共用统计可能有遗漏。",
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp))
-            }
-            if (selected.group != null || selected.sender != null) {
-                Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
-                    selected.group?.let { facet -> SourceFilter(facet.name.ifBlank { "群名称未缓存" }, { viewModel.openTab(0) }, { viewModel.selection.value = selected.copy(group = null) }) }
-                    selected.sender?.let { facet -> SourceFilter(facet.name.ifBlank { "发送人名称未缓存" }, { viewModel.openTab(1) }, { viewModel.selection.value = selected.copy(sender = null) }) }
-                }
-            }
-            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-                listOf("群聊", "发送人", "图片").forEachIndexed { index, label ->
-                    SegmentedButton(selected = tab == index, onClick = { viewModel.openTab(index) },
-                        shape = SegmentedButtonDefaults.itemShape(index, 3)) { Text(label) }
-                }
-            }
-            if (tab != 2) {
-                OutlinedTextField(value = search, onValueChange = { viewModel.search.value = it },
-                    label = { Text(if (tab == 0) "搜索群聊" else "搜索昵称或群名片") }, singleLine = true,
-                    leadingIcon = { Icon(Icons.Outlined.Search, null) }, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp))
-                val facets = if (tab == 0) groups else senders
-                if (facets.isEmpty()) {
-                    Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                        Text(if (accounts.isEmpty()) "尚无来源索引" else "没有已关联的图片", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                } else {
-                    LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(bottom = contentPadding.calculateBottomPadding() + 16.dp)) {
-                        items(facets, key = { it.key }) { facet ->
-                            SourceRow(facet, tab == 0, accounts.size > 1,
-                                onClick = { if (tab == 0) viewModel.selectGroup(facet) else viewModel.selectSender(facet) },
-                                onLongClick = { viewModel.requestTrash(if (tab == 0) selected.copy(group = facet) else selected.copy(sender = facet)) })
+                val list = facets
+                when {
+                    list == null -> item(key = "loading") {
+                        Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
+                            androidx.compose.material3.LoadingIndicator()
                         }
                     }
-                }
-            } else {
-                if (photos.loadState.refresh is LoadState.Error) {
-                    TextButton(onClick = { photos.retry() }, modifier = Modifier.align(Alignment.CenterHorizontally)) { Text("加载失败，重试") }
-                } else if (photos.itemCount == 0) {
-                    Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                        if (photos.loadState.refresh is LoadState.Loading) CircularProgressIndicator()
-                        else Text("没有已关联的图片", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    list.isEmpty() -> item(key = "empty-${tab.name}") {
+                        EmptyFacets(
+                            searching = search.isNotBlank(),
+                            tab = tab,
+                            modifier = Modifier.animateItem(),
+                        )
                     }
-                } else {
-                    LazyVerticalGrid(columns = GridCells.Fixed(columns.coerceIn(2, 8)), modifier = Modifier.weight(1f),
-                        contentPadding = PaddingValues(bottom = contentPadding.calculateBottomPadding() + 8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(2.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        items(photos.itemCount, key = { index -> photos.peek(index)?.id ?: -index.toLong() - 1 }) { index ->
-                            photos[index]?.let { image ->
-                                Box(Modifier.fillMaxWidth().aspectRatio(1f).background(MaterialTheme.colorScheme.surfaceVariant).clickable {
-                                    val loaded = photos.itemSnapshotList.items
-                                    val position = loaded.indexOfFirst { it.id == image.id }
-                                    if (position >= 0) preview = loaded to position
-                                }) {
-                                    AsyncImage(model = ImageEntityModel(image), contentDescription = image.filename, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-                                }
-                            }
+                    else -> {
+                        val maxBytes = list.maxOf { it.bytes }
+                        val kind = if (tab == SourceTab.SENDERS) SourceKind.SENDER else SourceKind.CONVERSATION
+                        itemsIndexed(list, key = { _, facet -> "${tab.name}-${facet.key}" }) { index, facet ->
+                            SourceFacetRow(
+                                facet = facet,
+                                kind = kind,
+                                position = SegmentPosition(index, list.size),
+                                maxBytes = maxBytes,
+                                showAccount = accounts.size > 1,
+                                onClick = { onBrowse(SourceBrowseTarget(kind, facet.key)) },
+                                modifier = Modifier.animateItem(),
+                            )
                         }
                     }
                 }
@@ -228,64 +225,300 @@ fun QqSourcesScreen(
         }
     }
 
-    confirmation?.let { request ->
-        AlertDialog(onDismissRequest = { viewModel.confirmation.value = null },
-            title = { Text("移入回收站") },
-            text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                request.selection.group?.let { Text(it.name.ifBlank { "群名称未缓存" }) }
-                request.selection.sender?.let { Text(it.name.ifBlank { "发送人名称未缓存" }) }
-                request.counts?.let { c -> Text("共 ${c.total} 张 · 共用 ${c.shared} 张 · 受保护 ${c.protectedCount} 张") }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(checked = request.includeShared, onCheckedChange = viewModel::updateShared)
-                    Text("包含其他群聊或发送人共用的图片", style = MaterialTheme.typography.bodyMedium)
-                }
-                Text(if (sourcesComplete) "清理会影响 QQ 聊天图片。来源仅覆盖本机已缓存记录；收藏、保留和受保护图片会跳过。"
-                    else "仅清理已明确关联的图片。共用统计可能遗漏未读取的聊天来源，清理也可能影响那些聊天。图片先进入回收站，收藏、保留和受保护图片会跳过。", style = MaterialTheme.typography.bodySmall)
-            } },
-            confirmButton = { TextButton(onClick = viewModel::confirmTrash,
-                enabled = request.counts != null && request.counts!!.removable > 0 && progress == null) { Text("移入 ${request.counts?.removable ?: 0} 张") } },
-            dismissButton = { TextButton(onClick = { viewModel.confirmation.value = null }) { Text("取消") } })
-    }
-    if (clearConfirm) AlertDialog(onDismissRequest = { clearConfirm = false }, title = { Text("清除来源索引？") },
-        text = { Text("移除 QAlbum 保存的群聊与发送人信息，图片文件保留。") },
-        confirmButton = { TextButton(onClick = { clearConfirm = false; viewModel.selection.value = QqSourceSelection(); viewModel.repository.clear() }) { Text("清除") } },
-        dismissButton = { TextButton(onClick = { clearConfirm = false }) { Text("取消") } })
-
-    preview?.let { (images, index) ->
-        FullScreenImagePager(images = images, startIndex = index, onClose = { preview = null },
-            onShare = { id -> viewModel.share(id) { context.startActivity(shareChooser(it)) } },
-            exportSubdirs = subdirs, onCreateSubdir = gallery::createSubdir,
-            onSave = { id, subdir, alsoTrash -> gallery.saveImages(setOf(id), subdir, alsoTrash) { saved, _ ->
-                Toast.makeText(context, if (saved > 0) "已保存" else "保存失败", Toast.LENGTH_SHORT).show()
-            } }, onLoadOcr = viewModel::ocr,
-            bottomBar = { image ->
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-                    PreviewAction(icon = if (image.isFavorite) Icons.Outlined.Favorite else Icons.Outlined.FavoriteBorder,
-                        label = if (image.isFavorite) "取消收藏" else "收藏", onClick = { viewModel.favorite(image)
-                            preview = preview?.let { (list, start) -> list.map { if (it.id == image.id) it.copy(isFavorite = !it.isFavorite) else it } to start }
-                        })
-                }
-            })
+    if (clearConfirm) {
+        ConfirmDialog(
+            title = "清除来源索引？",
+            text = "只移除 QAlbum 保存的群聊、发送人与图片关联，图片文件和 QQ 数据都不受影响。之后可随时重新读取。",
+            confirmLabel = "清除",
+            destructive = true,
+            onConfirm = { clearConfirm = false; viewModel.clearIndex() },
+            onDismiss = { clearConfirm = false },
+        )
     }
 }
 
 @Composable
-private fun SourceFilter(name: String, onSelect: () -> Unit, onClear: () -> Unit) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Text(name, modifier = Modifier.weight(1f).clickable(onClick = onSelect).padding(vertical = 8.dp),
-            style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
-        IconButton(onClick = onClear) { Icon(Icons.Outlined.Close, "移除此筛选") }
+private fun StatusCard(
+    progress: QqSourceProgress?,
+    summary: QqSourceSummary?,
+    accounts: List<QqSourceAccountEntity>,
+    report: String?,
+    complete: Boolean,
+    onRefresh: () -> Unit,
+    onCancel: () -> Unit,
+    onBrowseAll: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val state = when {
+        progress != null -> 0
+        accounts.isEmpty() -> 1
+        else -> 2
     }
-}
-
-@Composable
-private fun SourceRow(facet: QqSourceFacet, group: Boolean, showAccount: Boolean, onClick: () -> Unit, onLongClick: () -> Unit) {
-    Row(Modifier.fillMaxWidth().combinedClickable(onClick = onClick, onLongClick = onLongClick).padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
-        Icon(if (group) Icons.Outlined.Groups else Icons.Outlined.Person, null, Modifier.size(24.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        Column(Modifier.weight(1f).padding(horizontal = 14.dp)) {
-            Text(facet.name.ifBlank { if (group) "群名称未缓存" else "发送人名称未缓存" }, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
-            if (showAccount) Text(facet.accountName, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    val enterSpec = MaterialTheme.motionScheme.defaultEffectsSpec<Float>()
+    val exitSpec = MaterialTheme.motionScheme.fastEffectsSpec<Float>()
+    AnimatedContent(
+        targetState = state,
+        modifier = modifier,
+        transitionSpec = { fadeIn(enterSpec) togetherWith fadeOut(exitSpec) },
+        label = "sourceStatus",
+    ) { current ->
+        when (current) {
+            0 -> progress?.let { RunningCard(it, onCancel) } ?: Spacer(Modifier.height(1.dp))
+            1 -> IntroCard(onRefresh)
+            else -> SummaryCard(summary, accounts, report, complete, onBrowseAll)
         }
-        Text("${facet.count} 张", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun IntroCard(onRefresh: () -> Unit) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+        shape = MaterialTheme.shapes.extraLarge,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            ShapeIcon(
+                Icons.Outlined.Forum,
+                containerColor = MaterialTheme.colorScheme.primaryContainer,
+                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                shape = MaterialShapes.Cookie9Sided.toShape(),
+                size = 64.dp,
+                iconSize = 30.dp,
+            )
+            Text("还没有读取聊天来源", style = MaterialTheme.typography.titleLargeEmphasized)
+            Text(
+                "通过 Root 复制 QQ 数据库的只读副本，把缓存图片关联到具体的群聊、私聊和发送人。" +
+                    "整个过程不会修改 QQ 的任何文件或数据。",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Button(onClick = onRefresh, shapes = ButtonDefaults.shapes()) {
+                Icon(Icons.Outlined.Sync, contentDescription = null, modifier = Modifier.size(ButtonDefaults.IconSize))
+                Spacer(Modifier.width(ButtonDefaults.IconSpacing))
+                Text("读取聊天来源")
+            }
+        }
+    }
+}
+
+@Composable
+private fun RunningCard(progress: QqSourceProgress, onCancel: () -> Unit) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+        shape = MaterialTheme.shapes.extraLarge,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    progress.label,
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.weight(1f),
+                )
+                if (progress.cancellable) TextButton(onClick = onCancel) { Text("停止") }
+            }
+            WavyProgress(
+                fraction = if (progress.total > 0) progress.done.toFloat() / progress.total else null,
+            )
+            Text(
+                "可以离开本页，读取会在后台继续。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f),
+            )
+        }
+    }
+}
+
+@Composable
+private fun SummaryCard(
+    summary: QqSourceSummary?,
+    accounts: List<QqSourceAccountEntity>,
+    report: String?,
+    complete: Boolean,
+    onBrowseAll: () -> Unit,
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+        shape = MaterialTheme.shapes.extraLarge,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("已关联图片", style = MaterialTheme.typography.labelLarge)
+            Row(verticalAlignment = Alignment.Bottom) {
+                Text(
+                    summary?.let { formatBytes(it.linkedBytes) } ?: "…",
+                    style = MaterialTheme.typography.displaySmallEmphasized,
+                )
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    summary?.let { "${formatCountExact(it.linkedCount)} 张" } ?: "",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(bottom = 6.dp),
+                )
+            }
+            val updated = accounts.maxOfOrNull { it.importedAt } ?: 0L
+            Text(
+                "${accounts.size} 个账号 · 更新于 ${formatDateTime(updated)}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f),
+            )
+            AnimatedVisibility(
+                visible = summary?.dirty == true,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut(),
+            ) {
+                Text(
+                    "统计更新中…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f),
+                )
+            }
+            if (report != null) {
+                Text(report, style = MaterialTheme.typography.bodySmall)
+            }
+            if (!complete) {
+                Row(verticalAlignment = Alignment.Top, modifier = Modifier.padding(top = 4.dp)) {
+                    Icon(
+                        Icons.Outlined.WarningAmber,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.error,
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        "部分来源未能读取：筛选和清理只覆盖已关联的图片，「其他会话共用」的统计可能偏少。",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            FilledTonalButton(onClick = onBrowseAll, shapes = ButtonDefaults.shapes()) {
+                Icon(Icons.Outlined.PhotoLibrary, contentDescription = null, modifier = Modifier.size(ButtonDefaults.IconSize))
+                Spacer(Modifier.width(ButtonDefaults.IconSpacing))
+                Text("浏览全部已关联图片")
+            }
+        }
+    }
+}
+
+/** 页签（连接式按钮组）+ 搜索 + 排序 */
+@Composable
+private fun FacetControls(
+    tab: SourceTab,
+    counts: Map<SourceTab, Int>,
+    search: String,
+    order: SourceFacetOrder,
+    onTab: (SourceTab) -> Unit,
+    onSearch: (String) -> Unit,
+    onOrder: (SourceFacetOrder) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(ButtonGroupDefaults.ConnectedSpaceBetween)) {
+            val tabs = SourceTab.entries
+            tabs.forEachIndexed { index, option ->
+                ToggleButton(
+                    checked = tab == option,
+                    onCheckedChange = { onTab(option) },
+                    shapes = when (index) {
+                        0 -> ButtonGroupDefaults.connectedLeadingButtonShapes()
+                        tabs.lastIndex -> ButtonGroupDefaults.connectedTrailingButtonShapes()
+                        else -> ButtonGroupDefaults.connectedMiddleButtonShapes()
+                    },
+                    colors = ToggleButtonDefaults.toggleButtonColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .semantics { role = Role.RadioButton },
+                ) {
+                    if (tab == option) {
+                        Icon(Icons.Outlined.Check, contentDescription = null, modifier = Modifier.size(ButtonDefaults.IconSize))
+                        Spacer(Modifier.width(ButtonDefaults.IconSpacing))
+                    }
+                    val count = counts[option]
+                    Text(if (count != null && count > 0) "${option.label} $count" else option.label, maxLines = 1)
+                }
+            }
+        }
+        SearchField(
+            value = search,
+            onValueChange = onSearch,
+            placeholder = when (tab) {
+                SourceTab.GROUPS -> "搜索群聊"
+                SourceTab.PRIVATE -> "搜索私聊"
+                SourceTab.SENDERS -> "搜索昵称或群名片"
+            },
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                when (tab) {
+                    SourceTab.GROUPS -> "群聊"
+                    SourceTab.PRIVATE -> "私聊"
+                    SourceTab.SENDERS -> "发送人"
+                },
+                style = MaterialTheme.typography.titleSmallEmphasized,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(start = 4.dp),
+            )
+            OrderMenu(order, onOrder)
+        }
+    }
+}
+
+@Composable
+private fun OrderMenu(order: SourceFacetOrder, onOrder: (SourceFacetOrder) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        TextButton(onClick = { open = true }) {
+            Text("按${order.label}")
+            Icon(Icons.Outlined.ArrowDropDown, contentDescription = null)
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            SourceFacetOrder.entries.forEach { option ->
+                DropdownMenuItem(
+                    text = { Text(option.label) },
+                    trailingIcon = if (option == order) {
+                        { Icon(Icons.Outlined.Check, contentDescription = null) }
+                    } else {
+                        null
+                    },
+                    onClick = { open = false; onOrder(option) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun EmptyFacets(searching: Boolean, tab: SourceTab, modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(vertical = 40.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Icon(
+            Icons.Outlined.SearchOff,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(40.dp),
+        )
+        Text(
+            if (searching) "没有匹配的${tab.label}" else "没有已关联图片的${tab.label}",
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (!searching) {
+            Text(
+                "QQ 有新消息后，点右上角的刷新重新读取",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }

@@ -18,6 +18,8 @@ import com.xjw.qalbum.domain.model.AutoFavoriteConfig
 import com.xjw.qalbum.domain.model.CleanupConfig
 import com.xjw.qalbum.domain.model.DuplicateStrictness
 import com.xjw.qalbum.domain.model.GallerySort
+import com.xjw.qalbum.domain.model.SourceFacetOrder
+import com.xjw.qalbum.domain.model.SourceSort
 import com.xjw.qalbum.service.ai.AiPrivacyGuard
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
@@ -396,6 +398,20 @@ class SettingsRepository(
         ds.edit { it[Keys.GALLERY_SORT] = sort.name }
     }
 
+    /** QQ 来源图片的排列方式（日期 / 大小，升序 / 降序） */
+    val qqSourceSort: Flow<SourceSort> = prefsData.map { SourceSort.fromName(it[Keys.QQ_SOURCE_SORT]) }
+
+    suspend fun setQqSourceSort(sort: SourceSort) {
+        ds.edit { it[Keys.QQ_SOURCE_SORT] = sort.name }
+    }
+
+    /** QQ 来源分类列表的排序 */
+    val qqSourceFacetOrder: Flow<SourceFacetOrder> = prefsData.map { SourceFacetOrder.fromName(it[Keys.QQ_SOURCE_FACET_ORDER]) }
+
+    suspend fun setQqSourceFacetOrder(order: SourceFacetOrder) {
+        ds.edit { it[Keys.QQ_SOURCE_FACET_ORDER] = order.name }
+    }
+
     /** 超过该字节数的图片，在缩略图右上角显示「MB+」大图标记 */
     val galleryLargeThresholdBytes: Flow<Long> = prefsData.map {
         it[Keys.GALLERY_LARGE_BYTES] ?: DEFAULT_LARGE_THRESHOLD_BYTES
@@ -558,6 +574,8 @@ class SettingsRepository(
         val GALLERY_COLUMNS = intPreferencesKey("gallery_columns")
         val GALLERY_SORT = stringPreferencesKey("gallery_sort")
         val GALLERY_LARGE_BYTES = longPreferencesKey("gallery_large_bytes")
+        val QQ_SOURCE_SORT = stringPreferencesKey("qq_source_sort")
+        val QQ_SOURCE_FACET_ORDER = stringPreferencesKey("qq_source_facet_order")
 
         val CLEANUP_CONFIG = stringPreferencesKey("cleanup_config")
         val AUTO_FAVORITE_CONFIG = stringPreferencesKey("auto_favorite_config")

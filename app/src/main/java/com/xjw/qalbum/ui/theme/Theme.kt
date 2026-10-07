@@ -15,70 +15,96 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 
-// ---- 自定义品牌色（动态取色不可用时的回退） ----
-// 浅色：以 QQ 蓝为基调；深色：保持高对比 / 适配 OLED
-
 private val LightColors = expressiveLightColorScheme().copy(
-    primary = md_theme_light_primary,
-    onPrimary = md_theme_light_onPrimary,
-    primaryContainer = md_theme_light_primaryContainer,
-    onPrimaryContainer = md_theme_light_onPrimaryContainer,
-    secondary = md_theme_light_secondary,
-    onSecondary = md_theme_light_onSecondary,
-    secondaryContainer = md_theme_light_secondaryContainer,
-    onSecondaryContainer = md_theme_light_onSecondaryContainer,
-    tertiary = md_theme_light_tertiary,
-    onTertiary = md_theme_light_onTertiary,
-    tertiaryContainer = md_theme_light_tertiaryContainer,
-    onTertiaryContainer = md_theme_light_onTertiaryContainer,
-    error = md_theme_light_error,
-    onError = md_theme_light_onError,
-    errorContainer = md_theme_light_errorContainer,
-    onErrorContainer = md_theme_light_onErrorContainer,
+    primary = md_light_primary,
+    onPrimary = md_light_onPrimary,
+    primaryContainer = md_light_primaryContainer,
+    onPrimaryContainer = md_light_onPrimaryContainer,
+    inversePrimary = md_light_inversePrimary,
+    secondary = md_light_secondary,
+    onSecondary = md_light_onSecondary,
+    secondaryContainer = md_light_secondaryContainer,
+    onSecondaryContainer = md_light_onSecondaryContainer,
+    tertiary = md_light_tertiary,
+    onTertiary = md_light_onTertiary,
+    tertiaryContainer = md_light_tertiaryContainer,
+    onTertiaryContainer = md_light_onTertiaryContainer,
+    background = md_light_background,
+    onBackground = md_light_onBackground,
+    surface = md_light_surface,
+    onSurface = md_light_onSurface,
+    surfaceVariant = md_light_surfaceVariant,
+    onSurfaceVariant = md_light_onSurfaceVariant,
+    surfaceTint = md_light_surfaceTint,
+    inverseSurface = md_light_inverseSurface,
+    inverseOnSurface = md_light_inverseOnSurface,
+    error = md_light_error,
+    onError = md_light_onError,
+    errorContainer = md_light_errorContainer,
+    onErrorContainer = md_light_onErrorContainer,
+    outline = md_light_outline,
+    outlineVariant = md_light_outlineVariant,
+    scrim = md_light_scrim,
+    surfaceBright = md_light_surfaceBright,
+    surfaceDim = md_light_surfaceDim,
+    surfaceContainerLowest = md_light_surfaceContainerLowest,
+    surfaceContainerLow = md_light_surfaceContainerLow,
+    surfaceContainer = md_light_surfaceContainer,
+    surfaceContainerHigh = md_light_surfaceContainerHigh,
+    surfaceContainerHighest = md_light_surfaceContainerHighest,
 )
 
 private val DarkColors = darkColorScheme(
-    primary = md_theme_dark_primary,
-    onPrimary = md_theme_dark_onPrimary,
-    primaryContainer = md_theme_dark_primaryContainer,
-    onPrimaryContainer = md_theme_dark_onPrimaryContainer,
-    secondary = md_theme_dark_secondary,
-    onSecondary = md_theme_dark_onSecondary,
-    secondaryContainer = md_theme_dark_secondaryContainer,
-    onSecondaryContainer = md_theme_dark_onSecondaryContainer,
-    tertiary = md_theme_dark_tertiary,
-    onTertiary = md_theme_dark_onTertiary,
-    tertiaryContainer = md_theme_dark_tertiaryContainer,
-    onTertiaryContainer = md_theme_dark_onTertiaryContainer,
-    error = md_theme_dark_error,
-    onError = md_theme_dark_onError,
-    errorContainer = md_theme_dark_errorContainer,
-    onErrorContainer = md_theme_dark_onErrorContainer,
-    background = md_theme_dark_background,
-    onBackground = md_theme_dark_onBackground,
-    surface = md_theme_dark_surface,
-    onSurface = md_theme_dark_onSurface,
-    surfaceVariant = md_theme_dark_surfaceVariant,
-    onSurfaceVariant = md_theme_dark_onSurfaceVariant,
-    outline = md_theme_dark_outline,
-    outlineVariant = md_theme_dark_outlineVariant,
+    primary = md_dark_primary,
+    onPrimary = md_dark_onPrimary,
+    primaryContainer = md_dark_primaryContainer,
+    onPrimaryContainer = md_dark_onPrimaryContainer,
+    inversePrimary = md_dark_inversePrimary,
+    secondary = md_dark_secondary,
+    onSecondary = md_dark_onSecondary,
+    secondaryContainer = md_dark_secondaryContainer,
+    onSecondaryContainer = md_dark_onSecondaryContainer,
+    tertiary = md_dark_tertiary,
+    onTertiary = md_dark_onTertiary,
+    tertiaryContainer = md_dark_tertiaryContainer,
+    onTertiaryContainer = md_dark_onTertiaryContainer,
+    background = md_dark_background,
+    onBackground = md_dark_onBackground,
+    surface = md_dark_surface,
+    onSurface = md_dark_onSurface,
+    surfaceVariant = md_dark_surfaceVariant,
+    onSurfaceVariant = md_dark_onSurfaceVariant,
+    surfaceTint = md_dark_surfaceTint,
+    inverseSurface = md_dark_inverseSurface,
+    inverseOnSurface = md_dark_inverseOnSurface,
+    error = md_dark_error,
+    onError = md_dark_onError,
+    errorContainer = md_dark_errorContainer,
+    onErrorContainer = md_dark_onErrorContainer,
+    outline = md_dark_outline,
+    outlineVariant = md_dark_outlineVariant,
+    scrim = md_dark_scrim,
+    surfaceBright = md_dark_surfaceBright,
+    surfaceDim = md_dark_surfaceDim,
+    surfaceContainerLowest = md_dark_surfaceContainerLowest,
+    surfaceContainerLow = md_dark_surfaceContainerLow,
+    surfaceContainer = md_dark_surfaceContainer,
+    surfaceContainerHigh = md_dark_surfaceContainerHigh,
+    surfaceContainerHighest = md_dark_surfaceContainerHighest,
 )
 
 /**
- * QAlbum 主题入口
+ * QAlbum 主题入口（Material 3 Expressive）。
  *
- * 采用 Material 3 Expressive：
- * - [MaterialExpressiveTheme] 替代 [androidx.compose.material3.MaterialTheme]
- * - 浅色用 [expressiveLightColorScheme]（更鲜活、更对比的默认色）
- * - [MotionScheme.expressive] 提供 Spring-based 物理动画（更活泼的进出效果）
- * - 支持 Android 12+ 动态取色（[dynamicLightColorScheme] / [dynamicDarkColorScheme]）
+ * - [MaterialExpressiveTheme] + [MotionScheme.expressive]：组件与转场统一使用带回弹的 spring 规格；
+ * - 标准字阶与形状阶梯（见 [AppTypography] / [AppShapes]）；
+ * - Android 12+ 默认跟随壁纸动态取色，可在「设置 → 外观」关闭，关闭后使用完整的品牌色调方案。
  */
 @Composable
 fun QAlbumTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
-    // Android 12+ 启用动态取色，跟随壁纸；用户可在设置中关闭
     dynamicColor: Boolean = true,
-    content: @Composable () -> Unit
+    content: @Composable () -> Unit,
 ) {
     val colorScheme = when {
         dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
@@ -89,8 +115,7 @@ fun QAlbumTheme(
         else -> LightColors
     }
 
-    // SystemBar 颜色由 Activity.enableEdgeToEdge() 处理，
-    // 这里只调整 light/dark 图标外观以匹配主题
+    // 系统栏透明由 Activity.enableEdgeToEdge() 处理，这里只同步图标明暗
     val view = LocalView.current
     if (!view.isInEditMode) {
         SideEffect {
@@ -104,7 +129,6 @@ fun QAlbumTheme(
 
     MaterialExpressiveTheme(
         colorScheme = colorScheme,
-        // 使用 expressive 运动方案：更弹性、富有活力的动画曲线（FAB 展开/收起、抽屉滑入等）
         motionScheme = MotionScheme.expressive(),
         shapes = AppShapes,
         typography = AppTypography,

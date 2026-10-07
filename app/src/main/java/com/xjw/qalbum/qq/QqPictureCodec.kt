@@ -6,6 +6,9 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.MessageDigest
 import java.util.Locale
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 internal fun opaqueKey(vararg parts: String): String = MessageDigest.getInstance("SHA-256")
     .digest(parts.joinToString("\u0000").toByteArray()).joinToString("") { "%02x".format(it) }
@@ -47,32 +50,44 @@ data class QqCipherHeader(val random: String, val hmac: String, val kdf: String)
 }
 
 data class QqPictureElement(val elementId: String, val md5s: Set<String>, val paths: Set<String>)
+internal data class QqDecodedElements(val pictures: List<QqPictureElement>, val hasForward: Boolean)
 
-/** 只读取图片消息段；正文、链接、文件、视频、转发正文均不进入来源索引。 */
+/** 只读取图片消息段和转发类型标记；正文、链接、文件、视频均不进入来源索引。 */
 object QqPictureCodec {
     const val MAX_MESSAGE_BYTES = 1024 * 1024
 
-    fun decode(blob: ByteArray): List<QqPictureElement> {
+    fun decode(blob: ByteArray): List<QqPictureElement> = decodeElements(blob).pictures
+
+    internal fun decodeElements(blob: ByteArray): QqDecodedElements {
         require(blob.size <= MAX_MESSAGE_BYTES) { "消息段过大" }
         val input = CodedInputStream.newInstance(blob)
         val pictures = mutableListOf<QqPictureElement>()
+        var hasForward = false
         while (!input.isAtEnd) {
             val tag = input.readTag()
             if (tag == 0) break
             // 9.2.66 实测是重复 40800 消息段；旧版资料中也有 48000，均直接包含 MsgElement。
             if (WireFormat.getTagFieldNumber(tag) in setOf(40800, 48000) && WireFormat.getTagWireType(tag) == 2) {
-                picture(input.readByteArray())?.let(pictures::add)
+                val element = decodeElementInfo(input.readByteArray())
+                element.picture?.let(pictures::add)
+                hasForward = hasForward || element.hasForward
             } else if (!input.skipField(tag)) break
         }
-        return pictures
+        return QqDecodedElements(pictures, hasForward)
     }
 
-    private fun picture(bytes: ByteArray): QqPictureElement? {
-        val input = CodedInputStream.newInstance(bytes)
+    internal fun decodeElement(bytes: ByteArray, offset: Int, length: Int): QqPictureElement? =
+        decodeElementInfo(bytes, offset, length).picture
+
+    private data class ElementInfo(val hasForward: Boolean, val picture: QqPictureElement?)
+
+    private fun decodeElementInfo(bytes: ByteArray, offset: Int = 0, length: Int = bytes.size): ElementInfo {
+        val input = CodedInputStream.newInstance(bytes, offset, length)
         var type = 0
         var id = ""
         val md5s = linkedSetOf<String>()
         val paths = linkedSetOf<String>()
+        var forwardApp = false
         while (!input.isAtEnd) {
             val tag = input.readTag()
             if (tag == 0) break
@@ -84,10 +99,18 @@ object QqPictureCodec {
                     decodeMd5(input.readByteArray())?.let(md5s::add)
                 }
                 field == 45403 && WireFormat.getTagWireType(tag) == 2 -> paths += input.readStringRequireUtf8()
+                field == 47901 && WireFormat.getTagWireType(tag) == 2 -> {
+                    // 新式合并转发可使用 Ark 卡片；只匹配 app 标识，忽略卡片中的展示正文。
+                    val metadata = input.readByteArray().toString(Charsets.UTF_8)
+                    forwardApp = try {
+                        val app = (Json.parseToJsonElement(metadata) as? JsonObject)?.get("app") as? JsonPrimitive
+                        app?.content == "com.tencent.multimsg"
+                    } catch (_: IllegalArgumentException) { false }
+                }
                 else -> if (!input.skipField(tag)) break
             }
         }
-        return if (type == 2 && md5s.isNotEmpty()) QqPictureElement(id, md5s, paths) else null
+        return ElementInfo(type == 16 || (type == 10 && forwardApp), if (type == 2 && md5s.isNotEmpty()) QqPictureElement(id, md5s, paths) else null)
     }
 
     private fun decodeMd5(bytes: ByteArray): String? {

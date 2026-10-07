@@ -20,18 +20,13 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
@@ -40,14 +35,10 @@ import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Favorite
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.Info
-import androidx.compose.material.icons.outlined.IosShare
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -74,20 +65,23 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.ui.anim.sharedImage
+import com.xjw.qalbum.ui.common.formatBytes
+import com.xjw.qalbum.ui.common.formatTitleDate
+import com.xjw.qalbum.ui.common.sourceLabel
+import com.xjw.qalbum.ui.components.DeleteImagesDialog
+import com.xjw.qalbum.ui.components.PreviewAction
 import com.xjw.qalbum.ui.components.SaveToAlbumSheet
+import com.xjw.qalbum.ui.components.ViewerActionBar
+import com.xjw.qalbum.ui.components.ViewerIconButton
 import com.xjw.qalbum.ui.components.ZoomableImage
 import com.xjw.qalbum.ui.imageloading.ImageEntityModel
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import org.koin.androidx.compose.koinViewModel
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 @Composable
 fun ImageDetailScreen(
@@ -195,6 +189,9 @@ private fun ImmersivePhotoViewer(
     val dismissVelocity = with(density) { 600.dp.toPx() }
     val dismissRange = with(density) { 400.dp.toPx() }
     val latestOnBack by rememberUpdatedState(onBack)
+    val chromeFade = MaterialTheme.motionScheme.defaultEffectsSpec<Float>()
+    val chromeSlideIn = MaterialTheme.motionScheme.defaultSpatialSpec<androidx.compose.ui.unit.IntOffset>()
+    val chromeSlideOut = MaterialTheme.motionScheme.fastSpatialSpec<androidx.compose.ui.unit.IntOffset>()
     val latestOnPageSelected by rememberUpdatedState(onPageSelected)
     val pagerState = rememberPagerState(
         initialPage = state.currentIndex,
@@ -350,8 +347,8 @@ private fun ImmersivePhotoViewer(
 
             AnimatedVisibility(
                 visible = chromeVisible && notDismissing,
-                enter = fadeIn(),
-                exit = fadeOut(),
+                enter = fadeIn(chromeFade),
+                exit = fadeOut(chromeFade),
                 modifier = Modifier.align(Alignment.TopCenter),
             ) {
                 TopChrome(
@@ -367,8 +364,8 @@ private fun ImmersivePhotoViewer(
 
             AnimatedVisibility(
                 visible = chromeVisible && !detailsVisible && notDismissing,
-                enter = fadeIn(),
-                exit = fadeOut(),
+                enter = slideInVertically(chromeSlideIn) { it / 2 } + fadeIn(chromeFade),
+                exit = slideOutVertically(chromeSlideOut) { it / 2 } + fadeOut(chromeFade),
                 modifier = Modifier.align(Alignment.BottomCenter),
             ) {
                 BottomActions(
@@ -386,8 +383,8 @@ private fun ImmersivePhotoViewer(
 
         AnimatedVisibility(
             visible = detailsVisible,
-            enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
-            exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
+            enter = slideInVertically(chromeSlideIn) { it } + fadeIn(chromeFade),
+            exit = slideOutVertically(chromeSlideOut) { it } + fadeOut(chromeFade),
             modifier = Modifier.align(Alignment.BottomCenter),
         ) {
             PhotoDetailsSheet(
@@ -398,7 +395,9 @@ private fun ImmersivePhotoViewer(
         }
 
         if (confirmDelete) {
-            DeleteConfirmDialog(
+            DeleteImagesDialog(
+                count = 1,
+                note = if (state.current.isFavorite || state.current.userKeep == true) "这张图片已收藏或标记为保留，不会被删除；请先取消收藏。" else null,
                 onDismiss = { confirmDelete = false },
                 onTrash = {
                     confirmDelete = false
@@ -432,7 +431,7 @@ private fun FullscreenPhoto(
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         val entity = image
         if (entity == null) {
-            CircularProgressIndicator(color = Color.White)
+            LoadingIndicator(color = Color.White)
             return@Box
         }
         ZoomableImage(
@@ -461,34 +460,27 @@ private fun TopChrome(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(
-                Brush.verticalGradient(
-                    colors = listOf(Color.Black.copy(alpha = 0.72f), Color.Transparent),
-                ),
-            )
+            .background(Brush.verticalGradient(colors = listOf(Color.Black.copy(alpha = 0.7f), Color.Transparent)))
             .statusBarsPadding()
-            .padding(start = 4.dp, top = 6.dp, end = 16.dp, bottom = 28.dp),
+            .padding(start = 4.dp, top = 6.dp, end = 8.dp, bottom = 28.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        CircleIconButton(onClick = onBack) {
-            Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回", tint = Color.White)
-        }
-        Column(modifier = Modifier.weight(1f).padding(start = 8.dp)) {
+        ViewerIconButton(Icons.AutoMirrored.Outlined.ArrowBack, "返回", onBack)
+        Column(modifier = Modifier.weight(1f).padding(start = 4.dp)) {
             Text(
                 formatTitleDate(image.mtime),
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
                 color = Color.White,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
             Text(
-                "${index + 1}/$total   ${sourceLabel(image.sourceType)}   ${formatSizeCompact(image.size)}",
+                "${index + 1} / $total · ${sourceLabel(image.sourceType)} · ${formatBytes(image.size)}",
                 style = MaterialTheme.typography.bodySmall,
                 color = Color.White.copy(alpha = 0.72f),
             )
         }
-        CircleIconButton(onClick = onOpenExternal) {
-            Icon(Icons.AutoMirrored.Outlined.OpenInNew, contentDescription = "用第三方应用打开", tint = Color.White)
-        }
+        ViewerIconButton(Icons.AutoMirrored.Outlined.OpenInNew, "用其他应用打开", onOpenExternal)
     }
 }
 
@@ -500,88 +492,28 @@ private fun BottomActions(
     onExport: () -> Unit,
     onDelete: () -> Unit,
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(
-                Brush.verticalGradient(
-                    colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.82f)),
-                ),
+    ViewerActionBar {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            PreviewAction(
+                icon = if (image.isFavorite) Icons.Outlined.Favorite else Icons.Outlined.FavoriteBorder,
+                label = if (image.isFavorite) "已收藏" else "收藏",
+                onClick = onToggleFavorite,
             )
-            .padding(start = 16.dp, top = 42.dp, end = 16.dp, bottom = 8.dp)
-            .navigationBarsPadding(),
-        horizontalArrangement = Arrangement.SpaceAround,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        ViewerAction(
-            icon = if (image.isFavorite) Icons.Outlined.Favorite else Icons.Outlined.FavoriteBorder,
-            label = if (image.isFavorite) "取消收藏" else "收藏",
-            onClick = onToggleFavorite,
-        )
-        ViewerAction(Icons.Outlined.Info, "详情", onInfo)
-        ViewerAction(Icons.Outlined.IosShare, "导出", onExport)
-        ViewerAction(Icons.Outlined.Delete, "删除", onDelete)
-    }
-}
-
-@Composable
-private fun DeleteConfirmDialog(
-    onDismiss: () -> Unit,
-    onTrash: () -> Unit,
-    onPermanent: () -> Unit,
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("删除这张图片？") },
-        text = { Text("可以先移动到回收站，或直接永久删除。永久删除后不可恢复。") },
-        confirmButton = {
-            TextButton(onClick = onTrash) { Text("移动到回收站") }
-        },
-        dismissButton = {
-            Row {
-                TextButton(onClick = onDismiss) { Text("取消") }
-                TextButton(onClick = onPermanent) { Text("永久删除") }
-            }
-        },
-    )
-}
-
-@Composable
-private fun ViewerAction(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    label: String,
-    onClick: () -> Unit,
-) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        CircleIconButton(onClick = onClick) {
-            Icon(icon, contentDescription = label, tint = Color.White)
+            PreviewAction(Icons.Outlined.Info, "详情", onClick = onInfo)
+            PreviewAction(Icons.Outlined.Download, "保存", onClick = onExport)
+            PreviewAction(Icons.Outlined.Delete, "删除", onClick = onDelete)
         }
-        Spacer(Modifier.height(4.dp))
-        Text(
-            label,
-            style = MaterialTheme.typography.labelSmall,
-            color = Color.White.copy(alpha = 0.88f),
-        )
-    }
-}
-
-@Composable
-private fun CircleIconButton(
-    onClick: () -> Unit,
-    content: @Composable () -> Unit,
-) {
-    IconButton(
-        onClick = onClick,
-        modifier = Modifier.size(44.dp),
-    ) {
-        content()
     }
 }
 
 @Composable
 private fun CenteredLoading() {
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        CircularProgressIndicator(color = Color.White)
+        LoadingIndicator(color = Color.White)
     }
 }
 
@@ -590,26 +522,4 @@ private fun CenteredText(text: String) {
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Text(text, style = MaterialTheme.typography.bodyLarge, color = Color.White)
     }
-}
-
-private val titleFormatter = SimpleDateFormat("yyyy年M月d日 HH:mm", Locale.CHINA)
-
-private fun formatTitleDate(ts: Long): String = titleFormatter.format(Date(ts))
-
-/** 来源目录映射成短标签：chatimg→img、chatraw→raw、chatthumb→thumb */
-private fun sourceLabel(sourceType: String): String = when (sourceType) {
-    "chatimg" -> "img"
-    "chatraw" -> "raw"
-    "chatthumb" -> "thumb"
-    else -> sourceType.ifBlank { "其他" }
-}
-
-/** 顶部信息条用的紧凑大小：512 B / 12.3 KB / 1.7 MB */
-private fun formatSizeCompact(bytes: Long): String {
-    if (bytes <= 0) return "0 B"
-    val units = arrayOf("B", "KB", "MB", "GB", "TB")
-    val exp = (Math.log10(bytes.toDouble()) / Math.log10(1024.0)).toInt().coerceAtMost(units.size - 1)
-    if (exp == 0) return "$bytes B"
-    val value = bytes.toDouble() / Math.pow(1024.0, exp.toDouble())
-    return String.format("%.1f %s", value, units[exp])
 }

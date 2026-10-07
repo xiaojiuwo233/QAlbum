@@ -25,8 +25,34 @@ class AppDatabaseMigrationTest {
 
     @Test
     fun migrationEdgesCoverEveryPublishedVersion() {
-        assertEquals((1..13).toList(), allMigrations.map { it.startVersion })
-        assertEquals((2..14).toList(), allMigrations.map { it.endVersion })
+        assertEquals((1..14).toList(), allMigrations.map { it.startVersion })
+        assertEquals((2..15).toList(), allMigrations.map { it.endVersion })
+    }
+
+    @Test
+    fun migrate14To15_addsByteTotalsAndInvalidatesCacheWhenLinkedSizeChanges() {
+        val name = "migration-14-15"
+        helper.createDatabase(name, 14).use { db ->
+            insertImage(db, 1, "/chatpic/chatraw/linked", "active", 0, null, 1000)
+            insertImage(db, 2, "/chatpic/chatraw/unlinked", "active", 0, null, 1000)
+            db.execSQL("INSERT INTO qq_source_accounts VALUES('a','账号',1,1)")
+            db.execSQL("INSERT INTO qq_origins VALUES('o','a','g','群名',2,'s','昵称','群名片',1000,'md5')")
+            db.execSQL("INSERT INTO image_qq_origins VALUES(1,'o')")
+            db.execSQL("INSERT INTO qq_source_facets(kind,`key`,name,search_text,account_key,image_count) VALUES(0,'g','群名','群名','a',1)")
+            db.execSQL("INSERT INTO qq_source_cache(id,dirty,linked_count) VALUES(1,0,1)")
+        }
+        helper.runMigrationsAndValidate(name, 15, true, AppDatabase.MIGRATION_14_15).use { db ->
+            assertEquals(1L, scalarLong(db, "SELECT COUNT(*) FROM image_qq_origins"))
+            assertEquals(1L, scalarLong(db, "SELECT image_count FROM qq_source_facets WHERE `key`='g'"))
+            assertEquals(0L, scalarLong(db, "SELECT total_bytes FROM qq_source_facets WHERE `key`='g'"))
+            // 统计口径变化：迁移后缓存必须标脏，由来源页按新口径重建
+            assertEquals(1L, scalarLong(db, "SELECT dirty FROM qq_source_cache WHERE id=1"))
+            db.execSQL("UPDATE qq_source_cache SET dirty=0")
+            db.execSQL("UPDATE images SET size=200 WHERE id=2")
+            assertEquals(0L, scalarLong(db, "SELECT dirty FROM qq_source_cache WHERE id=1"))
+            db.execSQL("UPDATE images SET size=300 WHERE id=1")
+            assertEquals(1L, scalarLong(db, "SELECT dirty FROM qq_source_cache WHERE id=1"))
+        }
     }
 
     @Test
@@ -247,6 +273,7 @@ class AppDatabaseMigrationTest {
             AppDatabase.MIGRATION_11_12,
             AppDatabase.MIGRATION_12_13,
             AppDatabase.MIGRATION_13_14,
+            AppDatabase.MIGRATION_14_15,
         )
 
         private const val TEST_DB_V1 = "migration-1-11"
