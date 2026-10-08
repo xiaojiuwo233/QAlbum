@@ -66,7 +66,7 @@ import com.xjw.qalbum.data.db.entity.TagEntity
         QqImageContextEntity::class,
         QqSourceMemberEntity::class,
     ],
-    version = 17,
+    version = 18,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -125,6 +125,25 @@ abstract class AppDatabase : RoomDatabase() {
                     `thumb_bytes` INTEGER NOT NULL, PRIMARY KEY(`id`))""")
                 db.execSQL(QqSourceStatsSql.ENSURE_CACHE_ROW)
                 QqSourceStatsSql.createTriggers(db)
+            }
+        }
+
+        /**
+         * v17 → v18：同一张 QQ 图片的原图 / 预览图 / 缩略图归为一个家族（图库合并显示、整组删除、查重不再互相判重）。
+         * 只加列（常量默认值，不重写全表）、调整两个覆盖索引并建触发器；家族键由启动后的后台回填写入。
+         */
+        val MIGRATION_17_18 = object : Migration(17, 18) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE images ADD COLUMN variant_hidden INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE images ADD COLUMN variant_count INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE images ADD COLUMN variant_bytes INTEGER NOT NULL DEFAULT 0")
+                // 历史 cache_key 变体分组不再使用，由新的家族键回填覆盖
+                db.execSQL("UPDATE images SET variant_group = NULL WHERE variant_group IS NOT NULL")
+                db.execSQL("DROP INDEX IF EXISTS index_images_status_source_type_mtime")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_images_status_source_type_mtime_variant_hidden` ON `images` (`status`, `source_type`, `mtime`, `variant_hidden`)")
+                db.execSQL("DROP INDEX IF EXISTS index_images_status_source_type_date_bucket_is_protected")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_images_status_source_type_date_bucket_is_protected_variant_hidden` ON `images` (`status`, `source_type`, `date_bucket`, `is_protected`, `variant_hidden`)")
+                ImageVariantSql.createTriggers(db)
             }
         }
 
@@ -673,6 +692,7 @@ abstract class AppDatabase : RoomDatabase() {
                 createQqSourceTriggers(db)
                 db.execSQL(QqSourceStatsSql.ENSURE_CACHE_ROW)
                 QqSourceStatsSql.createTriggers(db)
+                ImageVariantSql.createTriggers(db)
             }
         }
 
@@ -699,6 +719,7 @@ abstract class AppDatabase : RoomDatabase() {
                     MIGRATION_14_15,
                     MIGRATION_15_16,
                     MIGRATION_16_17,
+                    MIGRATION_17_18,
                 )
                 .addCallback(creationCallback)
                 // 刻意不配置任何 destructive 回退：未覆盖的版本跳变（含降级）宁可 fail-fast

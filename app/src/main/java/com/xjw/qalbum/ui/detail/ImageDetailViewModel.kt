@@ -51,6 +51,8 @@ class ImageDetailViewModel(
     val operationBusy: StateFlow<Boolean> = _operationBusy.asStateFlow()
     private var favoritesOnly = false
     private var sort: GallerySort = GallerySort.DATE_DESC
+    /** 与图库同一设置：合并显示时窗口里只有家族代表图，当前页可在各版本间切换 */
+    private var stacked = false
 
     /** 已按该参数加载过（配置变更后 Screen 的 LaunchedEffect 会重跑 load，据此保留浏览位置） */
     private var loadedKey: Pair<Long, Boolean>? = null
@@ -75,6 +77,7 @@ class ImageDetailViewModel(
                 return@launch
             }
             val ocr = imageRepository.getOcr(imageId)
+            stacked = !favoritesOnly && settings.galleryStackVariants.first()
             if (favoritesOnly) {
                 val ids = imageRepository.favoriteTimelineIds()
                 val index = ids.indexOf(imageId)
@@ -98,8 +101,9 @@ class ImageDetailViewModel(
                 currentIndex = 0,
                 current = image,
                 ocr = ocr,
+                variants = familyOf(image),
             )
-            val window = imageRepository.timelineWindowAround(image, sort)
+            val window = imageRepository.timelineWindowAround(image, sort, stacked)
             headExhausted = window.anchorIndex < ImageRepository.TIMELINE_WINDOW_RADIUS
             tailExhausted = window.ids.size - window.anchorIndex - 1 < ImageRepository.TIMELINE_WINDOW_RADIUS
             val latest = _state.value as? ImageDetailState.Ready ?: return@launch
@@ -122,17 +126,38 @@ class ImageDetailViewModel(
         selectJob = viewModelScope.launch {
             val image = imageRepository.getById(id) ?: return@launch
             val ocr = imageRepository.getOcr(id)
+            val variants = familyOf(image)
             // 挂起期间窗口可能被扩窗平移或删除改写：以最新 state 为基准、按 id 重定位下标
             val latest = _state.value as? ImageDetailState.Ready ?: return@launch
             val latestIndex = if (latest.ids.getOrNull(index) == id) index else latest.ids.indexOf(id)
             if (latestIndex < 0) return@launch
-            _state.value = latest.copy(currentIndex = latestIndex, current = image, ocr = ocr)
+            _state.value = latest.copy(currentIndex = latestIndex, current = image, ocr = ocr, variants = variants)
             maybeExtendWindow()
         }
     }
 
     /** 供 HorizontalPager 每页按 id 异步加载图片实体（path/mime 等） */
     suspend fun entityFor(id: Long): ImageEntity? = imageRepository.getById(id)
+
+    /** 合并显示时取这张图的全部版本（原图 / 预览图 / 缩略图）；不足两个版本返回空 */
+    private suspend fun familyOf(image: ImageEntity): List<ImageEntity> {
+        val group = image.variantGroup ?: return emptyList()
+        if (!stacked) return emptyList()
+        return imageRepository.familyMembers(group).takeIf { it.size >= 2 }.orEmpty()
+    }
+
+    /** 切换当前页显示的版本（底部版本条） */
+    fun selectVariant(id: Long) {
+        val ready = _state.value as? ImageDetailState.Ready ?: return
+        val target = ready.variants.firstOrNull { it.id == id } ?: return
+        if (target.id == ready.current.id) return
+        viewModelScope.launch {
+            val ocr = imageRepository.getOcr(target.id)
+            val latest = _state.value as? ImageDetailState.Ready ?: return@launch
+            if (latest.variants.none { it.id == target.id }) return@launch
+            _state.value = latest.copy(current = target, ocr = ocr)
+        }
+    }
 
     fun toggleFavorite() {
         val image = (_state.value as? ImageDetailState.Ready)?.current ?: return
@@ -143,7 +168,10 @@ class ImageDetailViewModel(
             // 只局部更新当前实体，不重建窗口；收藏模式下取消收藏也留在当前页
             val latest = _state.value as? ImageDetailState.Ready ?: return@launch
             if (latest.current.id == image.id) {
-                _state.value = latest.copy(current = latest.current.copy(isFavorite = next))
+                _state.value = latest.copy(
+                    current = latest.current.copy(isFavorite = next),
+                    variants = latest.variants.map { if (it.id == image.id) it.copy(isFavorite = next) else it },
+                )
             }
         }
     }
@@ -176,9 +204,10 @@ class ImageDetailViewModel(
                     return@launch
                 }
                 if (alsoTrash) {
+                    val pageId = currentPageId() ?: image.id
                     val trashed = quarantineManager.quarantine(image.id, "保存后移入回收站")
                     _toast.value = if (trashed) "已保存并移入回收站" else "已保存（移入回收站失败）"
-                    if (trashed) advanceAfterRemoval(image.id, onExhausted)
+                    if (trashed) afterRemoval(pageId, image, onExhausted)
                 } else {
                     _toast.value = "已保存到相册"
                 }
@@ -206,11 +235,12 @@ class ImageDetailViewModel(
         if (!_operationBusy.compareAndSet(expect = false, update = true)) return
         viewModelScope.launch {
             try {
+                val pageId = currentPageId() ?: image.id
                 val result = quarantineManager.quarantinePictures(listOf(image.id),options,"用户手动删除")
                 val ok=result.selectedProcessed>0
                 if (ok) {
                     _toast.value = result.message()
-                    advanceAfterRemoval(image.id, onExhausted)
+                    afterRemoval(pageId, image, onExhausted)
                 } else {
                     _toast.value = result.message()
                 }
@@ -225,11 +255,12 @@ class ImageDetailViewModel(
         if (!_operationBusy.compareAndSet(expect = false, update = true)) return
         viewModelScope.launch {
             try {
+                val pageId = currentPageId() ?: image.id
                 val result=quarantineManager.deletePicturesPermanently(listOf(image.id),options)
                 val ok=result.selectedProcessed>0
                 if (ok) {
                     _toast.value = result.message(permanent=true)
-                    advanceAfterRemoval(image.id, onExhausted)
+                    afterRemoval(pageId, image, onExhausted)
                 } else {
                     _toast.value = result.message(permanent=true)
                 }
@@ -237,6 +268,37 @@ class ImageDetailViewModel(
                 _operationBusy.value = false
             }
         }
+    }
+
+    private fun currentPageId(): Long? =
+        (_state.value as? ImageDetailState.Ready)?.let { it.ids.getOrNull(it.currentIndex) }
+
+    /**
+     * 删除后的去向：合并显示时若这张图还有其他版本留着（只删了其中一个版本），留在原位改显示
+     * 现在最大的版本；整组都没了才像普通删除那样移出窗口。
+     */
+    private suspend fun afterRemoval(pageId: Long, removed: ImageEntity, onExhausted: () -> Unit) {
+        val group = removed.variantGroup
+        if (stacked && group != null) {
+            val remaining = imageRepository.familyMembers(group)
+            val representative = remaining
+                .filter { it.status == "active" && it.sourceType != "chatthumb" }
+                .maxWithOrNull(compareBy<ImageEntity> { it.size }.thenByDescending { it.id })
+            val ready = _state.value as? ImageDetailState.Ready
+            val index = ready?.ids?.indexOf(pageId) ?: -1
+            if (representative != null && ready != null && index >= 0) {
+                val ids = ready.ids.toMutableList().also { it[index] = representative.id }
+                val onPage = ready.currentIndex == index
+                _state.value = ready.copy(
+                    ids = ids,
+                    current = if (onPage) representative else ready.current,
+                    ocr = if (onPage) imageRepository.getOcr(representative.id) else ready.ocr,
+                    variants = if (onPage) remaining.takeIf { it.size >= 2 }.orEmpty() else ready.variants,
+                )
+                return
+            }
+        }
+        advanceAfterRemoval(pageId, onExhausted)
     }
 
     /**
@@ -274,11 +336,13 @@ class ImageDetailViewModel(
         } else {
             ready.current to ready.ocr
         }
+        val variants = if (ready.currentIndex == removedIndex) familyOf(image) else ready.variants
         _state.value = ready.copy(
             ids = newIds,
             currentIndex = newIndex,
             current = image,
             ocr = ocr,
+            variants = variants,
             totalCount = (ready.totalCount - 1).coerceAtLeast(1),
         )
         maybeExtendWindow()
@@ -302,7 +366,7 @@ class ImageDetailViewModel(
         val ready = _state.value as? ImageDetailState.Ready ?: return
         val headId = ready.ids.firstOrNull() ?: return
         val anchor = imageRepository.getById(headId) ?: return
-        val page = imageRepository.timelineIdsBefore(anchor, sort, EXTEND_PAGE)
+        val page = imageRepository.timelineIdsBefore(anchor, sort, EXTEND_PAGE, stacked)
         if (page.isEmpty()) {
             headExhausted = true
             return
@@ -325,7 +389,7 @@ class ImageDetailViewModel(
         val ready = _state.value as? ImageDetailState.Ready ?: return
         val tailId = ready.ids.lastOrNull() ?: return
         val anchor = imageRepository.getById(tailId) ?: return
-        val page = imageRepository.timelineIdsAfter(anchor, sort, EXTEND_PAGE)
+        val page = imageRepository.timelineIdsAfter(anchor, sort, EXTEND_PAGE, stacked)
         if (page.isEmpty()) {
             tailExhausted = true
             return
@@ -365,6 +429,8 @@ sealed class ImageDetailState {
         val ocr: OcrTextEntity? = null,
         val totalCount: Int = ids.size,
         val rankOffset: Int = 0,
+        /** 当前页这张图的全部版本（合并显示时 ≥2 个才有）；[current] 是其中正在显示的那个 */
+        val variants: List<ImageEntity> = emptyList(),
     ) : ImageDetailState()
 }
 

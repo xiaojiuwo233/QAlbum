@@ -421,6 +421,20 @@ class SettingsRepository(
         ds.edit { it[Keys.GALLERY_LARGE_BYTES] = bytes.coerceAtLeast(MIN_LARGE_THRESHOLD_BYTES) }
     }
 
+    /** 图库合并同一张 QQ 图片的原图 / 预览图 / 缩略图（只显示最大的那张，左下角显示版本数），默认开启 */
+    val galleryStackVariants: Flow<Boolean> = prefsData.map { it[Keys.GALLERY_STACK_VARIANTS] ?: true }
+
+    suspend fun setGalleryStackVariants(enabled: Boolean) {
+        ds.edit { it[Keys.GALLERY_STACK_VARIANTS] = enabled }
+    }
+
+    /** 已完成的图片家族回填版本（见 PictureVariantIndexer） */
+    val variantIndexVersion: Flow<Int> = prefsData.map { it[Keys.VARIANT_INDEX_VERSION] ?: 0 }
+
+    suspend fun setVariantIndexVersion(version: Int) {
+        ds.edit { it[Keys.VARIANT_INDEX_VERSION] = version }
+    }
+
     // ---- 清理规则配置 ----
 
     /** 每类清理维度的开关 + 门限；缺省或解析失败回退到 [CleanupConfig.DEFAULT]（平衡档） */
@@ -574,6 +588,8 @@ class SettingsRepository(
         val GALLERY_COLUMNS = intPreferencesKey("gallery_columns")
         val GALLERY_SORT = stringPreferencesKey("gallery_sort")
         val GALLERY_LARGE_BYTES = longPreferencesKey("gallery_large_bytes")
+        val GALLERY_STACK_VARIANTS = booleanPreferencesKey("gallery_stack_variants")
+        val VARIANT_INDEX_VERSION = intPreferencesKey("variant_index_version")
         val QQ_SOURCE_SORT = stringPreferencesKey("qq_source_sort")
         val QQ_SOURCE_FACET_ORDER = stringPreferencesKey("qq_source_facet_order")
 

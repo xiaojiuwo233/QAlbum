@@ -9,6 +9,7 @@ import com.xjw.qalbum.data.db.entity.DirSnapshotEntity
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.domain.model.FileInfo
 import com.xjw.qalbum.domain.model.ScanProgress
+import com.xjw.qalbum.qq.QqCachePaths
 import com.xjw.qalbum.service.indexer.transport.DirStat
 import com.xjw.qalbum.service.indexer.transport.ScanTransport
 import com.xjw.qalbum.service.indexer.transport.ScanTransportFactory
@@ -336,6 +337,8 @@ class ScanPipeline(
             parentDir = parentDir,
             sourceType = sourceType,
             cacheKey = cacheKey,
+            // 同一张 QQ 图片的原图 / 预览图 / 缩略图共用家族键，入库即由触发器归入同一家族
+            variantGroup = QqCachePaths.familyKey(file.path),
             size = file.size,
             mtime = file.lastModified,
             firstSeen = now,
@@ -344,7 +347,7 @@ class ScanPipeline(
             width = 0, // 宽高在分析阶段读取
             height = 0,
             isAnimated = type.isAnimated,
-            // 沿用索引状态以兼容现有库；chatthumb 是受保护的 QQ 预览缓存，不再参与清空回收站。
+            // chatthumb 沿用历史状态名 thumbnail_trash：不进图库时间线，在缩略图页与来源页管理。
             status = if (sourceType == "chatthumb") "thumbnail_trash" else "active",
         )
     }

@@ -102,6 +102,7 @@ import com.xjw.qalbum.ui.components.FloatingActionToolbar
 import com.xjw.qalbum.ui.components.FullScreenImagePager
 import com.xjw.qalbum.ui.components.LoadingState
 import com.xjw.qalbum.ui.components.PreviewAction
+import com.xjw.qalbum.ui.components.TileStackBadge
 import com.xjw.qalbum.ui.components.ToolbarIconAction
 import com.xjw.qalbum.ui.components.ToolbarPrimaryAction
 import com.xjw.qalbum.ui.imageloading.ImageEntityModel
@@ -470,6 +471,10 @@ private fun SingleTile(
             modifier = Modifier.fillMaxSize(),
         )
         TileBadge(text = item.reason, modifier = Modifier.align(Alignment.BottomStart))
+        // 同一张图还有其他版本（原图 / 预览图 / 缩略图）：删除时一起处理
+        if (item.image.variantCount >= 2) {
+            TileStackBadge(item.image.variantCount, Modifier.align(Alignment.BottomEnd).padding(5.dp))
+        }
         // 保护图（用户保留 / 已收藏）：明确标识且不可勾选（VM 侧同样拦截）
         val protection = protectionLabel(item.image)
         if (protection != null) {
@@ -781,6 +786,9 @@ private fun GroupMemberTile(
             }
         }
         TileBadge(text = imageMeta(image), modifier = Modifier.align(Alignment.BottomStart))
+        if (image.variantCount >= 2) {
+            TileStackBadge(image.variantCount, Modifier.align(Alignment.BottomEnd).padding(5.dp))
+        }
     }
 }
 

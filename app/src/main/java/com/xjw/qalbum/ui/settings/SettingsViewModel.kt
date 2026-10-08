@@ -132,6 +132,14 @@ class SettingsViewModel(
         persist { settings.setDetailSharedTransition(enabled) }
     }
 
+    /** 图库合并同一张 QQ 图片的多个版本（原图 / 预览图 / 缩略图） */
+    val galleryStackVariants: StateFlow<Boolean> = settings.galleryStackVariants
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
+
+    fun setGalleryStackVariants(enabled: Boolean) {
+        persist { settings.setGalleryStackVariants(enabled) }
+    }
+
     // ---- 导出相册目录管理 ----
 
     val exportSubdirs: StateFlow<List<String>> = settings.exportSubdirs

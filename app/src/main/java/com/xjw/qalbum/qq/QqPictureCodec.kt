@@ -128,16 +128,98 @@ object QqCachePaths {
         value
     }
 
+    private val folders = listOf("chatimg", "chatraw", "chatthumb")
+
+    private fun crc(text: String): Long {
+        var value = -1L
+        text.forEach { char -> value = (value shr 8) xor table[((value xor char.code.toLong()) and 255L).toInt()] }
+        return value
+    }
+
+    /**
+     * 同一张图在各目录的文件名 CRC 只差一个与 MD5 无关的常量：CRC 对等长后缀（":" + 32 位 MD5）是线性的，
+     * CRC(A:md5) xor CRC(B:md5) = CRC(A:0…0) xor CRC(B:0…0)。以 chatimg 为基准记下各目录的差值。
+     */
+    private val delta: Map<String, Long> = "0".repeat(32).let { zeros ->
+        folders.associateWith { crc("chatimg:$zeros") xor crc("$it:$zeros") }
+    }
+    private val rawDelta = delta.getValue("chatraw")
+    private val thumbDelta = delta.getValue("chatthumb")
+
     fun relativePaths(md5: String): List<String> {
         require(md5.matches(Regex("[0-9a-fA-F]{32}")))
-        return listOf("chatimg", "chatraw", "chatthumb").flatMap { folder ->
-            var value = -1L
-            (folder + ":" + md5.uppercase(Locale.ROOT)).forEach { char ->
-                value = (value shr 8) xor table[((value xor char.code.toLong()) and 255L).toInt()]
-            }
-            val name = "Cache_" + java.lang.Long.toString(value, 16)
+        return folders.flatMap { folder ->
+            val name = "Cache_" + java.lang.Long.toString(crc(folder + ":" + md5.uppercase(Locale.ROOT)), 16)
             val path = "$folder/${name.takeLast(3)}/$name"
             if (folder == "chatthumb") listOf(path, path + "_hd") else listOf(path)
+        }
+    }
+
+    /**
+     * 图片家族键：同一张 QQ 图片的 chatimg / chatraw / chatthumb（含 `_hd`）以及 Temp 转码缩略图共用一个键
+     * （即这张图在 chatimg 下的文件名 CRC），只凭路径算出，不需要读聊天数据库。
+     * 不是 `folder:MD5` 命名的文件（旧缓存迁移、导入消息等）返回 null，按独立图片处理。
+     *
+     * 回填时要对几十万条路径逐个计算，这里直接按下标解析，不切分路径、不走正则。
+     */
+    fun familyKey(path: String): Long? {
+        val nameAt = path.lastIndexOf('/') + 1
+        if (nameAt == 0) return null
+        val bucketAt = path.lastIndexOf('/', nameAt - 2) + 1
+        val bucketLength = nameAt - 1 - bucketAt
+        if (bucketLength == 4 && (path.startsWith("Temp", bucketAt) || path.startsWith("temp", bucketAt))) {
+            return convertedThumbnailSource(path.substring(nameAt))?.let(::familyKey)
+        }
+        if (bucketAt == 0) return null
+        val folderAt = path.lastIndexOf('/', bucketAt - 2) + 1
+        val folderLength = bucketAt - 1 - folderAt
+        val thumb = folderLength == 9 && path.startsWith("chatthumb", folderAt)
+        val shift = when {
+            thumb -> thumbDelta
+            folderLength == 7 && path.startsWith("chatimg", folderAt) -> 0L
+            folderLength == 7 && path.startsWith("chatraw", folderAt) -> rawDelta
+            else -> return null
+        }
+        if (!path.startsWith("Cache_", nameAt)) return null
+        val hd = path.endsWith("_hd")
+        if (hd && !thumb) return null
+        val end = if (hd) path.length - 3 else path.length
+        // 分桶目录是文件名（不含 _hd）的末 3 位
+        if (bucketLength != 3 || !path.regionMatches(bucketAt, path, end - 3, 3)) return null
+        val negative = path.getOrNull(nameAt + 6) == '-'
+        val digitsAt = nameAt + if (negative) 7 else 6
+        val digits = end - digitsAt
+        // 只认 QQ 自己会写出的规范十六进制（Long.toString(crc, 16)：小写、无前导零、无 -0）
+        if (digits !in 1..16 || path[digitsAt] == '0' && (digits > 1 || negative)) return null
+        var magnitude = 0L
+        for (index in digitsAt until end) {
+            val char = path[index]
+            val digit = when (char) {
+                in '0'..'9' -> char - '0'
+                in 'a'..'f' -> char - 'a' + 10
+                else -> return null
+            }
+            magnitude = (magnitude shl 4) or digit.toLong()
+        }
+        // 16 位时不能越界：正数最大 7fff…，负数最小 -8000…
+        val value = when {
+            !negative -> magnitude.takeIf { it >= 0 } ?: return null
+            magnitude >= 0 || magnitude == Long.MIN_VALUE -> -magnitude
+            else -> return null
+        }
+        return value xor shift
+    }
+
+    /** 与 [path] 同一家族的全部候选缓存路径（同一根目录下，不保证存在；Temp 转码缩略图不在其列） */
+    fun familyPaths(path: String): List<String> {
+        val key = familyKey(path) ?: return emptyList()
+        val parts = path.split('/')
+        val depth = if (parts[parts.size - 2] == "Temp" || parts[parts.size - 2] == "temp") 2 else 3
+        val base = parts.dropLast(depth).joinToString("/")
+        return folders.flatMap { folder ->
+            val name = "Cache_" + java.lang.Long.toString(key xor delta.getValue(folder), 16)
+            val variant = "$base/$folder/${name.takeLast(3)}/$name"
+            if (folder == "chatthumb") listOf(variant, variant + "_hd") else listOf(variant)
         }
     }
 

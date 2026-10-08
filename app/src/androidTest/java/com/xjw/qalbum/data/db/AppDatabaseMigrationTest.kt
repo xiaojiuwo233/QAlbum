@@ -25,8 +25,24 @@ class AppDatabaseMigrationTest {
 
     @Test
     fun migrationEdgesCoverEveryPublishedVersion() {
-        assertEquals((1..16).toList(), allMigrations.map { it.startVersion })
-        assertEquals((2..17).toList(), allMigrations.map { it.endVersion })
+        assertEquals((1..17).toList(), allMigrations.map { it.startVersion })
+        assertEquals((2..18).toList(), allMigrations.map { it.endVersion })
+    }
+
+    @Test
+    fun migrate17To18_addsPictureFamilyColumnsWithoutTouchingRows() {
+        val name = "migration-17-18"
+        helper.createDatabase(name, 17).use { db ->
+            insertImage(db, 1, "/chatpic/chatraw/a", "active", 0, null, 1000)
+            db.execSQL("UPDATE images SET variant_group = 42 WHERE id = 1")
+        }
+        helper.runMigrationsAndValidate(name, 18, true, AppDatabase.MIGRATION_17_18).use { db ->
+            // 历史变体分组清空，新列为默认值；家族由启动后的回填建立
+            assertEquals(1L, scalarLong(db, "SELECT COUNT(*) FROM images WHERE variant_group IS NULL AND variant_hidden = 0 AND variant_count = 0 AND variant_bytes = 0"))
+            listOf("image_variants_insert", "image_variants_update", "image_variants_delete").forEach { trigger ->
+                assertEquals(1L, scalarLong(db, "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='$trigger'"))
+            }
+        }
     }
 
     @Test
@@ -325,6 +341,7 @@ class AppDatabaseMigrationTest {
             AppDatabase.MIGRATION_14_15,
             AppDatabase.MIGRATION_15_16,
             AppDatabase.MIGRATION_16_17,
+            AppDatabase.MIGRATION_17_18,
         )
 
         private const val TEST_DB_V1 = "migration-1-11"

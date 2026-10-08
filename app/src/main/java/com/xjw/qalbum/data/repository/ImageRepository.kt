@@ -38,12 +38,15 @@ class ImageRepository(
 
     // ---- 时间线 ----
 
-    /** 时间线 Paging 流：默认每页 50 条，预加载 4 页；按 [sort] 选择对应排序的 PagingSource */
-    fun timelinePager(sort: GallerySort): Flow<PagingData<ImageEntity>> {
+    /**
+     * 时间线 Paging 流：默认每页 50 条，预加载 4 页；按 [sort] 选择对应排序的 PagingSource。
+     * [stacked] 为真时同一张 QQ 图片的多个版本只显示最大的那张（家族代表图）。
+     */
+    fun timelinePager(sort: GallerySort, stacked: Boolean): Flow<PagingData<ImageEntity>> {
         val factory = when (sort) {
-            GallerySort.DATE_DESC -> imageDao::pagingActiveTimeline
-            GallerySort.DATE_ASC -> imageDao::pagingActiveTimelineByDateAsc
-            GallerySort.SIZE_DESC -> imageDao::pagingActiveTimelineBySize
+            GallerySort.DATE_DESC -> { { imageDao.pagingActiveTimeline(stacked) } }
+            GallerySort.DATE_ASC -> { { imageDao.pagingActiveTimelineByDateAsc(stacked) } }
+            GallerySort.SIZE_DESC -> { { imageDao.pagingActiveTimelineBySize(stacked) } }
         }
         return Pager(
             config = PagingConfig(
@@ -87,11 +90,11 @@ class ImageRepository(
     suspend fun imageIdsByTagChunk(tagId: Long, afterId: Long, limit: Int): List<Long> =
         imageDao.imageIdsByTagChunk(tagId, afterId, limit)
 
-    fun observeTimelineDateBucketCounts(): Flow<Map<Long, Int>> =
-        imageDao.observeTimelineDateBucketCounts().map { rows -> rows.toBucketCountMap() }.throttleLatest()
+    fun observeTimelineDateBucketCounts(stacked: Boolean): Flow<Map<Long, Int>> =
+        imageDao.observeTimelineDateBucketCounts(stacked).map { rows -> rows.toBucketCountMap() }.throttleLatest()
 
-    fun observeTimelineSizeBucketCounts(): Flow<Map<Long, Int>> =
-        imageDao.observeTimelineSizeBucketCounts().map { rows -> rows.toBucketCountMap() }.throttleLatest()
+    fun observeTimelineSizeBucketCounts(stacked: Boolean): Flow<Map<Long, Int>> =
+        imageDao.observeTimelineSizeBucketCounts(stacked).map { rows -> rows.toBucketCountMap() }.throttleLatest()
 
     fun observeFavoriteDateBucketCounts(): Flow<Map<Long, Int>> =
         imageDao.observeFavoriteDateBucketCounts().map { rows -> rows.toBucketCountMap() }.throttleLatest()
@@ -114,16 +117,17 @@ class ImageRepository(
     suspend fun timelineWindowAround(
         anchor: ImageEntity,
         sort: GallerySort,
+        stacked: Boolean,
         radius: Int = TIMELINE_WINDOW_RADIUS,
     ): TimelineWindow {
         val rank = when (sort) {
-            GallerySort.DATE_DESC -> imageDao.timelineRankDateDesc(anchor.mtime, anchor.id)
-            GallerySort.DATE_ASC -> imageDao.timelineRankDateAsc(anchor.mtime, anchor.id)
-            GallerySort.SIZE_DESC -> imageDao.timelineRankSizeDesc(anchor.size, anchor.id)
+            GallerySort.DATE_DESC -> imageDao.timelineRankDateDesc(anchor.mtime, anchor.id, stacked)
+            GallerySort.DATE_ASC -> imageDao.timelineRankDateAsc(anchor.mtime, anchor.id, stacked)
+            GallerySort.SIZE_DESC -> imageDao.timelineRankSizeDesc(anchor.size, anchor.id, stacked)
         }
-        val total = imageDao.countActiveTimeline()
-        val before = timelineIdsBefore(anchor, sort, radius)
-        val after = timelineIdsAfter(anchor, sort, radius)
+        val total = imageDao.countActiveTimeline(stacked)
+        val before = timelineIdsBefore(anchor, sort, radius, stacked)
+        val after = timelineIdsAfter(anchor, sort, radius, stacked)
         val ids = ArrayList<Long>(before.size + 1 + after.size).apply {
             addAll(before)
             add(anchor.id)
@@ -133,18 +137,18 @@ class ImageRepository(
     }
 
     /** [sort] 序上 [anchor] 之后（时间线后方）的一页 id，不含锚点；返回序即时间线顺序，可直接接到窗口尾部 */
-    suspend fun timelineIdsAfter(anchor: ImageEntity, sort: GallerySort, limit: Int): List<Long> = when (sort) {
-        GallerySort.DATE_DESC -> imageDao.timelineIdsAfterDateDesc(anchor.mtime, anchor.id, limit)
+    suspend fun timelineIdsAfter(anchor: ImageEntity, sort: GallerySort, limit: Int, stacked: Boolean): List<Long> = when (sort) {
+        GallerySort.DATE_DESC -> imageDao.timelineIdsAfterDateDesc(anchor.mtime, anchor.id, limit, stacked)
         // ASC 与 DESC 互为镜像：asc 的「后方」即 desc 的「前方」，该 DAO 返回序恰为 mtime ASC
-        GallerySort.DATE_ASC -> imageDao.timelineIdsBeforeDateDesc(anchor.mtime, anchor.id, limit)
-        GallerySort.SIZE_DESC -> imageDao.timelineIdsAfterSizeDesc(anchor.size, anchor.id, limit)
+        GallerySort.DATE_ASC -> imageDao.timelineIdsBeforeDateDesc(anchor.mtime, anchor.id, limit, stacked)
+        GallerySort.SIZE_DESC -> imageDao.timelineIdsAfterSizeDesc(anchor.size, anchor.id, limit, stacked)
     }
 
     /** [sort] 序上 [anchor] 之前（时间线前方）的一页 id，不含锚点；DAO 返回序离键近→远，翻转后即时间线顺序，可直接接到窗口头部 */
-    suspend fun timelineIdsBefore(anchor: ImageEntity, sort: GallerySort, limit: Int): List<Long> = when (sort) {
-        GallerySort.DATE_DESC -> imageDao.timelineIdsBeforeDateDesc(anchor.mtime, anchor.id, limit).reversed()
-        GallerySort.DATE_ASC -> imageDao.timelineIdsAfterDateDesc(anchor.mtime, anchor.id, limit).reversed()
-        GallerySort.SIZE_DESC -> imageDao.timelineIdsBeforeSizeDesc(anchor.size, anchor.id, limit).reversed()
+    suspend fun timelineIdsBefore(anchor: ImageEntity, sort: GallerySort, limit: Int, stacked: Boolean): List<Long> = when (sort) {
+        GallerySort.DATE_DESC -> imageDao.timelineIdsBeforeDateDesc(anchor.mtime, anchor.id, limit, stacked).reversed()
+        GallerySort.DATE_ASC -> imageDao.timelineIdsAfterDateDesc(anchor.mtime, anchor.id, limit, stacked).reversed()
+        GallerySort.SIZE_DESC -> imageDao.timelineIdsBeforeSizeDesc(anchor.size, anchor.id, limit, stacked).reversed()
     }
 
     // ---- 详情 ----
@@ -182,6 +186,15 @@ class ImageRepository(
         if (ids.isEmpty()) return 0L
         return ids.chunked(SQL_IDS_CHUNK).sumOf { imageDao.sumSizeByIds(it) }
     }
+
+    /** 按家族结算的总大小（合并显示时一张图连同它的其他版本一起算） */
+    suspend fun sumStackSizeByIds(ids: List<Long>): Long {
+        if (ids.isEmpty()) return 0L
+        return ids.chunked(SQL_IDS_CHUNK).sumOf { imageDao.sumStackSizeByIds(it) }
+    }
+
+    /** 同一张图的全部现存版本（原图 / 预览图 / 缩略图） */
+    suspend fun familyMembers(group: Long): List<ImageEntity> = imageDao.familyMembers(group)
 
     suspend fun getByDuplicateGroup(groupId: Long): List<ImageEntity> =
         imageDao.getByDuplicateGroup(groupId)

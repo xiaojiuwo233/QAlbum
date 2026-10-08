@@ -12,9 +12,11 @@ import java.time.ZoneId
  *
  * 设计要点：
  * - `cache_key`：从 `Cache_{hash}` 文件名中提取的 hash 部分。
- * - `variant_group` / `is_variant_primary`：仅保留历史 cache_key 变体能力，不再用来匹配缩略图与原图。
+ * - `variant_group`：图片家族键——同一张 QQ 图片的 chatimg / chatraw / chatthumb 由文件名 CRC 推出同一个键
+ *   （见 QqCachePaths.familyKey）；`variant_hidden` / `variant_count` / `variant_bytes` 由触发器维护：
+ *   图库合并显示时只露出家族中最大的那张，它带上家族的版本数与总大小。`is_variant_primary` 为历史遗留列，不再使用。
  * - `duplicate_group_id` / `is_duplicate_best`：基于 xxHash + pHash 检测出的"重复组"。
- * - `status = thumbnail_trash`：历史状态名；现在表示受保护的 QQ 预览缓存，不参与图库和分析，不能直接清理。
+ * - `status = thumbnail_trash`：历史状态名；现在表示 QQ 缩略图（chatthumb），不进图库时间线，可在缩略图页与来源页清理。
  */
 @Entity(
     tableName = "images",
@@ -37,10 +39,10 @@ import java.time.ZoneId
         Index("duplicate_group_id"),
         // 分桶计数覆盖索引：observeTimelineDateBucketCounts / observeFavoriteDateBucketCounts
         // 只扫索引条目做 GROUP BY date_bucket，免 200w 行全表逐行 strftime。
-        Index("status", "source_type", "date_bucket", "is_protected"),
+        Index("status", "source_type", "date_bucket", "is_protected", "variant_hidden"),
         // 时间线定位覆盖索引：timelineRank* / timelineIds*（keyset 定位与窗口）只扫索引条目计数，
         // 不做 200w 次行回表。
-        Index("status", "source_type", "mtime"),
+        Index("status", "source_type", "mtime", "variant_hidden"),
     ]
 )
 data class ImageEntity(
@@ -54,6 +56,11 @@ data class ImageEntity(
     @ColumnInfo(name = "cache_key") val cacheKey: String,
     @ColumnInfo(name = "variant_group") val variantGroup: Long? = null,
     @ColumnInfo(name = "is_variant_primary") val isVariantPrimary: Boolean = false,
+    // 家族里的其他版本（图库合并显示时隐藏）；仅 active 的非缩略图可能为真
+    @ColumnInfo(name = "variant_hidden", defaultValue = "0") val variantHidden: Boolean = false,
+    // 仅家族代表图（最大的那张）记录：家族现存版本数（≥2 才记）与总大小，其余为 0
+    @ColumnInfo(name = "variant_count", defaultValue = "0") val variantCount: Int = 0,
+    @ColumnInfo(name = "variant_bytes", defaultValue = "0") val variantBytes: Long = 0,
     @ColumnInfo(name = "size") val size: Long,
     @ColumnInfo(name = "mtime") val mtime: Long,
     // 本地日分桶键（year*1000 + dayOfYear，与 strftime('%Y'/'%j', 'localtime') 同口径）：
@@ -120,6 +127,9 @@ data class ImageEntity(
             cacheKey == other.cacheKey &&
             variantGroup == other.variantGroup &&
             isVariantPrimary == other.isVariantPrimary &&
+            variantHidden == other.variantHidden &&
+            variantCount == other.variantCount &&
+            variantBytes == other.variantBytes &&
             size == other.size &&
             mtime == other.mtime &&
             dateBucket == other.dateBucket &&

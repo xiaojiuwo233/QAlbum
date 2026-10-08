@@ -354,26 +354,26 @@ interface ImageDao {
     /** 时间线视图：缩略图不进入图库。 */
     @Query("""
         SELECT * FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb'
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND (:stacked = 0 OR variant_hidden = 0)
         ORDER BY mtime DESC, id DESC
     """)
-    fun pagingActiveTimeline(): PagingSource<Int, ImageEntity>
+    fun pagingActiveTimeline(stacked: Boolean): PagingSource<Int, ImageEntity>
 
     /** 时间线视图（旧到新）：mtime 升序。 */
     @Query("""
         SELECT * FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb'
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND (:stacked = 0 OR variant_hidden = 0)
         ORDER BY mtime ASC, id ASC
     """)
-    fun pagingActiveTimelineByDateAsc(): PagingSource<Int, ImageEntity>
+    fun pagingActiveTimelineByDateAsc(stacked: Boolean): PagingSource<Int, ImageEntity>
 
     /** 时间线视图（大到小）：size 降序，走 index_images_size 避免 25w 图 filesort。 */
     @Query("""
         SELECT * FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb'
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND (:stacked = 0 OR variant_hidden = 0)
         ORDER BY size DESC, id DESC
     """)
-    fun pagingActiveTimelineBySize(): PagingSource<Int, ImageEntity>
+    fun pagingActiveTimelineBySize(stacked: Boolean): PagingSource<Int, ImageEntity>
 
     /**
      * 日期分桶计数：bucketKey = year*1000 + dayOfYear（预计算列 date_bucket，入库时写好）。
@@ -383,10 +383,10 @@ interface ImageDao {
     @Query("""
         SELECT date_bucket AS bucketKey, COUNT(*) AS count
         FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb'
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND (:stacked = 0 OR variant_hidden = 0)
         GROUP BY date_bucket
     """)
-    fun observeTimelineDateBucketCounts(): Flow<List<BucketCountRow>>
+    fun observeTimelineDateBucketCounts(stacked: Boolean): Flow<List<BucketCountRow>>
 
     @Query("""
         SELECT
@@ -399,10 +399,10 @@ interface ImageDao {
             END AS bucketKey,
             COUNT(*) AS count
         FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb'
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND (:stacked = 0 OR variant_hidden = 0)
         GROUP BY bucketKey
     """)
-    fun observeTimelineSizeBucketCounts(): Flow<List<BucketCountRow>>
+    fun observeTimelineSizeBucketCounts(stacked: Boolean): Flow<List<BucketCountRow>>
 
     @Query("""
         SELECT date_bucket AS bucketKey, COUNT(*) AS count
@@ -436,72 +436,72 @@ interface ImageDao {
     // [timelineIdsAfterDateDesc]，rank(asc) = 总数 - rankDesc - 1 或直接用 [timelineRankDateAsc]。
 
     /** 主时间线总数（suspend 一次性查询；Flow 版见 [observeImageCount]） */
-    @Query("SELECT COUNT(*) FROM images WHERE status = 'active' AND source_type <> 'chatthumb'")
-    suspend fun countActiveTimeline(): Int
+    @Query("SELECT COUNT(*) FROM images WHERE status = 'active' AND source_type <> 'chatthumb' AND (:stacked = 0 OR variant_hidden = 0)")
+    suspend fun countActiveTimeline(stacked: Boolean): Int
 
     /** 「新到旧」时间线中给定排序键的 rank（0-based，= 排在它前面的行数） */
     @Query("""
         SELECT COUNT(*) FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb'
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND (:stacked = 0 OR variant_hidden = 0)
           AND (mtime > :mtime OR (mtime = :mtime AND id > :id))
     """)
-    suspend fun timelineRankDateDesc(mtime: Long, id: Long): Int
+    suspend fun timelineRankDateDesc(mtime: Long, id: Long, stacked: Boolean): Int
 
     /** 「旧到新」时间线中给定排序键的 rank（0-based） */
     @Query("""
         SELECT COUNT(*) FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb'
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND (:stacked = 0 OR variant_hidden = 0)
           AND (mtime < :mtime OR (mtime = :mtime AND id < :id))
     """)
-    suspend fun timelineRankDateAsc(mtime: Long, id: Long): Int
+    suspend fun timelineRankDateAsc(mtime: Long, id: Long, stacked: Boolean): Int
 
     /** 「大到小」时间线中给定排序键的 rank（0-based） */
     @Query("""
         SELECT COUNT(*) FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb'
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND (:stacked = 0 OR variant_hidden = 0)
           AND (size > :size OR (size = :size AND id > :id))
     """)
-    suspend fun timelineRankSizeDesc(size: Long, id: Long): Int
+    suspend fun timelineRankSizeDesc(size: Long, id: Long, stacked: Boolean): Int
 
     /** 「新到旧」时间线中排序键之后（更旧方向）的一页 id，不含键自身 */
     @Query("""
         SELECT id FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb'
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND (:stacked = 0 OR variant_hidden = 0)
           AND (mtime < :mtime OR (mtime = :mtime AND id < :id))
         ORDER BY mtime DESC, id DESC
         LIMIT :limit
     """)
-    suspend fun timelineIdsAfterDateDesc(mtime: Long, id: Long, limit: Int): List<Long>
+    suspend fun timelineIdsAfterDateDesc(mtime: Long, id: Long, limit: Int, stacked: Boolean): List<Long>
 
     /** 「新到旧」时间线中排序键之前（更新方向）的一页 id：返回序为离键近→远，调用方按需 reverse */
     @Query("""
         SELECT id FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb'
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND (:stacked = 0 OR variant_hidden = 0)
           AND (mtime > :mtime OR (mtime = :mtime AND id > :id))
         ORDER BY mtime ASC, id ASC
         LIMIT :limit
     """)
-    suspend fun timelineIdsBeforeDateDesc(mtime: Long, id: Long, limit: Int): List<Long>
+    suspend fun timelineIdsBeforeDateDesc(mtime: Long, id: Long, limit: Int, stacked: Boolean): List<Long>
 
     /** 「大到小」时间线中排序键之后（更小方向）的一页 id，不含键自身 */
     @Query("""
         SELECT id FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb'
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND (:stacked = 0 OR variant_hidden = 0)
           AND (size < :size OR (size = :size AND id < :id))
         ORDER BY size DESC, id DESC
         LIMIT :limit
     """)
-    suspend fun timelineIdsAfterSizeDesc(size: Long, id: Long, limit: Int): List<Long>
+    suspend fun timelineIdsAfterSizeDesc(size: Long, id: Long, limit: Int, stacked: Boolean): List<Long>
 
     /** 「大到小」时间线中排序键之前（更大方向）的一页 id：返回序为离键近→远，调用方按需 reverse */
     @Query("""
         SELECT id FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb'
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND (:stacked = 0 OR variant_hidden = 0)
           AND (size > :size OR (size = :size AND id > :id))
         ORDER BY size ASC, id ASC
         LIMIT :limit
     """)
-    suspend fun timelineIdsBeforeSizeDesc(size: Long, id: Long, limit: Int): List<Long>
+    suspend fun timelineIdsBeforeSizeDesc(size: Long, id: Long, limit: Int, stacked: Boolean): List<Long>
 
     @Query("""
         SELECT * FROM images
@@ -751,7 +751,7 @@ interface ImageDao {
     @Query("""
         SELECT xxhash AS hash, GROUP_CONCAT(id) AS ids
         FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb' AND xxhash IS NOT NULL
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND variant_hidden = 0 AND xxhash IS NOT NULL
         GROUP BY xxhash, size
         HAVING COUNT(*) > 1
     """)
@@ -798,7 +798,7 @@ interface ImageDao {
      */
     @Query("""
         SELECT id, xxhash, phash, block_hash AS blockHash, feature_grid AS featureGrid, width, height, size, is_blank AS isBlank, is_animated AS isAnimated FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb'
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND variant_hidden = 0
           AND (xxhash IS NOT NULL OR phash IS NOT NULL)
           AND id > :afterId
         ORDER BY id
@@ -832,7 +832,7 @@ interface ImageDao {
     @Query("""
         SELECT id, duplicate_group_id AS duplicateGroupId, size
         FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb'
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND variant_hidden = 0
           AND is_protected = 0 AND (user_keep IS NULL OR user_keep = 0)
           AND duplicate_group_id IS NOT NULL
         ORDER BY mtime ASC, id ASC
@@ -842,7 +842,7 @@ interface ImageDao {
     @Query("""
         SELECT id, duplicate_group_id AS duplicateGroupId, size
         FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb'
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND variant_hidden = 0
           AND is_protected = 0 AND (user_keep IS NULL OR user_keep = 0)
           AND duplicate_group_id IS NOT NULL
         ORDER BY mtime DESC, id DESC
@@ -893,7 +893,7 @@ interface ImageDao {
 
     @Query("""
         SELECT * FROM images
-        WHERE duplicate_group_id = :groupId AND source_type <> 'chatthumb'
+        WHERE duplicate_group_id = :groupId AND source_type <> 'chatthumb' AND variant_hidden = 0
         ORDER BY is_duplicate_best DESC, size DESC
     """)
     suspend fun getByDuplicateGroup(groupId: Long): List<ImageEntity>
@@ -904,11 +904,57 @@ interface ImageDao {
      */
     @Query("""
         SELECT * FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb'
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND variant_hidden = 0
           AND duplicate_group_id IN (:groupIds)
         ORDER BY is_duplicate_best DESC, size DESC
     """)
     suspend fun getActiveByDuplicateGroupIds(groupIds: List<Long>): List<ImageEntity>
+
+    /**
+     * [groupIds] 中仍有至少两张可见图的重复组。同一张图只露出最大的版本：组里的版本后来被更大的版本取代
+     * （例如之后才下载了原图）时，下次查重前这个组可能只剩一张可见图。调用方需分块传入。
+     */
+    @Query("""
+        SELECT duplicate_group_id FROM images
+        WHERE duplicate_group_id IN (:groupIds) AND status = 'active' AND source_type <> 'chatthumb' AND variant_hidden = 0
+        GROUP BY duplicate_group_id HAVING COUNT(*) >= 2
+    """)
+    suspend fun duplicateGroupsWithPairsAmong(groupIds: List<Long>): List<Long>
+
+    /** 全部仍有至少两张可见图的重复组（「审核全部重复」） */
+    @Query("""
+        SELECT duplicate_group_id FROM images
+        WHERE duplicate_group_id IS NOT NULL AND status = 'active' AND source_type <> 'chatthumb' AND variant_hidden = 0
+        GROUP BY duplicate_group_id HAVING COUNT(*) >= 2
+    """)
+    suspend fun duplicateGroupsWithPairs(): List<Long>
+
+    // ---- 图片家族（同一张 QQ 图片的原图 / 预览图 / 缩略图，见 QqCachePaths.familyKey）----
+
+    /** 家族的现存版本：原图、预览图、其他、缩略图依次，同类大的在前 */
+    @Query("""
+        SELECT * FROM images
+        WHERE variant_group = :group AND status IN ('active', 'thumbnail_trash')
+        ORDER BY CASE source_type WHEN 'chatraw' THEN 0 WHEN 'chatimg' THEN 1 WHEN 'chatthumb' THEN 3 ELSE 2 END, size DESC, id
+    """)
+    suspend fun familyMembers(group: Long): List<ImageEntity>
+
+    /** 按家族结算的总大小：家族代表图计整组（含缩略图），其余按自身大小 */
+    @Query("SELECT COALESCE(SUM(CASE WHEN variant_count >= 2 THEN variant_bytes ELSE size END), 0) FROM images WHERE id IN (:ids)")
+    suspend fun sumStackSizeByIds(ids: List<Long>): Long
+
+    /** 回填家族键：按 id 分页取路径（已在回收站的图用原位置路径） */
+    @Query("""
+        SELECT i.id AS id, COALESCE(q.original_path, i.path) AS path FROM images i
+        LEFT JOIN quarantine q ON q.image_id = i.id
+        WHERE i.id > :afterId ORDER BY i.id LIMIT :limit
+    """)
+    suspend fun variantKeyRows(afterId: Long, limit: Int): List<VariantKeyRow>
+
+    data class VariantKeyRow(val id: Long, val path: String)
+
+    @Query("SELECT COALESCE(MAX(id), 0) FROM images")
+    suspend fun maxId(): Long
 
     /** 取若干图的视觉特征（反馈学习用） */
     @Query("SELECT id, block_hash AS blockHash, feature_grid AS featureGrid FROM images WHERE id IN (:ids)")
@@ -920,7 +966,7 @@ interface ImageDao {
                source_type AS sourceType, is_animated AS isAnimated, mtime,
                (duplicate_group_id IS NOT NULL) AS inDuplicateGroup
         FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb'
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND variant_hidden = 0
           AND is_protected = 0 AND (user_keep IS NULL OR user_keep = 0)
           AND feature_grid IS NOT NULL
         ORDER BY delete_score DESC
@@ -1174,7 +1220,7 @@ interface ImageDao {
                is_duplicate_best AS isDuplicateBest,
                delete_score AS deleteScore
         FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb'
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND variant_hidden = 0
           AND is_protected = 0 AND (user_keep IS NULL OR user_keep = 0)
           AND (
                 (:corruptEnabled AND is_corrupt = 1)
@@ -1221,7 +1267,7 @@ interface ImageDao {
                is_duplicate_best AS isDuplicateBest,
                delete_score AS deleteScore
         FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb'
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND variant_hidden = 0
           AND is_protected = 0 AND (user_keep IS NULL OR user_keep = 0)
           AND (
                 (:corruptEnabled AND is_corrupt = 1)

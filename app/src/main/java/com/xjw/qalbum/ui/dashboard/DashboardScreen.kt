@@ -60,6 +60,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.WavyProgressIndicatorDefaults
 import androidx.compose.material3.toShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -559,16 +560,17 @@ private fun AnalysisPipelineCard(
             }
         }
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-            PipelineRing("哈希", progress.hashDone, totalImages, MaterialTheme.colorScheme.primary, 0)
-            PipelineRing("文字识别", progress.ocrDone, totalImages, MaterialTheme.colorScheme.tertiary, 1)
-            PipelineRing("AI 标签", progress.aiDone, totalImages, MaterialTheme.colorScheme.secondary, 2)
-            PipelineRing("向量", progress.embeddingDone, totalImages, MaterialTheme.colorScheme.error, 3)
+            val moving = analysisState == AnalysisState.Running
+            PipelineRing("哈希", progress.hashDone, totalImages, MaterialTheme.colorScheme.primary, 0, moving)
+            PipelineRing("文字识别", progress.ocrDone, totalImages, MaterialTheme.colorScheme.tertiary, 1, moving)
+            PipelineRing("AI 标签", progress.aiDone, totalImages, MaterialTheme.colorScheme.secondary, 2, moving)
+            PipelineRing("向量", progress.embeddingDone, totalImages, MaterialTheme.colorScheme.error, 3, moving)
         }
     }
 }
 
 @Composable
-private fun PipelineRing(label: String, done: Int, total: Int, color: Color, delayIndex: Int) {
+private fun PipelineRing(label: String, done: Int, total: Int, color: Color, delayIndex: Int, moving: Boolean) {
     val fraction = if (total > 0) done.toFloat() / total else 0f
     val animatedFraction by animateFloatAsState(
         targetValue = fraction,
@@ -582,6 +584,8 @@ private fun PipelineRing(label: String, done: Int, total: Int, color: Color, del
                 color = color,
                 trackColor = color.copy(alpha = 0.16f),
                 modifier = Modifier.fillMaxSize(),
+                // 只在分析进行时流动：常驻概览页的逐帧动画会让页面一直重绘
+                waveSpeed = if (moving) WavyProgressIndicatorDefaults.CircularWavelength else 0.dp,
             )
             Text(
                 text = "${(fraction * 100).toInt()}%",

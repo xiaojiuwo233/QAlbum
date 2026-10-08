@@ -90,38 +90,50 @@ class GalleryViewModel(
         viewModelScope.launch { settings.setGalleryLargeThresholdBytes(bytes) }
     }
 
+    /** 合并同一张 QQ 图片的原图 / 预览图 / 缩略图：只显示最大的那张，左下角标出版本数 */
+    val stackVariants: StateFlow<Boolean> = settings.galleryStackVariants
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
+
+    fun setStackVariants(enabled: Boolean) {
+        viewModelScope.launch { settings.setGalleryStackVariants(enabled) }
+    }
+
     // ---- 时间线 ----
 
     // 分桶计数固化为热流缓存：withDateHeaders/withSizeHeaders 每个 PagingData generation
     // 都要读一次计数，若每次冷订阅 Room Flow，扫描/分析期间的高频失效会让 200 万行聚合
     // 反复重跑并拖住新 generation 的下发；stateIn 后 generation 读的是最新缓存值（首次
-    // 之后即时返回），刷新频率由仓库层 throttleLatest 统一约束。
-    private val timelineDateBucketCounts: StateFlow<Map<Long, Int>?> =
-        imageRepository.observeTimelineDateBucketCounts()
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+    // 之后即时返回），刷新频率由仓库层 throttleLatest 统一约束。按是否合并显示各备一份。
+    private val timelineDateBucketCounts: Map<Boolean, StateFlow<Map<Long, Int>?>> =
+        listOf(false, true).associateWith { stacked ->
+            imageRepository.observeTimelineDateBucketCounts(stacked)
+                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+        }
 
-    private val timelineSizeBucketCounts: StateFlow<Map<Long, Int>?> =
-        imageRepository.observeTimelineSizeBucketCounts()
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+    private val timelineSizeBucketCounts: Map<Boolean, StateFlow<Map<Long, Int>?>> =
+        listOf(false, true).associateWith { stacked ->
+            imageRepository.observeTimelineSizeBucketCounts(stacked)
+                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+        }
 
     private val favoriteDateBucketCounts: StateFlow<Map<Long, Int>?> =
         imageRepository.observeFavoriteDateBucketCounts()
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     val timeline: Flow<PagingData<GalleryTimelineItem>> =
-        settings.gallerySort
-            // DataStore 任意 key 写入都会重发 gallerySort；等值重发若不去重会经 flatMapLatest
+        combine(settings.gallerySort, settings.galleryStackVariants) { sort, stacked -> sort to stacked }
+            // DataStore 任意 key 写入都会重发；等值重发若不去重会经 flatMapLatest
             // 重建 Pager（滚动位置回顶 + 全量重载），改列数/阈值等无关设置都会触发
             .distinctUntilChanged()
-            .flatMapLatest { sort ->
+            .flatMapLatest { (sort, stacked) ->
                 when (sort) {
                     GallerySort.SIZE_DESC -> imageRepository
-                        .timelinePager(sort)
-                        .withSizeHeaders(timelineSizeBucketCounts)
+                        .timelinePager(sort, stacked)
+                        .withSizeHeaders(timelineSizeBucketCounts.getValue(stacked))
 
                     GallerySort.DATE_DESC, GallerySort.DATE_ASC -> imageRepository
-                        .timelinePager(sort)
-                        .withDateHeaders(timelineDateBucketCounts)
+                        .timelinePager(sort, stacked)
+                        .withDateHeaders(timelineDateBucketCounts.getValue(stacked))
                 }
             }.cachedIn(viewModelScope)
 
@@ -133,8 +145,9 @@ class GalleryViewModel(
 
     val favoriteCount: Flow<Int> = imageRepository.observeFavoriteCount()
 
-    /** 选中图片的原始字节总和（用于删除确认框展示「N 张图片 · X MB」） */
-    suspend fun selectedSize(ids: Set<Long>): Long = imageRepository.sumSizeByIds(ids.toList())
+    /** 选中图片的字节总和（删除确认框「N 张图片 · X MB」）；合并显示时连同其他版本一起结算 */
+    suspend fun selectedSize(ids: Set<Long>): Long =
+        if (stackVariants.value) imageRepository.sumStackSizeByIds(ids.toList()) else imageRepository.sumSizeByIds(ids.toList())
 
     /** 导出子目录列表（保存弹窗用） */
     val exportSubdirs: StateFlow<List<String>> = settings.exportSubdirs

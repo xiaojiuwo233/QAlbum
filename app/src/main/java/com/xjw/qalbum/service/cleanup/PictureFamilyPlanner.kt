@@ -37,6 +37,17 @@ internal class PictureFamilyPlanner(private val db: AppDatabase, private val roo
                 while (frontier.isNotEmpty()) {
                     currentCoroutineContext().ensureActive()
                     val added = ArrayList<String>()
+                    // 同一张图的原图 / 预览图 / 缩略图由文件名 CRC 直接推出（QqCachePaths.familyPaths），不依赖聊天数据库
+                    for (path in frontier) {
+                        val family = QqCachePaths.familyPaths(path).filter { cacheType(it) != null }
+                        if (family.size < 2) continue
+                        linkedPaths += path
+                        for (member in family) {
+                            linkedPaths += member
+                            if (member !in parents) { parents[member] = member; added += member }
+                            join(path, member)
+                        }
+                    }
                     for (page in frontier.chunked(200)) {
                         val edges = db.qqSourceDao().picturePathEdges(page).groupBy { it.originId }
                         for (entries in edges.values) {

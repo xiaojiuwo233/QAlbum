@@ -57,7 +57,7 @@ class CleanupRecommender(
             .coerceIn(maxItems.toLong(), POOL_HARD_CAP)
             .toInt()
 
-        val pool = imageDao.cleanupCandidatePool(
+        val candidates = imageDao.cleanupCandidatePool(
             corruptEnabled = config.corruptEnabled,
             blankEnabled = config.blankEnabled,
             duplicateEnabled = config.duplicateEnabled,
@@ -74,6 +74,7 @@ class CleanupRecommender(
             oldestFirst = oldestFirst,
             poolLimit = poolLimit,
         )
+        val pool = candidates.withoutBrokenGroups(liveGroupsAmong(candidates))
 
         val classified = pool.mapNotNull { row ->
             CleanupRules.classify(row, config)?.let { reason -> row to reason }
@@ -223,7 +224,8 @@ class CleanupRecommender(
         oldestFirst: Boolean,
     ): CleanupBatch {
         // 1) 重复组（保持组首次出现顺序，最多 MAX_DUP_GROUPS 组/波；组一旦入选则统计其全部成员）
-        val dupRows = imageDao.allDuplicateRows(oldestFirst)
+        val liveGroups = imageDao.duplicateGroupsWithPairs().toHashSet()
+        val dupRows = imageDao.allDuplicateRows(oldestFirst).filter { it.duplicateGroupId in liveGroups }
         val seenGroups = LinkedHashSet<Long>()
         val dupGroupSize = HashMap<Long, Long>()
         for (row in dupRows) {
@@ -254,7 +256,7 @@ class CleanupRecommender(
             emojiMinSide = config.emojiMinSide,
             oldestFirst = oldestFirst,
             poolLimit = poolLimit,
-        )
+        ).withoutBrokenGroups(liveGroups)
         val otherClassified = pool
             .filter { it.duplicateGroupId == null } // 属重复组的图归重复处理，避免一图两处
             .mapNotNull { row -> CleanupRules.classify(row, config)?.let { reason -> row to reason } }
@@ -329,12 +331,26 @@ class CleanupRecommender(
         return CleanupBatch(batchId, report, items)
     }
 
+    /** 候选里出现的重复组中，仍有至少两张可见图的那些 */
+    private suspend fun liveGroupsAmong(rows: List<CleanupSignalRow>): Set<Long> =
+        rows.mapNotNullTo(HashSet()) { it.duplicateGroupId }
+            .chunked(GROUP_QUERY_CHUNK)
+            .flatMapTo(HashSet()) { imageDao.duplicateGroupsWithPairsAmong(it) }
+
+    /** 只剩一张可见图的组不算重复：组员去掉组信息，按其它维度判断 */
+    private fun List<CleanupSignalRow>.withoutBrokenGroups(live: Set<Long>): List<CleanupSignalRow> = map { row ->
+        if (row.duplicateGroupId == null || row.duplicateGroupId in live) row
+        else row.copy(duplicateGroupId = null, isDuplicateBest = false)
+    }
+
     // 尚未接入完整 QQ 消息引用检查，不再把重复 / 空白 / 损坏直接标为安全删除。
 
     companion object {
         const val DEFAULT_MAX_ITEMS = 200
         private const val POOL_FACTOR = 8L
         private const val POOL_HARD_CAP = 50_000L
+        /** IN 查询分块（低版本系统 SQLite 变量上限 999） */
+        private const val GROUP_QUERY_CHUNK = 900
 
         /**
          * 「审核全部重复」单波组数上限：审核页会按组装载全部成员实体（约 0.5~1KB/张），

@@ -164,6 +164,7 @@ val appModule = module {
         )
     }
     single { ThumbnailTrashManager(imageDao = get()) }
+    single { com.xjw.qalbum.service.indexer.PictureVariantIndexer(db = get(), settings = get()) }
     single { ImageFileManager(context = get(), accessManager = get(), imageDao = get()) }
     single { CleanupController(recommender = get(), quarantineManager = get(), cleanupDao = get()) }
     single { QqSourceRepository(context = get(), db = get(), settings = get(), client = get(), quarantine = get(), appScope = get()) }

@@ -5,6 +5,7 @@ import com.xjw.qalbum.data.db.AppDatabase
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.db.entity.QuarantineEntity
 import com.xjw.qalbum.fileops.BoundFileOps
+import com.xjw.qalbum.qq.QqCachePaths
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -242,7 +243,8 @@ internal class LinkedPictureOperations(
         val now=System.currentTimeMillis()
         val drafts=newAssets.map { asset ->
             ImageEntity(path=asset.path,filename=asset.path.substringAfterLast('/'),parentDir=asset.path.substringBeforeLast('/'),sourceType=asset.sourceType,
-                cacheKey=asset.path.substringAfterLast('/').removePrefix("Cache_"),size=asset.size,mtime=asset.mtime,firstSeen=now,lastSeen=now,
+                cacheKey=asset.path.substringAfterLast('/').removePrefix("Cache_"),variantGroup=QqCachePaths.familyKey(asset.path),
+                size=asset.size,mtime=asset.mtime,firstSeen=now,lastSeen=now,
                 mime=types.getValue(asset.path).mime,width=0,height=0,isAnimated=types.getValue(asset.path).isAnimated,
                 status=if(asset.sourceType=="chatthumb")"thumbnail_trash" else "active")
         }

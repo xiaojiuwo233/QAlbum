@@ -81,6 +81,8 @@ import com.xjw.qalbum.ui.components.PhotoBadges
 import com.xjw.qalbum.ui.components.PhotoGrid
 import com.xjw.qalbum.ui.components.SaveToAlbumSheet
 import com.xjw.qalbum.ui.components.SectionHeader
+import com.xjw.qalbum.ui.components.SegmentPosition
+import com.xjw.qalbum.ui.components.SegmentedSwitchItem
 import com.xjw.qalbum.ui.components.SelectionTopBar
 import com.xjw.qalbum.ui.components.ToolbarIconAction
 import com.xjw.qalbum.ui.components.ToolbarPrimaryAction
@@ -111,6 +113,7 @@ fun GalleryScreen(
     val columns by viewModel.galleryColumns.collectAsState()
     val sort by viewModel.gallerySort.collectAsState()
     val largeThreshold by viewModel.largeThresholdBytes.collectAsState()
+    val stackVariants by viewModel.stackVariants.collectAsState()
     val enabledPhases by viewModel.enabledPhases.collectAsState()
     // 多选状态与 rememberSaveable 的弹窗开关成对存亡：否则旋转 / 进程重建后
     // 确认框恢复显示而选中集已清空，出现「删除 0 张」的幽灵对话框
@@ -193,7 +196,7 @@ fun GalleryScreen(
                         onColumnsChange = viewModel::setColumns,
                         minColumns = SettingsRepository.MIN_GALLERY_COLUMNS,
                         maxColumns = SettingsRepository.MAX_GALLERY_COLUMNS,
-                        badges = PhotoBadges(largeThresholdBytes = largeThreshold, analyzedPhases = enabledPhases),
+                        badges = PhotoBadges(largeThresholdBytes = largeThreshold, analyzedPhases = enabledPhases, stack = stackVariants),
                         contentPadding = contentPadding,
                         sharedScope = if (imageShared) sharedScope else null,
                         animatedScope = animatedScope,
@@ -261,9 +264,11 @@ fun GalleryScreen(
             columns = columns,
             sort = sort,
             thresholdBytes = largeThreshold,
+            stackVariants = stackVariants,
             onColumns = viewModel::setColumns,
             onSort = viewModel::setSort,
             onThreshold = viewModel::setLargeThreshold,
+            onStackVariants = viewModel::setStackVariants,
             onDismiss = { showPrefsSheet = false },
         )
     }
@@ -472,15 +477,17 @@ fun FavoriteGalleryScreen(
     }
 }
 
-/** 图库显示与排序：每行张数、排列顺序（连接式按钮组）、大图标记阈值 */
+/** 图库显示与排序：每行张数、排列顺序（连接式按钮组）、大图标记阈值、合并同一张图的多个版本 */
 @Composable
 private fun GalleryPreferenceSheet(
     columns: Int,
     sort: GallerySort,
     thresholdBytes: Long,
+    stackVariants: Boolean,
     onColumns: (Int) -> Unit,
     onSort: (GallerySort) -> Unit,
     onThreshold: (Long) -> Unit,
+    onStackVariants: (Boolean) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -536,6 +543,16 @@ private fun GalleryPreferenceSheet(
                     )
                 }
             }
+            SectionHeader("同一张图的多个版本")
+            SegmentedSwitchItem(
+                position = SegmentPosition.Single,
+                title = "合并显示",
+                subtitle = "QQ 为同一张图保存的原图、预览图和缩略图合成一张，显示最大的那张，大小按全部版本合计，删除时一起处理",
+                checked = stackVariants,
+                onCheckedChange = onStackVariants,
+                icon = Icons.Outlined.PhotoLibrary,
+                modifier = Modifier.padding(horizontal = 8.dp),
+            )
             Spacer(Modifier.height(8.dp))
         }
     }

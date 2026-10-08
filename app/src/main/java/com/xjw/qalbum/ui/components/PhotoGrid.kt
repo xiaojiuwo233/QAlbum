@@ -18,6 +18,8 @@ import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.calculateEndPadding
 import androidx.compose.foundation.layout.calculateStartPadding
@@ -25,6 +27,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridScope
@@ -34,6 +37,7 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Favorite
@@ -65,6 +69,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.onLongClick
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
@@ -97,6 +102,8 @@ data class PhotoBadges(
     val analyzedPhases: EnabledPhases? = null,
     /** 右下角显示文件大小（按大小排序时更直观） */
     val size: Boolean = false,
+    /** 合并显示同一张图的多个版本：左下角显示版本数，大小按全部版本合计 */
+    val stack: Boolean = false,
 )
 
 /**
@@ -375,30 +382,41 @@ fun PhotoTile(
                 .sharedImage("image-${image.id}", sharedScope, animatedScope),
         )
         val showInfoBadges = !selectionMode
+        // 合并显示时这张图代表整个家族：大小按全部版本合计
+        val stacked = badges.stack && image.variantGroup != null && image.variantCount >= 2
+        val bytes = if (stacked) image.variantBytes else image.size
         if (showInfoBadges && badges.favorite && image.isFavorite) {
             TileIconBadge(Icons.Outlined.Favorite, Modifier.align(Alignment.TopStart))
         }
         val threshold = badges.largeThresholdBytes
-        if (showInfoBadges && threshold != null && image.size > threshold) {
+        if (showInfoBadges && threshold != null && bytes > threshold) {
             TileTextBadge("MB+", Modifier.align(Alignment.TopEnd))
         }
         val phases = badges.analyzedPhases
-        if (showInfoBadges && phases != null && isFullyAnalyzed(image, phases)) {
-            Icon(
-                Icons.Outlined.CheckCircle,
-                contentDescription = null,
-                modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(5.dp)
-                    .size(16.dp)
-                    .clip(CircleShape)
-                    .background(Color.Black.copy(alpha = 0.32f))
-                    .padding(1.dp),
-                tint = Color.White.copy(alpha = 0.85f),
-            )
+        val analyzed = showInfoBadges && phases != null && isFullyAnalyzed(image, phases)
+        if (showInfoBadges && (stacked || analyzed)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                modifier = Modifier.align(Alignment.BottomStart).padding(5.dp),
+            ) {
+                if (stacked) TileStackBadge(image.variantCount)
+                if (analyzed) {
+                    Icon(
+                        Icons.Outlined.CheckCircle,
+                        contentDescription = null,
+                        modifier = Modifier
+                            .size(16.dp)
+                            .clip(CircleShape)
+                            .background(Color.Black.copy(alpha = 0.32f))
+                            .padding(1.dp),
+                        tint = Color.White.copy(alpha = 0.85f),
+                    )
+                }
+            }
         }
         if (badges.size) {
-            TileTextBadge(formatBytes(image.size), Modifier.align(Alignment.BottomEnd))
+            TileTextBadge(formatBytes(bytes), Modifier.align(Alignment.BottomEnd))
         }
         SelectionMark(
             visible = selectionMode,
@@ -452,6 +470,23 @@ fun TileTextBadge(text: String, modifier: Modifier = Modifier) {
             .background(Color.Black.copy(alpha = 0.48f))
             .padding(horizontal = 6.dp, vertical = 2.dp),
     )
+}
+
+/** 合并显示的图片家族角标：叠放图标 + 版本数（同 Google 相册的图集） */
+@Composable
+fun TileStackBadge(count: Int, modifier: Modifier = Modifier) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(Color.Black.copy(alpha = 0.48f))
+            .padding(start = 4.dp, end = 6.dp, top = 2.dp, bottom = 2.dp)
+            .semantics(mergeDescendants = true) { contentDescription = "共 $count 个版本" },
+    ) {
+        Icon(Icons.Filled.PhotoLibrary, contentDescription = null, tint = Color.White, modifier = Modifier.size(12.dp))
+        Spacer(Modifier.width(3.dp))
+        Text("$count", style = MaterialTheme.typography.labelSmall, color = Color.White, maxLines = 1)
+    }
 }
 
 @Composable

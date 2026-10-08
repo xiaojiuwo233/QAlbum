@@ -401,7 +401,7 @@ private fun AnalysisCard(
                 )
             }
             Spacer(Modifier.height(8.dp))
-            WavyProgress(fraction = fraction)
+            WavyProgress(fraction = fraction, moving = state == AnalysisState.Running)
         } else {
             Text("扫描图片后即可开始分析", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }

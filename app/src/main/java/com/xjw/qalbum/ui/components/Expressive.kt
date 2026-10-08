@@ -45,6 +45,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.WavyProgressIndicatorDefaults
 import androidx.compose.material3.contentColorFor
 import androidx.compose.material3.ripple
 import androidx.compose.material3.toShape
@@ -426,9 +427,10 @@ fun LoadingState(modifier: Modifier = Modifier, label: String? = null) {
 
 /**
  * 波浪进度条：[fraction] 为 null 时不确定进度；确定进度时数值变化平滑过渡。
+ * 常驻显示的静态进度传 [moving] = false：波纹不再流动（流动是逐帧动画，页面停留期间会一直重绘）。
  */
 @Composable
-fun WavyProgress(fraction: Float?, modifier: Modifier = Modifier) {
+fun WavyProgress(fraction: Float?, modifier: Modifier = Modifier, moving: Boolean = true) {
     if (fraction == null) {
         LinearWavyProgressIndicator(modifier = modifier.fillMaxWidth())
     } else {
@@ -437,7 +439,11 @@ fun WavyProgress(fraction: Float?, modifier: Modifier = Modifier) {
             animationSpec = MaterialTheme.motionScheme.defaultEffectsSpec(),
             label = "wavyProgress",
         )
-        LinearWavyProgressIndicator(progress = { animated }, modifier = modifier.fillMaxWidth())
+        LinearWavyProgressIndicator(
+            progress = { animated },
+            modifier = modifier.fillMaxWidth(),
+            waveSpeed = if (moving) WavyProgressIndicatorDefaults.LinearDeterminateWavelength else 0.dp,
+        )
     }
 }
 

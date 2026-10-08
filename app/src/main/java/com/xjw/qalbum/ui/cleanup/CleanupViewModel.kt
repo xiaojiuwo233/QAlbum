@@ -725,12 +725,14 @@ data class CleanupReviewBatch(
     val items: List<ReviewItem>,
 ) {
     /** id → 字节数。懒建一次（items 不可变；prune 产生新实例自动重建），勾选求和 O(已选数)。 */
+    // 删除按图片家族处理（原图 / 预览图 / 缩略图一起），代表图按全部版本合计结算
     private val sizeById: Map<Long, Long> by lazy {
+        fun bytes(image: ImageEntity) = if (image.variantCount >= 2) image.variantBytes else image.size
         buildMap {
             items.forEach { item ->
                 when (item) {
-                    is ReviewItem.Single -> put(item.image.id, item.image.size)
-                    is ReviewItem.Group -> item.members.forEach { put(it.id, it.size) }
+                    is ReviewItem.Single -> put(item.image.id, bytes(item.image))
+                    is ReviewItem.Group -> item.members.forEach { put(it.id, bytes(it)) }
                 }
             }
         }
