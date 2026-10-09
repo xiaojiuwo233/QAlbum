@@ -85,10 +85,11 @@ internal object FileOpsImpl {
 
     fun moveFilesChecked(sources: Array<String>, targets: Array<String>, stamps: Array<String>): BooleanArray {
         require(sources.size == targets.size && sources.size == stamps.size)
+        val guard = MutationGuard()
         return BooleanArray(sources.size) { i ->
             var reserved: StructStat? = null
             try {
-                check(mutationAllowed(sources[i]) && mutationAllowed(targets[i]))
+                check(guard.allowed(sources[i]) && guard.allowed(targets[i]))
                 check(matches(sources[i], stamps[i]))
                 // 独占创建自己的空占位：不会覆盖既有隔离文件，也不依赖先 exists 再 rename 的竞态窗口。
                 val fd = Os.open(targets[i], OsConstants.O_CREAT or OsConstants.O_EXCL or OsConstants.O_WRONLY, 0x180)
@@ -108,9 +109,10 @@ internal object FileOpsImpl {
 
     fun deleteFilesChecked(paths: Array<String>, stamps: Array<String>): BooleanArray {
         require(paths.size == stamps.size)
+        val guard = MutationGuard()
         return BooleanArray(paths.size) { i ->
             try {
-                check(mutationAllowed(paths[i]) && matches(paths[i], stamps[i]))
+                check(guard.allowed(paths[i]) && matches(paths[i], stamps[i]))
                 check(File(paths[i]).delete())
                 true
             } catch (_: Exception) { false }
@@ -128,12 +130,25 @@ internal object FileOpsImpl {
         return "${stat.st_dev}:${stat.st_ino}:${stat.st_size}:$modified:$changed"
     }
 
-    private fun mutationAllowed(path: String): Boolean {
-        if (!path.startsWith('/') || path.split('/').any { it == ".." }) return false
-        // 关联清理只能操作图片缓存；即使调用方意外传入 QQ 数据库，也拒绝修改。
-        val resolved = File(path).canonicalPath
-        return !Regex("/data/(?:user/\\d+|user_de/\\d+|data)/com\\.tencent\\.mobileqq/databases(?:/|$)").containsMatchIn(resolved)
+    /**
+     * 关联清理只能操作图片缓存；即使调用方意外传入 QQ 数据库，也拒绝修改。
+     * 按父目录解析真实路径（目录级符号链接照样识别）：同一批文件只分布在少数几个目录里，逐个 canonicalPath
+     * 要对每一级路径各 stat 一次，是批量移动里最慢的一步，这里按目录缓存。最后一级是符号链接的，
+     * 移动 / 删除前的 lstat 核验（必须是普通文件）与独占创建都会拒绝它。
+     */
+    private class MutationGuard {
+        private val dirs = HashMap<String, String>()
+
+        fun allowed(path: String): Boolean {
+            if (!path.startsWith('/') || path.split('/').any { it == ".." }) return false
+            val slash = path.lastIndexOf('/')
+            val parent = if (slash > 0) path.substring(0, slash) else "/"
+            val resolved = dirs.getOrPut(parent) { File(parent).canonicalPath }.trimEnd('/') + "/" + path.substring(slash + 1)
+            return !QQ_DATABASES.containsMatchIn(resolved)
+        }
     }
+
+    private val QQ_DATABASES = Regex("/data/(?:user/\\d+|user_de/\\d+|data)/com\\.tencent\\.mobileqq/databases(?:/|$)")
 
     // ---- 内部实现 ----
 

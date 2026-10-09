@@ -1,6 +1,7 @@
 package com.xjw.qalbum.service.cleanup
 
 import com.xjw.qalbum.data.db.AppDatabase
+import com.xjw.qalbum.data.db.dao.QqPictureContext
 import com.xjw.qalbum.fileops.BoundFileOps
 import com.xjw.qalbum.qq.QqCachePaths
 import com.xjw.qalbum.qq.QqSourceScope
@@ -73,6 +74,8 @@ internal class PictureFamilyPlanner(private val db: AppDatabase, private val roo
                 check(rows.size==page.size) { "文件状态返回不完整" }
                 page.indices.forEach { states[page[it]]=rows[it] }
             }
+            val contextsByPath = parents.keys.chunked(200).flatMap { db.qqSourceDao().pathContexts(it) }
+                .groupBy({ it.path }, { QqPictureContext(it.conversationKey, it.senderKey) })
             val groups = ArrayList<PictureFileGroup>()
             for (members in parents.keys.groupBy { find(it) }.values) {
                 val selected = members.mapNotNull { indexed[it]?.id }.filter { it in selectedAll }.toSet()
@@ -94,7 +97,7 @@ internal class PictureFamilyPlanner(private val db: AppDatabase, private val roo
                     if(old!=null && (old.size!=size || old.mtime!=mtime || old.status=="missing")) { unavailable=true;continue }
                     assets+=PictureAsset(old?.id,path,old?.sourceType?:cacheType(path)?:"unknown",size,mtime,parts[3])
                 }
-                val contexts=members.chunked(200).flatMap { db.qqSourceDao().pictureContexts(it) }.distinct()
+                val contexts=members.flatMap { contextsByPath[it].orEmpty() }.distinct()
                 val shared=if(scope==null)contexts.size>1 else contexts.any {
                     (scope.groupKey!=null && it.conversationKey!=scope.groupKey) || (scope.senderKey!=null && it.senderKey!=scope.senderKey)
                 }

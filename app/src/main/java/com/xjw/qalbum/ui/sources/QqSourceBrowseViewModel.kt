@@ -15,17 +15,26 @@ import com.xjw.qalbum.data.db.dao.QqScopeIds
 import com.xjw.qalbum.data.db.dao.QqScopeOrder
 import com.xjw.qalbum.data.db.dao.QqScopeSql
 import com.xjw.qalbum.data.db.dao.QqSourceFacet
+import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.db.entity.OcrTextEntity
+import com.xjw.qalbum.data.paging.RefreshGate
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.data.repository.ImageRepository
 import com.xjw.qalbum.domain.model.SourceSort
+import com.xjw.qalbum.domain.model.TimelineSection
 import com.xjw.qalbum.qq.QqSourceRepository
 import com.xjw.qalbum.qq.QqSourceScope
 import com.xjw.qalbum.service.cleanup.ExternalViewTarget
 import com.xjw.qalbum.service.cleanup.ImageFileManager
 import com.xjw.qalbum.service.cleanup.QuarantineManager
+import com.xjw.qalbum.ui.cleanup.PurgeProgress
+import com.xjw.qalbum.ui.components.ScrollDirectory
+import com.xjw.qalbum.ui.gallery.FileSize
 import com.xjw.qalbum.service.cleanup.PictureDeleteOptions
 import com.xjw.qalbum.ui.gallery.GalleryTimelineItem
+import com.xjw.qalbum.ui.gallery.StackedSize
+import com.xjw.qalbum.ui.gallery.dateDirectory
+import com.xjw.qalbum.ui.gallery.sizeDirectory
 import com.xjw.qalbum.ui.gallery.withDateHeaders
 import com.xjw.qalbum.ui.gallery.withSizeHeaders
 import kotlinx.coroutines.CoroutineScope
@@ -37,6 +46,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
@@ -57,6 +67,15 @@ data class QqTrashConfirmation(
 
 /** 分类查找结果：外层 null = 仍在读取；[facet] 为 null = 没有这个分类（或统计尚未整理出来） */
 data class FacetLookup(val facet: QqSourceFacet?)
+
+/** 网格的查询条件：范围、内容、排序、是否合并显示同一张图的多个版本 */
+private data class BrowseKey(val ids: QqScopeIds, val content: QqContent, val sort: SourceSort, val stacked: Boolean) {
+    /** 合并只对图片生效（缩略图各自独立） */
+    val stackedImages: Boolean get() = stacked && content == QqContent.IMAGES
+}
+
+/** 当前网格的分组计数及其顺序（快速滚动条的目录用） */
+private data class BucketSource(val counts: StateFlow<Map<Long, Int>?>, val sort: SourceSort)
 
 /**
  * 来源浏览页：某个会话（可再按成员筛选）/ 某个发送人（可再按会话筛选）/ 全部已关联图片。
@@ -90,6 +109,14 @@ class QqSourceBrowseViewModel(
 
     val columns: StateFlow<Int> = settings.galleryColumns
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsRepository.DEFAULT_GALLERY_COLUMNS)
+
+    /** 快速滚动条（开关在设置里） */
+    val fastScroll: StateFlow<Boolean> = settings.fastScrollEnabled
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
+
+    /** 与图库同一设置：同一张图的原图 / 预览图 / 缩略图合成一张显示 */
+    val stacked: StateFlow<Boolean> = settings.galleryStackVariants
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
 
     val exportSubdirs: StateFlow<List<String>> = settings.exportSubdirs
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -161,21 +188,54 @@ class QqSourceBrowseViewModel(
         facet?.let { QqScopeStats(it.countOf(kind), it.bytesOf(kind)) }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
+    private val browseKey: Flow<BrowseKey> =
+        combine(scopeIds.filterNotNull(), content, sort, settings.galleryStackVariants) { ids, kind, order, stack ->
+            BrowseKey(ids, kind, order, stack)
+        }.distinctUntilChanged()
+
+    private val buckets = MutableStateFlow<BucketSource?>(null)
+
+    /** 删除 / 保存后移入回收站期间关上：网格保持原样，删完统一刷新一次（不逐批重排、不跳位置） */
+    private val refreshGate = RefreshGate()
+
     val photos: Flow<PagingData<GalleryTimelineItem>> =
-        combine(scopeIds.filterNotNull(), content, sort) { ids, kind, order -> Triple(ids, kind, order) }
-            .distinctUntilChanged()
-            .flatMapLatest { (ids, kind, order) ->
+        browseKey
+            .flatMapLatest { key ->
                 val pager = Pager(
-                    PagingConfig(pageSize = 60, prefetchDistance = 120, initialLoadSize = 60, enablePlaceholders = false),
-                ) { dao.pagingScope(QqScopeSql.page(ids, kind, QqScopeOrder.valueOf(order.name))) }.flow
+                    // 占位：快速滚动条可直接拖到任意位置
+                    PagingConfig(
+                        pageSize = 60, prefetchDistance = 120, initialLoadSize = 180,
+                        enablePlaceholders = true, jumpThreshold = ImageRepository.JUMP_THRESHOLD,
+                    ),
+                    pagingSourceFactory = refreshGate.gated {
+                        dao.pagingScope(QqScopeSql.page(key.ids, key.content, QqScopeOrder.valueOf(key.sort.name), key.stacked))
+                    },
+                ).flow
                 // 分组计数固化为热流：分析 / 扫描期间 PagingSource 频繁失效，每代分页只取缓存值
-                if (order.byDate) {
-                    pager.withDateHeaders(bucketCounts { dao.observeBuckets(QqScopeSql.dateBuckets(ids, kind)) })
+                if (key.sort.byDate) {
+                    val counts = bucketCounts { dao.observeBuckets(QqScopeSql.dateBuckets(key.ids, key.content, key.stacked)) }
+                    buckets.value = BucketSource(counts, key.sort)
+                    pager.withDateHeaders(counts)
                 } else {
-                    pager.withSizeHeaders(bucketCounts { dao.observeBuckets(QqScopeSql.sizeBuckets(ids, kind)) })
+                    val counts = bucketCounts { dao.observeBuckets(QqScopeSql.sizeBuckets(key.ids, key.content, key.stacked)) }
+                    buckets.value = BucketSource(counts, key.sort)
+                    // 合并显示时按整组合计分组，与排序一致
+                    pager.withSizeHeaders(counts, if (key.stackedImages) StackedSize else FileSize)
                 }
             }
             .cachedIn(viewModelScope)
+
+    /** 快速滚动条的目录：与网格同一份分组计数 */
+    val directory: StateFlow<ScrollDirectory?> = buckets
+        .flatMapLatest { source ->
+            source?.counts?.map { counts ->
+                counts?.let {
+                    if (source.sort.byDate) dateDirectory(it, ascending = !source.sort.descending)
+                    else sizeDirectory(it, ascending = !source.sort.descending)
+                }
+            } ?: flowOf(null)
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     private fun bucketCounts(query: () -> Flow<List<ImageDao.BucketCountRow>>): StateFlow<Map<Long, Int>?> =
         query().map { rows -> rows.associate { it.bucketKey to it.count } }
@@ -207,12 +267,23 @@ class QqSourceBrowseViewModel(
 
     // ---- 多选与看图页操作 ----
 
-    suspend fun sizeOf(ids: Collection<Long>): Long = images.sumSizeByIds(ids.toList())
-
-    /** 当前筛选范围、当前内容下的全部图片（全选） */
+    /** 当前筛选范围、当前内容下的全部图片（全选；合并显示时只取代表图） */
     suspend fun allIds(): Set<Long> {
         val ids = scopeIds.value ?: return emptySet()
-        return dao.queryIds(QqScopeSql.ids(ids, content.value)).toSet()
+        return dao.queryIds(QqScopeSql.ids(ids, content.value, settings.galleryStackVariants.first())).toSet()
+    }
+
+    /** 点分组标题全选：当前范围里这一组的全部图片 */
+    suspend fun sectionIds(section: TimelineSection): List<Long> {
+        val ids = scopeIds.value ?: return emptyList()
+        return dao.queryIds(QqScopeSql.sectionIds(ids, content.value, settings.galleryStackVariants.first(), section))
+    }
+
+    /** 看图时这张图的全部版本（合并显示、且有两个以上版本时） */
+    suspend fun versionsOf(image: ImageEntity): List<ImageEntity> {
+        val group = image.variantGroup ?: return emptyList()
+        if (image.variantCount < 2 || content.value != QqContent.IMAGES || !settings.galleryStackVariants.first()) return emptyList()
+        return images.familyMembers(group).takeIf { it.size >= 2 }.orEmpty()
     }
 
     suspend fun ocr(id: Long): OcrTextEntity? = images.getOcr(id)
@@ -230,11 +301,17 @@ class QqSourceBrowseViewModel(
         }
     }
 
+    /** 批量删除的进度（删除期间网格保持不动，靠它告诉用户还在进行） */
+    private val _deleteProgress = MutableStateFlow<PurgeProgress?>(null)
+    val deleteProgress: StateFlow<PurgeProgress?> = _deleteProgress.asStateFlow()
+
     /** [notify] = false 时不发页面消息（看图页自己用 Toast 反馈，避免被预览窗口挡住） */
     fun moveToTrash(ids: Collection<Long>, notify: Boolean = true, options: PictureDeleteOptions = PictureDeleteOptions(), onDone: (Int) -> Unit = {}) {
         if (ids.isEmpty()) return
         appScope.launch {
-            val result = quarantine.quarantinePictures(ids, options, "按 QQ 来源手动删除", scope.value)
+            val result = withDeleteProgress("正在移入回收站…") { progress ->
+                quarantine.quarantinePictures(ids, options, "按 QQ 来源手动删除", scope.value, onProgress = progress)
+            }
             if (notify) _message.value = result.message()
             withContext(Dispatchers.Main) { onDone(result.selectedProcessed) }
         }
@@ -243,11 +320,20 @@ class QqSourceBrowseViewModel(
     fun deletePermanently(ids: Collection<Long>, notify: Boolean = true, options: PictureDeleteOptions = PictureDeleteOptions(), onDone: (Int) -> Unit = {}) {
         if (ids.isEmpty()) return
         appScope.launch {
-            val result = quarantine.deletePicturesPermanently(ids, options, scope.value)
+            val result = withDeleteProgress("正在永久删除…") { progress ->
+                quarantine.deletePicturesPermanently(ids, options, scope.value, onProgress = progress)
+            }
             if (notify) _message.value = result.message(permanent = true)
             withContext(Dispatchers.Main) { onDone(result.selectedProcessed) }
         }
     }
+
+    private suspend fun <T> withDeleteProgress(label: String, block: suspend (onProgress: (Int, Int) -> Unit) -> T): T =
+        try {
+            refreshGate.hold { block { done, total -> _deleteProgress.value = PurgeProgress(done, total, label) } }
+        } finally {
+            _deleteProgress.value = null
+        }
 
     /** 保存到 Pictures/QAlbum[/子目录]；[alsoTrash] 只对保存成功的原图移入回收站 */
     fun save(ids: Collection<Long>, subdir: String?, alsoTrash: Boolean, onDone: (saved: Int) -> Unit = {}) {
@@ -259,7 +345,7 @@ class QqSourceBrowseViewModel(
             }
             val saved = ids.filter { imageFiles.exportToGallery(it, subdir) }
             val trashed = if (alsoTrash && saved.isNotEmpty()) {
-                quarantine.quarantineBatch(saved.map { it to "保存后移入回收站" })
+                refreshGate.hold { quarantine.quarantineBatch(saved.map { it to "保存后移入回收站" }) }
             } else {
                 0
             }

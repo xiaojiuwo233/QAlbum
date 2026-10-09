@@ -428,6 +428,13 @@ class SettingsRepository(
         ds.edit { it[Keys.GALLERY_STACK_VARIANTS] = enabled }
     }
 
+    /** 图片网格右侧的快速滚动条（滚动时出现，按住拖动快速定位），默认开启 */
+    val fastScrollEnabled: Flow<Boolean> = prefsData.map { it[Keys.FAST_SCROLL] ?: true }
+
+    suspend fun setFastScrollEnabled(enabled: Boolean) {
+        ds.edit { it[Keys.FAST_SCROLL] = enabled }
+    }
+
     /** 已完成的图片家族回填版本（见 PictureVariantIndexer） */
     val variantIndexVersion: Flow<Int> = prefsData.map { it[Keys.VARIANT_INDEX_VERSION] ?: 0 }
 
@@ -589,6 +596,7 @@ class SettingsRepository(
         val GALLERY_SORT = stringPreferencesKey("gallery_sort")
         val GALLERY_LARGE_BYTES = longPreferencesKey("gallery_large_bytes")
         val GALLERY_STACK_VARIANTS = booleanPreferencesKey("gallery_stack_variants")
+        val FAST_SCROLL = booleanPreferencesKey("fast_scroll")
         val VARIANT_INDEX_VERSION = intPreferencesKey("variant_index_version")
         val QQ_SOURCE_SORT = stringPreferencesKey("qq_source_sort")
         val QQ_SOURCE_FACET_ORDER = stringPreferencesKey("qq_source_facet_order")

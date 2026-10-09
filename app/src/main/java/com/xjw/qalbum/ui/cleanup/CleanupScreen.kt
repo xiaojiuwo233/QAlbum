@@ -58,6 +58,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -87,6 +88,7 @@ import com.xjw.qalbum.ui.components.SegmentedNavigationItem
 import com.xjw.qalbum.ui.components.ShapeIcon
 import com.xjw.qalbum.ui.components.WavyProgress
 import com.xjw.qalbum.ui.components.ConnectedChoiceRow
+import kotlinx.coroutines.delay
 import org.koin.androidx.compose.koinViewModel
 
 private enum class CleanupPage { Main, Review, Group, RecycleBin }
@@ -538,9 +540,15 @@ internal fun ThumbnailEntryItem(
     )
 }
 
-/** 清理 / 移入回收站进度对话框：完成后由调用方置空自动消失，不可手动关闭 */
+/** 清理 / 移入回收站进度对话框：完成后由调用方置空自动消失，不可手动关闭；不到半秒就做完的操作不弹出，免得一闪而过 */
 @Composable
 internal fun PurgeProgressDialog(progress: PurgeProgress) {
+    var visible by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        delay(PROGRESS_DIALOG_DELAY_MS)
+        visible = true
+    }
+    if (!visible) return
     val fraction = if (progress.total > 0) (progress.done.toFloat() / progress.total).coerceIn(0f, 1f) else 0f
     AlertDialog(
         onDismissRequest = { },
@@ -556,6 +564,8 @@ internal fun PurgeProgressDialog(progress: PurgeProgress) {
         },
     )
 }
+
+private const val PROGRESS_DIALOG_DELAY_MS = 500L
 
 private fun presetHint(preset: CleanupPreset?): String = when (preset) {
     CleanupPreset.CONSERVATIVE -> "保守：只审核重复、损坏和空白图片。"

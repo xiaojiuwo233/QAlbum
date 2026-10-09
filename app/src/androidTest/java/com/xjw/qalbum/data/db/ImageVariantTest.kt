@@ -33,7 +33,7 @@ class ImageVariantTest {
 
     private fun open(name: String): SupportSQLiteDatabase {
         helper.createDatabase(name, 17).close()
-        return helper.runMigrationsAndValidate(name, 18, true, AppDatabase.MIGRATION_17_18)
+        return helper.runMigrationsAndValidate(name, 19, true, AppDatabase.MIGRATION_17_18, AppDatabase.MIGRATION_18_19)
     }
 
     @Test
@@ -44,19 +44,19 @@ class ImageVariantTest {
             insert(db, 2, raw, "chatraw", "active", 2_000)
             insert(db, 3, thumb, "chatthumb", "thumbnail_trash", 20)
             insert(db, 4, hd, "chatthumb", "thumbnail_trash", 60)
-            // 原图最大：代表整组（4 个版本、合计 2380），预览图隐藏，缩略图本就不进图库
+            // 原图最大：代表整组（4 个版本、合计 2380），预览图隐藏，缩略图本就不进图库；其余版本的大小是自身大小
             assertRow(db, 2, hidden = 0, count = 4, bytes = 2_380)
-            assertRow(db, 1, hidden = 1, count = 0, bytes = 0)
-            assertRow(db, 3, hidden = 0, count = 0, bytes = 0)
+            assertRow(db, 1, hidden = 1, count = 0, bytes = 300)
+            assertRow(db, 3, hidden = 0, count = 0, bytes = 20)
 
             // 原图移入回收站：预览图接替代表，版本数与合计随之变化
             db.execSQL("UPDATE images SET status = 'quarantine_pending' WHERE id = 2")
             assertRow(db, 1, hidden = 0, count = 3, bytes = 380)
-            assertRow(db, 2, hidden = 0, count = 0, bytes = 0)
+            assertRow(db, 2, hidden = 0, count = 0, bytes = 2_000)
             // 恢复：原图重新成为代表
             db.execSQL("UPDATE images SET status = 'active' WHERE id = 2")
             assertRow(db, 2, hidden = 0, count = 4, bytes = 2_380)
-            assertRow(db, 1, hidden = 1, count = 0, bytes = 0)
+            assertRow(db, 1, hidden = 1, count = 0, bytes = 300)
             // 预览图被 QQ 重写变大；缩略图被 QQ 清掉
             db.execSQL("UPDATE images SET size = 500 WHERE id = 1")
             db.execSQL("UPDATE images SET status = 'missing' WHERE id = 3")
@@ -65,9 +65,11 @@ class ImageVariantTest {
             db.execSQL("DELETE FROM images WHERE id = 2")
             assertRow(db, 1, hidden = 0, count = 2, bytes = 560)
 
-            // 非 QQ 命名的图片不受影响
+            // 非 QQ 命名的图片自成一张，合并显示时的大小就是自身大小
             insert(db, 9, "$root/temp/x.jpg", "temp", "active", 100)
-            assertRow(db, 9, hidden = 0, count = 0, bytes = 0)
+            assertRow(db, 9, hidden = 0, count = 0, bytes = 100)
+            db.execSQL("UPDATE images SET size = 150 WHERE id = 9")
+            assertRow(db, 9, hidden = 0, count = 0, bytes = 150)
         }
     }
 
@@ -97,16 +99,16 @@ class ImageVariantTest {
             }
             // 写键期间的变化不维护：第三张图的原图被移入回收站
             db.execSQL("UPDATE images SET status = 'quarantine_pending' WHERE id = 6")
-            assertRow(db, 2, hidden = 0, count = 0, bytes = 0)
+            assertRow(db, 2, hidden = 0, count = 0, bytes = 2_000)
             ImageVariantSql.resumeAfterBackfill(db)
             assertEquals(4L, scalar(db, familySchema))
             db.execSQL(ImageVariantSql.recomputeRange, arrayOf<Any>(0, 2))
             db.execSQL(ImageVariantSql.recomputeRange, arrayOf<Any>(2, Long.MAX_VALUE))
             assertRow(db, 2, hidden = 0, count = 3, bytes = 2_320)
-            assertRow(db, 1, hidden = 1, count = 0, bytes = 0)
+            assertRow(db, 1, hidden = 1, count = 0, bytes = 300)
             // 重算按当前状态：第三张图只剩预览图一个版本
-            assertRow(db, 5, hidden = 0, count = 0, bytes = 0)
-            assertRow(db, 6, hidden = 0, count = 0, bytes = 0)
+            assertRow(db, 5, hidden = 0, count = 0, bytes = 100)
+            assertRow(db, 6, hidden = 0, count = 0, bytes = 900)
             // 重复执行不再写任何行
             db.execSQL(ImageVariantSql.recomputeRange, arrayOf<Any>(0, Long.MAX_VALUE))
             assertRow(db, 2, hidden = 0, count = 3, bytes = 2_320)

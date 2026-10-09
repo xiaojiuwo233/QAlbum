@@ -6,7 +6,13 @@ import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.db.entity.QuarantineEntity
 import com.xjw.qalbum.fileops.BoundFileOps
 import com.xjw.qalbum.qq.QqCachePaths
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
@@ -30,49 +36,111 @@ internal class LinkedPictureOperations(
     private val cleanup=db.cleanupDao()
     private data class State(val size:Long,val mtime:Long,val stamp:String)
 
-    suspend fun quarantine(group:PictureFileGroup, reason:String, expiresAt:Long):PictureDeleteResult {
-        val rows=register(group)
-        if(rows.size!=group.assets.size || !claim(rows.map { it.id }))return PictureDeleteResult(skipped=1)
+    /** 批量处理中的一组：登记后的图片行、写入的回收站记录与缩略图，以及这组的结果 */
+    private class Item(val group:PictureFileGroup, val rows:List<ImageEntity>) {
         var records:List<QuarantineEntity> = emptyList()
+        var thumbnail:String?=null
+        var settled=false
+        var result=PictureDeleteResult(skipped=1)
+    }
+
+    suspend fun quarantineAll(groups:List<PictureFileGroup>, reason:String, expiresAt:Long):PictureDeleteResult =
+        isolate(groups,reason,expiresAt,thumbnails=true).sum()
+
+    /**
+     * 一批文件组移入回收站：登记、写日志、移动文件、落定各做一次批量操作，几百组只有几个事务和几次 binder 调用。
+     * 每组仍有自己的组标识与 pending 日志，中断后按组对账；[then] 在这些组仍被占用时处理已就绪的组（永久删除接着删掉它们）。
+     */
+    private suspend fun isolate(groups:List<PictureFileGroup>, reason:String, expiresAt:Long, thumbnails:Boolean,
+        then:suspend (List<Item>)->Unit={}):List<Item> {
+        val registered=register(groups)
+        val items=groups.indices.map { Item(groups[it],registered[it]) }
+        val claimed=items.filter { it.rows.isNotEmpty() && it.rows.size==it.group.assets.size && claim(it.rows.map { r->r.id }) }
         try {
-            val token=UUID.randomUUID().toString()
-            records=db.withTransaction {
-                val current=images.getLinkedCleanupEligible(rows.map { it.id })
-                if(current.size!=rows.size || current.any { r -> group.assets.none { it.path==r.path && it.size==r.size && it.mtime==r.mtime } })return@withTransaction emptyList()
+            val logged=db.withTransaction {
+                val current=claimed.flatMap { it.rows }.map { it.id }.chunked(SQL_CHUNK).flatMap { images.getLinkedCleanupEligible(it) }.associateBy { it.id }
                 val now=System.currentTimeMillis()
-                val drafts=current.map { image ->
-                    QuarantineEntity(imageId=image.id,originalPath=image.path,quarantinePath=File(directory,"${token}_${image.id}_${image.filename}").path,
-                        thumbnailPath=null,reason=reason,ocrSummary=null,size=image.size,quarantinedAt=now,expiresAt=expiresAt,
-                        state="pending",groupId=token,fileCount=current.size,sourceStamp=group.assets.first { it.path==image.path }.stamp)
+                val drafts=ArrayList<QuarantineEntity>()
+                val owners=ArrayList<Item>()
+                for(item in claimed) {
+                    val rows=item.rows.mapNotNull { current[it.id] }
+                    if(rows.size!=item.rows.size || rows.any { r->item.group.assets.none { it.path==r.path && it.size==r.size && it.mtime==r.mtime } })continue
+                    val token=UUID.randomUUID().toString()
+                    for(image in rows) {
+                        drafts+=QuarantineEntity(imageId=image.id,originalPath=image.path,quarantinePath=File(directory,"${token}_${image.id}_${image.filename}").path,
+                            thumbnailPath=null,reason=reason,ocrSummary=null,size=image.size,quarantinedAt=now,expiresAt=expiresAt,
+                            state="pending",groupId=token,fileCount=rows.size,sourceStamp=item.group.assets.first { it.path==image.path }.stamp)
+                        owners+=item
+                    }
                 }
                 val ids=cleanup.insertQuarantineAll(drafts)
-                check(images.markLinkedQuarantinePending(current.map { it.id })==current.size)
-                drafts.mapIndexed { i,r -> r.copy(id=ids[i]) }
+                check(drafts.map { it.imageId }.chunked(SQL_CHUNK).sumOf { images.markLinkedQuarantinePending(it) }==drafts.size)
+                drafts.indices.groupBy({ owners[it] },{ drafts[it].copy(id=ids[it]) })
             }
-            if(records.isEmpty())return PictureDeleteResult(skipped=1)
+            for((item,records) in logged)item.records=records
+            val open=items.filter { it.records.isNotEmpty() }
+            if(open.isEmpty())return items
             directory.mkdirs()
-            val thumbs=HashMap<Long,String?>()
-            for(row in rows)thumbs[row.id]=thumbnail(row)
+            if(thumbnails)makeThumbnails(open)
+            val records=open.flatMap { it.records }
             val direct=move(records.map { it.originalPath },records.map { it.quarantinePath },records.map { it.sourceStamp!! }).toMutableList()
-            for(i in records.indices)if(!direct[i])direct[i]=copyAndRemove(records[i])
-            val moved=direct.toList()
-            if(moved.all { it }) {
-                withContext(NonCancellable) { db.withTransaction {
-                    check(images.finalizeQuarantine(records.map { it.imageId })==records.size)
-                    for(r in records)cleanup.markQuarantineReady(r.id,thumbs[r.imageId])
-                } }
-                return PictureDeleteResult(pictures=1,files=records.size,selectedProcessed=group.selectedIds.size)
+            // 改名移不过去的（如 Shizuku 写不进 App 目录）逐个复制，几个同时进行
+            val failed=records.indices.filter { !direct[it] }
+            if(failed.isNotEmpty())chunks(failed.size,1) { page->page.map { copyAndRemove(records[failed[it]]) } }.forEachIndexed { k,ok->direct[failed[k]]=ok }
+            val moved=records.indices.associate { records[it].id to direct[it] }
+            val complete=open.filter { item->item.records.all { moved.getValue(it.id) } }
+            if(complete.isNotEmpty())withContext(NonCancellable) { db.withTransaction {
+                val ids=complete.flatMap { it.records }.map { it.imageId }
+                check(ids.chunked(SQL_CHUNK).sumOf { images.finalizeQuarantine(it) }==ids.size)
+                for(item in complete)for(r in item.records)cleanup.markQuarantineReady(r.id,item.thumbnail)
+            } }
+            for(item in complete) {
+                item.settled=true
+                item.records=item.records.map { it.copy(state="ready",thumbnailPath=item.thumbnail) }
+                item.result=PictureDeleteResult(pictures=1,files=item.records.size,selectedProcessed=item.group.selectedIds.size)
             }
-            val outcome=withContext(NonCancellable) { reconcile(records, moved) }
-            return PictureDeleteResult(files=outcome,skipped=if(outcome==0)1 else 0,partial=if(outcome>0)1 else 0)
+            for(item in open)if(!item.settled) {
+                val outcome=withContext(NonCancellable) { settle(item) { reconcile(it,item.records.map { r->moved.getValue(r.id) }) } }
+                item.result=PictureDeleteResult(files=outcome,skipped=if(outcome==0)1 else 0,partial=if(outcome>0)1 else 0)
+            }
+            then(complete)
+            return items
         } finally {
-            if(records.isNotEmpty())withContext(NonCancellable) {
-                val pending=cleanup.getQuarantineById(records.first().id)
-                if(pending?.state=="pending")runCatching { reconcile(records) }
+            withContext(NonCancellable) {
+                for(item in items)if(item.records.isNotEmpty() && !item.settled) {
+                    val pending=cleanup.getQuarantineById(item.records.first().id)
+                    if(pending?.state=="pending")runCatching { settle(item) { reconcile(it) } }
+                }
             }
-            release(rows.map { it.id })
+            for(item in claimed)release(item.rows.map { it.id })
         }
     }
+
+    /** 中断 / 部分失败的组按日志对账：留在回收站的文件带上缩略图，整组回滚时删掉已生成的缩略图 */
+    private suspend fun settle(item:Item, reconcile:suspend (List<QuarantineEntity>)->Int):Int {
+        val outcome=reconcile(item.records.map { it.copy(thumbnailPath=item.thumbnail) })
+        item.settled=true
+        val thumb=item.thumbnail
+        if(thumb!=null && cleanup.getQuarantineGroup(item.records.first().groupId!!).isEmpty())runCatching { File(thumb).delete() }
+        return outcome
+    }
+
+    /** 回收站每组只显示一张缩略图：从同一张图最小的可用版本生成，不读几 MB 的原图；几组并行 */
+    private suspend fun makeThumbnails(items:List<Item>) = coroutineScope {
+        val permits=Semaphore(PARALLELISM)
+        items.map { item -> async(Dispatchers.IO) {
+            permits.withPermit { item.thumbnail=item.rows.sortedBy { thumbnailRank(it) }.firstNotNullOfOrNull { thumbnail(it) } }
+        } }.awaitAll()
+    }
+
+    private fun thumbnailRank(image:ImageEntity):Int = when {
+        image.sourceType=="chatthumb" && image.path.endsWith("_hd") -> 0
+        image.sourceType=="chatimg" -> 1
+        image.sourceType=="chatthumb" -> 2
+        else -> 3
+    }
+
+    private fun List<Item>.sum():PictureDeleteResult = fold(PictureDeleteResult()) { total,item->total+item.result }
 
     /** 跨分区/权限导致 rename 失败时先复制，核验原文件身份后才删除原位置。 */
     private suspend fun copyAndRemove(record:QuarantineEntity):Boolean {
@@ -103,32 +171,29 @@ internal class LinkedPictureOperations(
         }
     }
 
-    suspend fun permanentlyDelete(group:PictureFileGroup):PictureDeleteResult {
-        // 永久删除也先完成可恢复隔离和日志提交。存储写满或进程退出不能丢失原文件位置。
-        val isolated=quarantine(group,"用户永久删除",Long.MAX_VALUE)
-        if(isolated.pictures==0)return isolated
-        val records=group.assets.map { it.path }.chunked(200).flatMap { cleanup.getQuarantineByOriginalPaths(it) }
-        if(records.size!=group.assets.size || !claim(records.map { it.imageId }))return isolated.copy(pictures=0,partial=1)
-        try {
-            var deleted=emptyList<Long>()
-            withContext(NonCancellable) {
-                val info=states(records.map { it.quarantinePath })
-                if(records.indices.any { info[it]?.size!=records[it].size })return@withContext
-                val result=delete(records.map { it.quarantinePath },info.map { it!!.stamp })
-                val done=records.filterIndexed { i,_->result[i] }
-                deleted=done.map { it.imageId }
-                db.withTransaction {
-                    for(page in deleted.chunked(200))images.markDeletedFromStatus(page,System.currentTimeMillis(),"quarantined")
-                    for(page in done.map { it.id }.chunked(200))cleanup.deleteQuarantineByIds(page)
-                }
-                done.forEach { it.thumbnailPath?.let { p->runCatching { File(p).delete() } } }
-                if(deleted.isNotEmpty())purgeDerived(deleted)
+    /** 永久删除也先完成可恢复隔离和日志提交（不生成缩略图），存储写满或进程退出不能丢失原文件位置；再整批删掉已就绪的组。 */
+    suspend fun permanentlyDeleteAll(groups:List<PictureFileGroup>):PictureDeleteResult = isolate(groups,"用户永久删除",Long.MAX_VALUE,thumbnails=false) { ready ->
+        if(ready.isNotEmpty())withContext(NonCancellable) {
+            val records=ready.flatMap { it.records }
+            val info=states(records.map { it.quarantinePath }).let { list->records.indices.associate { records[it].id to list[it] } }
+            // 组内任一文件对不上就整组留在回收站
+            val targets=ready.filter { item->item.records.all { info[it.id]?.size==it.size } }.flatMap { it.records }
+            val result=delete(targets.map { it.quarantinePath },targets.map { info.getValue(it.id)!!.stamp })
+            val done=targets.filterIndexed { i,_->result[i] }
+            db.withTransaction {
+                for(page in done.map { it.imageId }.chunked(200))images.markDeletedFromStatus(page,System.currentTimeMillis(),"quarantined")
+                for(page in done.map { it.id }.chunked(200))cleanup.deleteQuarantineByIds(page)
             }
-            val complete=deleted.size==records.size
-            return PictureDeleteResult(pictures=if(complete)1 else 0,files=deleted.size,selectedProcessed=isolated.selectedProcessed,
-                partial=if(!complete)1 else 0)
-        } finally { release(records.map { it.imageId }) }
-    }
+            done.forEach { it.thumbnailPath?.let { p->runCatching { File(p).delete() } } }
+            if(done.isNotEmpty())purgeDerived(done.map { it.imageId })
+            val deleted=done.mapTo(HashSet()) { it.id }
+            for(item in ready) {
+                val count=item.records.count { it.id in deleted }
+                val complete=count==item.records.size
+                item.result=PictureDeleteResult(pictures=if(complete)1 else 0,files=count,selectedProcessed=item.group.selectedIds.size,partial=if(!complete)1 else 0)
+            }
+        }
+    }.sum()
 
     /** 原位置有新文件时保留整组，不覆盖、不改名成 QQ 无法定位的缓存文件。 */
     suspend fun restore(records:List<QuarantineEntity>):Boolean {
@@ -230,26 +295,29 @@ internal class LinkedPictureOperations(
         records.forEach { it.thumbnailPath?.let { path->runCatching { File(path).delete() } } }
     }
 
-    private suspend fun register(group:PictureFileGroup):List<ImageEntity> {
-        val newAssets=group.assets.filter { it.id==null }
+    /** 把各组里还没入库的文件（如高清缩略图）登记入库；返回与 [groups] 对应的图片行，有文件读不出类型的组为空（整组跳过） */
+    private suspend fun register(groups:List<PictureFileGroup>):List<List<ImageEntity>> {
+        val newAssets=groups.flatMap { group->group.assets.filter { it.id==null } }
         val types=HashMap<String,MagicBytesDetector.ImageType>()
         for(page in newAssets.chunked(200)) {
             val packed=bound.callWithTimeout { it.readHeaders(page.map { p->p.path }.toTypedArray(),32) }
             val headers=HeaderBatchCodec.unpack(packed,page.size)
             for(i in page.indices)headers[i]?.let { h->MagicBytesDetector.detect(h)?.let { types[page[i].path]=it } }
         }
-        if(types.size!=newAssets.size)return emptyList()
+        val usable=groups.filter { group->group.assets.all { it.id!=null || it.path in types } }
         return db.withTransaction {
         val now=System.currentTimeMillis()
-        val drafts=newAssets.map { asset ->
+        val drafts=usable.flatMap { group->group.assets.filter { it.id==null } }.map { asset ->
             ImageEntity(path=asset.path,filename=asset.path.substringAfterLast('/'),parentDir=asset.path.substringBeforeLast('/'),sourceType=asset.sourceType,
                 cacheKey=asset.path.substringAfterLast('/').removePrefix("Cache_"),variantGroup=QqCachePaths.familyKey(asset.path),
-                size=asset.size,mtime=asset.mtime,firstSeen=now,lastSeen=now,
+                variantBytes=asset.size,size=asset.size,mtime=asset.mtime,firstSeen=now,lastSeen=now,
                 mime=types.getValue(asset.path).mime,width=0,height=0,isAnimated=types.getValue(asset.path).isAnimated,
                 status=if(asset.sourceType=="chatthumb")"thumbnail_trash" else "active")
         }
         for(page in drafts.chunked(200))images.insertAll(page)
-        group.assets.map { it.path }.chunked(200).flatMap { images.getAnyByPaths(it) }
+        val rows=usable.flatMap { group->group.assets.map { it.path } }.chunked(200).flatMap { images.getAnyByPaths(it) }.associateBy { it.path }
+        val included=usable.mapTo(HashSet()) { it.key }
+        groups.map { group->if(group.key in included)group.assets.mapNotNull { rows[it.path] } else emptyList() }
         }
     }
 
@@ -262,17 +330,33 @@ internal class LinkedPictureOperations(
         true
     }
     private fun release(ids:List<Long>) { ids.forEach { inFlight.remove(it) } }
-    private suspend fun rawStats(paths:List<String>):List<String> = paths.chunked(200).flatMap { page ->
-        bound.callWithTimeout { it.statFiles(page.toTypedArray()) }.also { check(it.size==page.size) }.toList()
+    private suspend fun rawStats(paths:List<String>):List<String> = chunks(paths.size,200) { page ->
+        bound.callWithTimeout { it.statFiles(page.map { i->paths[i] }.toTypedArray()) }.also { check(it.size==page.size) }.toList()
     }
     private suspend fun states(paths:List<String>):List<State?> = rawStats(paths).map { state(it) }
     private fun state(raw:String):State? { val p=raw.split('|');return if(p.size==4&&p[0]=="S")State(p[1].toLong(),p[2].toLong(),p[3])else null }
-    private suspend fun move(sources:List<String>,targets:List<String>,stamps:List<String>):List<Boolean> = sources.indices.toList().chunked(100).flatMap { page ->
+    private suspend fun move(sources:List<String>,targets:List<String>,stamps:List<String>):List<Boolean> = chunks(sources.size,100) { page ->
         bound.callWithTimeout { ops->ops.moveFilesChecked(page.map { sources[it] }.toTypedArray(),page.map { targets[it] }.toTypedArray(),page.map { stamps[it] }.toTypedArray()) }
             .also { check(it.size==page.size) }.toList()
     }
-    private suspend fun delete(paths:List<String>,stamps:List<String>):List<Boolean> = paths.indices.toList().chunked(200).flatMap { page ->
+    private suspend fun delete(paths:List<String>,stamps:List<String>):List<Boolean> = chunks(paths.size,100) { page ->
         bound.callWithTimeout { ops->ops.deleteFilesChecked(page.map { paths[it] }.toTypedArray(),page.map { stamps[it] }.toTypedArray()) }
             .also { check(it.size==page.size) }.toList()
+    }
+
+    /**
+     * 分块的特权批量调用，几块同时进行：特权进程的 binder 线程池并行处理，每个文件的存储往返互相重叠。
+     * 结果按原顺序拼回；中途失败时其余块可能已在特权进程里完成，由调用方按日志对账（与超时的情况相同）。
+     */
+    private suspend fun <T> chunks(size:Int, chunk:Int, call:suspend (List<Int>)->List<T>):List<T> = coroutineScope {
+        val permits=Semaphore(PARALLELISM)
+        (0 until size).chunked(chunk).map { page -> async(Dispatchers.IO) { permits.withPermit { call(page) } } }.awaitAll().flatten()
+    }
+
+    private companion object {
+        /** IN 查询分块（低版本系统 SQLite 变量上限 999） */
+        const val SQL_CHUNK=900
+        /** 缩略图解码与特权批量调用的并发数 */
+        const val PARALLELISM=4
     }
 }

@@ -370,10 +370,18 @@ interface ImageDao {
     /** 时间线视图（大到小）：size 降序，走 index_images_size 避免 25w 图 filesort。 */
     @Query("""
         SELECT * FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb' AND (:stacked = 0 OR variant_hidden = 0)
+        WHERE status = 'active' AND source_type <> 'chatthumb'
         ORDER BY size DESC, id DESC
     """)
-    fun pagingActiveTimelineBySize(stacked: Boolean): PagingSource<Int, ImageEntity>
+    fun pagingActiveTimelineBySize(): PagingSource<Int, ImageEntity>
+
+    /** 合并显示的大到小：按整组合计（variant_bytes）降序，走 index_images_variant_bytes */
+    @Query("""
+        SELECT * FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND variant_hidden = 0
+        ORDER BY variant_bytes DESC, id DESC
+    """)
+    fun pagingStackedTimelineBySize(): PagingSource<Int, ImageEntity>
 
     /**
      * 日期分桶计数：bucketKey = year*1000 + dayOfYear（预计算列 date_bucket，入库时写好）。
@@ -399,10 +407,27 @@ interface ImageDao {
             END AS bucketKey,
             COUNT(*) AS count
         FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb' AND (:stacked = 0 OR variant_hidden = 0)
+        WHERE status = 'active' AND source_type <> 'chatthumb'
         GROUP BY bucketKey
     """)
-    fun observeTimelineSizeBucketCounts(stacked: Boolean): Flow<List<BucketCountRow>>
+    fun observeTimelineSizeBucketCounts(): Flow<List<BucketCountRow>>
+
+    /** 合并显示的大小分组：按整组合计分桶（与 [pagingStackedTimelineBySize] 的排序一致） */
+    @Query("""
+        SELECT
+            CASE
+                WHEN variant_bytes >= 10485760 THEN 100000
+                WHEN variant_bytes >= 1048576 THEN 10000 + (variant_bytes / 1048576)
+                WHEN variant_bytes >= 102400 THEN 1000 + (variant_bytes / 102400)
+                WHEN variant_bytes >= 10240 THEN 100 + (variant_bytes / 10240)
+                ELSE 0
+            END AS bucketKey,
+            COUNT(*) AS count
+        FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND variant_hidden = 0
+        GROUP BY bucketKey
+    """)
+    fun observeStackedSizeBucketCounts(): Flow<List<BucketCountRow>>
 
     @Query("""
         SELECT date_bucket AS bucketKey, COUNT(*) AS count
@@ -458,10 +483,18 @@ interface ImageDao {
     /** 「大到小」时间线中给定排序键的 rank（0-based） */
     @Query("""
         SELECT COUNT(*) FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb' AND (:stacked = 0 OR variant_hidden = 0)
+        WHERE status = 'active' AND source_type <> 'chatthumb'
           AND (size > :size OR (size = :size AND id > :id))
     """)
-    suspend fun timelineRankSizeDesc(size: Long, id: Long, stacked: Boolean): Int
+    suspend fun timelineRankSizeDesc(size: Long, id: Long): Int
+
+    /** 合并显示的「大到小」时间线中给定排序键（整组合计）的 rank */
+    @Query("""
+        SELECT COUNT(*) FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND variant_hidden = 0
+          AND (variant_bytes > :bytes OR (variant_bytes = :bytes AND id > :id))
+    """)
+    suspend fun stackedRankSizeDesc(bytes: Long, id: Long): Int
 
     /** 「新到旧」时间线中排序键之后（更旧方向）的一页 id，不含键自身 */
     @Query("""
@@ -486,22 +519,80 @@ interface ImageDao {
     /** 「大到小」时间线中排序键之后（更小方向）的一页 id，不含键自身 */
     @Query("""
         SELECT id FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb' AND (:stacked = 0 OR variant_hidden = 0)
+        WHERE status = 'active' AND source_type <> 'chatthumb'
           AND (size < :size OR (size = :size AND id < :id))
         ORDER BY size DESC, id DESC
         LIMIT :limit
     """)
-    suspend fun timelineIdsAfterSizeDesc(size: Long, id: Long, limit: Int, stacked: Boolean): List<Long>
+    suspend fun timelineIdsAfterSizeDesc(size: Long, id: Long, limit: Int): List<Long>
 
     /** 「大到小」时间线中排序键之前（更大方向）的一页 id：返回序为离键近→远，调用方按需 reverse */
     @Query("""
         SELECT id FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb' AND (:stacked = 0 OR variant_hidden = 0)
+        WHERE status = 'active' AND source_type <> 'chatthumb'
           AND (size > :size OR (size = :size AND id > :id))
         ORDER BY size ASC, id ASC
         LIMIT :limit
     """)
-    suspend fun timelineIdsBeforeSizeDesc(size: Long, id: Long, limit: Int, stacked: Boolean): List<Long>
+    suspend fun timelineIdsBeforeSizeDesc(size: Long, id: Long, limit: Int): List<Long>
+
+    /** 合并显示的「大到小」：排序键之后的一页 id */
+    @Query("""
+        SELECT id FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND variant_hidden = 0
+          AND (variant_bytes < :bytes OR (variant_bytes = :bytes AND id < :id))
+        ORDER BY variant_bytes DESC, id DESC
+        LIMIT :limit
+    """)
+    suspend fun stackedIdsAfterSizeDesc(bytes: Long, id: Long, limit: Int): List<Long>
+
+    /** 合并显示的「大到小」：排序键之前的一页 id（离键近→远） */
+    @Query("""
+        SELECT id FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND variant_hidden = 0
+          AND (variant_bytes > :bytes OR (variant_bytes = :bytes AND id > :id))
+        ORDER BY variant_bytes ASC, id ASC
+        LIMIT :limit
+    """)
+    suspend fun stackedIdsBeforeSizeDesc(bytes: Long, id: Long, limit: Int): List<Long>
+
+    // ---- 点分组标题全选：取一个日期 / 大小分组里的全部图片 ----
+
+    @Query("""
+        SELECT id FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND (:stacked = 0 OR variant_hidden = 0)
+          AND mtime >= :from AND mtime < :until
+    """)
+    suspend fun timelineIdsBetween(from: Long, until: Long, stacked: Boolean): List<Long>
+
+    @Query("SELECT id FROM images WHERE status = 'active' AND source_type <> 'chatthumb' AND size >= :low AND size < :high")
+    suspend fun timelineIdsBySize(low: Long, high: Long): List<Long>
+
+    @Query("""
+        SELECT id FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND variant_hidden = 0
+          AND variant_bytes >= :low AND variant_bytes < :high
+    """)
+    suspend fun stackedIdsBySize(low: Long, high: Long): List<Long>
+
+    @Query("""
+        SELECT id FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb' AND is_protected = 1 AND mtime >= :from AND mtime < :until
+    """)
+    suspend fun favoriteIdsBetween(from: Long, until: Long): List<Long>
+
+    @Query("""
+        SELECT i.id FROM images i INNER JOIN image_tags it ON it.image_id = i.id
+        WHERE it.tag_id = :tagId AND i.status = 'active' AND i.source_type <> 'chatthumb'
+          AND i.mtime >= :from AND i.mtime < :until
+    """)
+    suspend fun tagIdsBetween(tagId: Long, from: Long, until: Long): List<Long>
+
+    @Query("""
+        SELECT id FROM images
+        WHERE source_type = 'chatthumb' AND status = 'thumbnail_trash' AND mtime >= :from AND mtime < :until
+    """)
+    suspend fun thumbnailIdsBetween(from: Long, until: Long): List<Long>
 
     @Query("""
         SELECT * FROM images
@@ -939,9 +1030,20 @@ interface ImageDao {
     """)
     suspend fun familyMembers(group: Long): List<ImageEntity>
 
-    /** 按家族结算的总大小：家族代表图计整组（含缩略图），其余按自身大小 */
-    @Query("SELECT COALESCE(SUM(CASE WHEN variant_count >= 2 THEN variant_bytes ELSE size END), 0) FROM images WHERE id IN (:ids)")
-    suspend fun sumStackSizeByIds(ids: List<Long>): Long
+    /** 删除确认用：所选图片的路径、大小、家族与是否受保护（收藏 / 保留） */
+    @Query("""
+        SELECT id, path, size, variant_group AS variantGroup, (is_protected = 1 OR COALESCE(user_keep, 0) = 1) AS isProtected
+        FROM images WHERE id IN (:ids)
+    """)
+    suspend fun deleteFactRows(ids: List<Long>): List<DeleteFactRow>
+
+    data class DeleteFactRow(val id: Long, val path: String, val size: Long, val variantGroup: Long?, val isProtected: Boolean)
+
+    /** 这些家族的现存版本（大小用于「连同其他版本」的合计） */
+    @Query("SELECT id, variant_group AS variantGroup, size FROM images WHERE variant_group IN (:groups) AND status IN ('active', 'thumbnail_trash')")
+    suspend fun familyMemberSizes(groups: List<Long>): List<FamilyMemberSize>
+
+    data class FamilyMemberSize(val id: Long, val variantGroup: Long, val size: Long)
 
     /** 回填家族键：按 id 分页取路径（已在回收站的图用原位置路径） */
     @Query("""
@@ -1158,10 +1260,6 @@ interface ImageDao {
           AND is_protected = 0 AND (user_keep IS NULL OR user_keep = 0)
     """)
     suspend fun getCleanupEligibleByIds(ids: List<Long>): List<ImageEntity>
-
-    /** 求给定 id 集合的原始字节总和；调用方需分块传入，避免触及 SQLite 变量上限 */
-    @Query("SELECT IFNULL(SUM(size), 0) FROM images WHERE id IN (:ids)")
-    suspend fun sumSizeByIds(ids: List<Long>): Long
 
     // ---- 清理候选池（方案 A：按维度规则筛选）----
 

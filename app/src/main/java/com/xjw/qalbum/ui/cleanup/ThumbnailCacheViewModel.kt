@@ -9,13 +9,17 @@ import androidx.paging.PagingData
 import androidx.paging.cachedIn
 import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.db.entity.OcrTextEntity
+import com.xjw.qalbum.data.paging.RefreshGate
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.data.repository.ImageRepository
+import com.xjw.qalbum.domain.model.TimelineSection
 import com.xjw.qalbum.service.cleanup.ExternalViewTarget
 import com.xjw.qalbum.service.cleanup.ImageFileManager
 import com.xjw.qalbum.service.cleanup.PictureDeleteOptions
 import com.xjw.qalbum.service.cleanup.QuarantineManager
+import com.xjw.qalbum.ui.components.ScrollDirectory
 import com.xjw.qalbum.ui.gallery.GalleryTimelineItem
+import com.xjw.qalbum.ui.gallery.dateDirectory
 import com.xjw.qalbum.ui.gallery.withDateHeaders
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -48,6 +52,10 @@ class ThumbnailCacheViewModel(
     val summary: StateFlow<ImageDao.ThumbnailTrashSummary?> = imageDao.observeThumbnailTrashSummary()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
+    /** 快速滚动条（开关在设置里） */
+    val fastScroll: StateFlow<Boolean> = settings.fastScrollEnabled
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
+
     val columns: StateFlow<Int> = settings.galleryColumns
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsRepository.DEFAULT_GALLERY_COLUMNS)
 
@@ -58,11 +66,30 @@ class ThumbnailCacheViewModel(
         .map { rows -> rows.associate { it.bucketKey to it.count } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
+    /** 批量清理期间关上：网格保持原样，清理完统一刷新一次 */
+    private val refreshGate = RefreshGate()
+
     val photos: Flow<PagingData<GalleryTimelineItem>> = Pager(
-        PagingConfig(pageSize = 60, prefetchDistance = 120, initialLoadSize = 60, enablePlaceholders = false),
-    ) { imageDao.pagingThumbnailTrash() }.flow
+        // 占位：快速滚动条可直接拖到任意位置
+        PagingConfig(
+            pageSize = 60, prefetchDistance = 120, initialLoadSize = 180,
+            enablePlaceholders = true, jumpThreshold = ImageRepository.JUMP_THRESHOLD,
+        ),
+        pagingSourceFactory = refreshGate.gated { imageDao.pagingThumbnailTrash() },
+    ).flow
         .withDateHeaders(bucketCounts)
         .cachedIn(viewModelScope)
+
+    /** 快速滚动条的目录（新到旧） */
+    val directory: StateFlow<ScrollDirectory?> = bucketCounts
+        .map { counts -> counts?.let { dateDirectory(it, ascending = false) } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    /** 点日期标题全选：这一天的全部缩略图 */
+    suspend fun sectionIds(section: TimelineSection): List<Long> = when (section) {
+        is TimelineSection.Day -> imageDao.thumbnailIdsBetween(section.from, section.until)
+        is TimelineSection.Size -> emptyList()
+    }
 
     private val _progress = MutableStateFlow<ThumbnailProgress?>(null)
     val progress: StateFlow<ThumbnailProgress?> = _progress.asStateFlow()
@@ -84,8 +111,6 @@ class ThumbnailCacheViewModel(
 
     suspend fun idsOlderThan(days: Int): Set<Long> =
         imageDao.thumbnailIdsBefore(System.currentTimeMillis() - days * DAY_MILLIS).toSet()
-
-    suspend fun sizeOf(ids: Collection<Long>): Long = images.sumSizeByIds(ids.toList())
 
     suspend fun ocr(id: Long): OcrTextEntity? = images.getOcr(id)
 
@@ -116,15 +141,17 @@ class ThumbnailCacheViewModel(
             var removed = 0
             var processed = 0
             try {
-                for (chunk in list.chunked(CHUNK)) {
-                    val result = if (permanent) {
-                        quarantine.deletePicturesPermanently(chunk, options)
-                    } else {
-                        quarantine.quarantinePictures(chunk, options, "清理 QQ 缩略图")
+                refreshGate.hold {
+                    for (chunk in list.chunked(CHUNK)) {
+                        val result = if (permanent) {
+                            quarantine.deletePicturesPermanently(chunk, options)
+                        } else {
+                            quarantine.quarantinePictures(chunk, options, "清理 QQ 缩略图")
+                        }
+                        removed += result.selectedProcessed
+                        processed += chunk.size
+                        _progress.value = ThumbnailProgress(processed, list.size)
                     }
-                    removed += result.selectedProcessed
-                    processed += chunk.size
-                    _progress.value = ThumbnailProgress(processed, list.size)
                 }
             } finally {
                 _progress.value = null

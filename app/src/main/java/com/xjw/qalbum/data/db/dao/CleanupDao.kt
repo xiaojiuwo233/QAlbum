@@ -83,12 +83,13 @@ interface CleanupDao {
     @Query("SELECT * FROM quarantine WHERE group_id = :groupId ORDER BY id")
     suspend fun getQuarantineGroup(groupId: String): List<QuarantineEntity>
 
+    /** 多组的全部记录（批量清理用）；调用方分块控制变量上限 */
+    @Query("SELECT * FROM quarantine WHERE group_id IN (:groupIds) ORDER BY id")
+    suspend fun getQuarantineGroups(groupIds: List<String>): List<QuarantineEntity>
+
     @Query("""SELECT COUNT(*) AS count,COALESCE(SUM(size),0) AS bytes FROM quarantine
         WHERE state='ready' AND (id=:id OR (:groupId IS NOT NULL AND group_id=:groupId))""")
     fun observeGroupStats(id: Long, groupId: String?): Flow<QuarantineStatsRow>
-
-    @Query("SELECT * FROM quarantine WHERE original_path IN (:paths) AND state='ready'")
-    suspend fun getQuarantineByOriginalPaths(paths: List<String>): List<QuarantineEntity>
 
     @Query("UPDATE quarantine SET state = 'ready', thumbnail_path = :thumbnailPath WHERE id = :id")
     suspend fun markQuarantineReady(id: Long, thumbnailPath: String?)

@@ -77,34 +77,32 @@ class QuarantineManager(
      */
     private val inFlight: MutableSet<Long> = ConcurrentHashMap.newKeySet()
 
-    suspend fun previewDeletion(ids: Collection<Long>, options: PictureDeleteOptions = PictureDeleteOptions(), scope: QqSourceScope? = null): PictureDeletePreview =
+    /**
+     * 删除确认弹窗用的事实（只查库，不碰文件，选得再多也很快）：所选图片自身大小、连同其他版本的大小、
+     * 有其他版本的张数、受保护（收藏 / 保留）的张数、其他聊天也在用的张数，以及文件访问是否就绪。
+     * 「共用」与执行时的判断一致：不限范围时出现在不止一个会话 / 发送人里，限定来源时出现在范围之外。
+     * 实际删除时仍逐组核对文件与关联（见 [PictureFamilyPlanner]）。
+     */
+    suspend fun deleteFacts(ids: Collection<Long>, scope: QqSourceScope? = null): PictureDeleteFacts =
         withContext(Dispatchers.IO) {
-            if (ids.isEmpty()) return@withContext PictureDeletePreview()
-            val provider = accessManager.current()
-            if (!provider.isAvailable()) return@withContext PictureDeletePreview(error = "文件访问未授权，请先在设置中连接 Root 或 Shizuku")
-            val bound = fileOpsClient.bind(provider.getAccessMode())
-                ?: return@withContext PictureDeletePreview(error = "文件服务未就绪，请重试")
-            try {
-                var pictures=0;var files=0;var bytes=0L;var related=0;var protected=0;var shared=0;var unavailable=0;var unlinked=0
-                val examples=ArrayList<String>()
-                PictureFamilyPlanner(db,settings.chatpicPath.first()).batches(ids,options,bound,scope) { groups ->
-                    for(group in groups) {
-                        pictures++;files+=group.assets.size;bytes+=group.assets.sumOf { it.size }
-                        related+=group.assets.count { it.id !in group.selectedIds }
-                        if(examples.size<20)examples+=group.assets.take(20-examples.size).map { it.path }
-                        if(!group.linked)unlinked++
-                        when(group.blocked) {
-                            PictureFileGroup.Block.PROTECTED -> protected++
-                            PictureFileGroup.Block.SHARED -> shared++
-                            PictureFileGroup.Block.UNAVAILABLE -> unavailable++
-                            null -> Unit
-                        }
-                    }
-                }
-                PictureDeletePreview(pictures,files,bytes,related,protected,shared,unavailable,unlinked,filePaths=examples)
-            } catch(e:CancellationException) { throw e }
-            catch(_:Exception) { PictureDeletePreview(error="关联文件核查失败，未执行删除；可重新扫描后重试") }
-            finally { bound.close() }
+            val rows = ids.distinct().chunked(SQL_CHUNK).flatMap { imageDao.deleteFactRows(it) }
+            val members = rows.mapNotNullTo(HashSet()) { it.variantGroup }.chunked(SQL_CHUNK).flatMap { imageDao.familyMemberSizes(it) }
+            val familyIds = members.groupBy({ it.variantGroup }, { it.id })
+            val sizes = members.associate { it.id to it.size } + rows.associate { it.id to it.size }
+            val open = rows.filterNot { it.isProtected }
+            val sources = db.qqSourceDao()
+            val sharedPaths = open.map { it.path }.chunked(PATH_CHUNK).flatMapTo(HashSet()) { page ->
+                if (scope == null) sources.pathsInSeveralContexts(page) else sources.pathsOutsideScope(page, scope.groupKey, scope.senderKey)
+            }
+            PictureDeleteFacts(
+                count = rows.size,
+                bytes = rows.sumOf { it.size },
+                versionBytes = sizes.values.sum(),
+                withVersions = rows.count { row -> familyIds[row.variantGroup].orEmpty().any { it != row.id } },
+                protectedCount = rows.count { it.isProtected },
+                shared = open.count { it.path in sharedPaths },
+                accessError = fileAccessError(),
+            )
         }
 
     /** 文件访问是否就绪：未就绪时返回可读原因（大量选择时删除弹窗用它代替逐个核对） */
@@ -112,37 +110,51 @@ class QuarantineManager(
         if (accessManager.current().isAvailable()) null else "文件访问未授权，请先在设置中连接 Root 或 Shizuku"
     }
 
-    suspend fun quarantinePictures(ids: Collection<Long>, options: PictureDeleteOptions, reason: String, scope: QqSourceScope? = null): PictureDeleteResult =
-        performPictures(ids,options,reason,scope,permanent=false)
+    /** [onProgress]（已处理的所选张数, 总数）每批回调一次，供 UI 显示进度 */
+    suspend fun quarantinePictures(
+        ids: Collection<Long>, options: PictureDeleteOptions, reason: String, scope: QqSourceScope? = null,
+        onProgress: (done: Int, total: Int) -> Unit = { _, _ -> },
+    ): PictureDeleteResult = performPictures(ids,options,reason,scope,permanent=false,onProgress)
 
-    suspend fun deletePicturesPermanently(ids: Collection<Long>, options: PictureDeleteOptions, scope: QqSourceScope? = null): PictureDeleteResult =
-        performPictures(ids,options,"",scope,permanent=true)
+    suspend fun deletePicturesPermanently(
+        ids: Collection<Long>, options: PictureDeleteOptions, scope: QqSourceScope? = null,
+        onProgress: (done: Int, total: Int) -> Unit = { _, _ -> },
+    ): PictureDeleteResult = performPictures(ids,options,"",scope,permanent=true,onProgress)
 
-    private suspend fun performPictures(ids: Collection<Long>, options: PictureDeleteOptions, reason: String, scope: QqSourceScope?, permanent: Boolean): PictureDeleteResult =
+    /** 按规划器的分块（约 200 张一批）整批处理：每批只有几个事务和几次 binder 调用，不逐组提交 */
+    private suspend fun performPictures(
+        ids: Collection<Long>, options: PictureDeleteOptions, reason: String, scope: QqSourceScope?, permanent: Boolean,
+        onProgress: (done: Int, total: Int) -> Unit,
+    ): PictureDeleteResult =
         withContext(Dispatchers.IO) {
             val provider=accessManager.current()
             if(!provider.isAvailable())return@withContext PictureDeleteResult(skipped=ids.size)
             val bound=fileOpsClient.bind(provider.getAccessMode())?:return@withContext PictureDeleteResult(skipped=ids.size)
             var result=PictureDeleteResult()
+            val total=ids.size
+            var done=0
             try {
+                onProgress(0,total)
                 reconcilePendingWithProvider(provider)
                 val operations=linkedOperations(bound,provider)
                 val expiry=computeExpiry()
                 PictureFamilyPlanner(db,settings.chatpicPath.first()).batches(ids,options,bound,scope) { groups ->
-                    for(group in groups) {
-                        val next=if(group.blocked!=null)PictureDeleteResult(skipped=1)
-                            else if(permanent)operations.permanentlyDelete(group) else operations.quarantine(group,reason,expiry)
-                        result=PictureDeleteResult(result.pictures+next.pictures,result.files+next.files,result.selectedProcessed+next.selectedProcessed,
-                            result.skipped+next.skipped,result.partial+next.partial)
-                    }
+                    val open=groups.filter { it.blocked==null }
+                    result+=PictureDeleteResult(skipped=groups.size-open.size)
+                    if(open.isNotEmpty())result+=if(permanent)operations.permanentlyDeleteAll(open) else operations.quarantineAll(open,reason,expiry)
+                    done+=groups.sumOf { it.selectedIds.size }
+                    onProgress(done.coerceAtMost(total),total)
                 }
                 result
             } catch(e:CancellationException) { throw e }
             catch(_:Exception) { result.copy(partial=result.partial+1) }
-            finally { bound.close() }
+            finally {
+                bound.close()
+                onProgress(total,total)
+            }
         }
 
-    private fun linkedOperations(bound: BoundFileOps, provider: FileAccessProvider): LinkedPictureOperations = LinkedPictureOperations(
+    internal fun linkedOperations(bound: BoundFileOps, provider: FileAccessProvider): LinkedPictureOperations = LinkedPictureOperations(
         db,bound,rootDir,inFlight,
         thumbnail={ image -> generateThumbnail(bound,AtomicBoolean(true),provider,image) },
         purgeDerived={ ids -> imageRepository.purgeDerivedData(ids) },
@@ -159,12 +171,7 @@ class QuarantineManager(
     suspend fun quarantineBatch(
         items: List<Pair<Long, String>>,
         onProgress: (done: Int, total: Int) -> Unit = { _, _ -> },
-    ): Int {
-        onProgress(0,items.size)
-        val result=quarantinePictures(items.map { it.first },PictureDeleteOptions(),items.firstOrNull()?.second.orEmpty())
-        onProgress(items.size,items.size)
-        return result.selectedProcessed
-    }
+    ): Int = quarantinePictures(items.map { it.first },PictureDeleteOptions(),items.firstOrNull()?.second.orEmpty(),onProgress=onProgress).selectedProcessed
 
     /** 直接从原位置永久删除，不进入回收站。 */
     suspend fun deletePermanently(imageId: Long): Boolean =
@@ -332,77 +339,92 @@ class QuarantineManager(
         val record = cleanupDao.getQuarantineById(quarantineId) ?: return@withContext false
         if (record.state != STATE_READY) return@withContext false
         val members=record.groupId?.let { cleanupDao.getQuarantineGroup(it) }?:listOf(record)
-        purgeIndividualRecords(members)==members.size
+        purgeIndividualRecords(members).size==members.size
     }
 
     /**
-     * 批量永久删除回收站记录：删私有目录文件（File API，无需特权）+ 同事务批量标记 deleted +
-     * 批量删 quarantine 行。文件删除失败的记录被保留，下次清理重试（记录一旦删掉，旧格式
-     * 文件将永远无法定位，泄漏在私有目录）。调用方按页（≤ SQLite 变量上限）传入。
-     * 返回实际清除的记录数。
+     * 批量永久删除回收站记录：删私有目录文件（File API，无需特权；删不掉的再交给特权进程一次批删）+
+     * 同一事务批量标记 deleted、批量删 quarantine 行。文件删除失败的记录被保留，下次清理重试（记录一旦删掉，
+     * 旧格式文件将永远无法定位，泄漏在私有目录）。[records] 每组一行代表记录，调用方按页（200 组左右）传入；
+     * 返回整组清除的组数。
      */
     suspend fun purgeByRecords(records: List<QuarantineEntity>): Int = withContext(Dispatchers.IO) {
-        var groups=0
-        val seen=HashSet<String>()
-        for(record in records) {
-            val key=record.groupId?:"legacy:${record.id}"
-            if(!seen.add(key))continue
-            val members=record.groupId?.let { cleanupDao.getQuarantineGroup(it) }?:listOf(record)
-            if(members.isNotEmpty() && purgeIndividualRecords(members)==members.size)groups++
-        }
-        groups
+        val units=records.distinctBy { it.groupId?:"legacy:${it.id}" }
+        val members=units.mapNotNull { it.groupId }.chunked(SQL_CHUNK).flatMap { cleanupDao.getQuarantineGroups(it) }.groupBy { it.groupId }
+        val groups=units.map { record->record.groupId?.let { members[it].orEmpty() }?:listOf(record) }.filter { it.isNotEmpty() }
+        val purged=purgeIndividualRecords(groups.flatten()).mapTo(HashSet()) { it.id }
+        groups.count { group->group.all { it.id in purged } }
     }
 
-    private suspend fun purgeIndividualRecords(records: List<QuarantineEntity>): Int = withContext(Dispatchers.IO) {
-        if (records.isEmpty()) return@withContext 0
-        val provider = accessManager.current()
+    private suspend fun purgeIndividualRecords(records: List<QuarantineEntity>): List<QuarantineEntity> = withContext(Dispatchers.IO) {
+        if (records.isEmpty()) return@withContext emptyList()
         val purged = ArrayList<QuarantineEntity>(records.size)
-        for (r in records) {
-            if (r.state != STATE_READY) continue
-            // 与 restore/quarantine 互斥：正被操作的图本页跳过（keyset afterId 推进，不会死循环）
-            if (!inFlight.add(r.imageId)) continue
-            try {
+        // 与 restore/quarantine 互斥：正被操作的图本页跳过（keyset afterId 推进，不会死循环）
+        val claimed = records.filter { it.state == STATE_READY && inFlight.add(it.imageId) }
+        try {
+            val leftover = ArrayList<Pair<QuarantineEntity, File>>()
+            for (r in claimed) {
                 val file = locateQuarantineFile(r)
                 if (file == null) {
                     Timber.e("PurgeByRecords: cannot locate file, keep record ${r.id}")
                     continue
                 }
-                val exists = file.exists() || providerExists(provider, file.absolutePath, defaultOnError = true)
-                val gone = !exists || file.delete() || try {
-                    provider.deleteFile(file.absolutePath)
-                } catch (ce: CancellationException) {
-                    throw ce
-                } catch (t: Throwable) {
-                    Timber.w(t, "PurgeByRecords: privileged delete failed for ${file.absolutePath}")
-                    false
-                }
-                if (!gone) {
-                    Timber.w("PurgeByRecords: delete failed, keep record ${r.id} (${file?.absolutePath})")
-                    continue
-                }
-                r.thumbnailPath?.let { runCatching { File(it).delete() } }
-                purged.add(r)
-            } finally {
-                inFlight.remove(r.imageId)
+                if (file.exists() && file.delete()) purged.add(r) else leftover.add(r to file)
             }
-        }
-        if (purged.isNotEmpty()) {
-            withContext(NonCancellable) {
-                db.withTransaction {
-                    // 守卫 from='quarantined'：逐页清空期间被用户恢复成 active 的行，
-                    // 不会被拿着旧页快照的 purge 误标 deleted（status='deleted' 是纯净统计源）
-                    imageDao.markDeletedFromStatus(
-                        purged.map { it.imageId }, System.currentTimeMillis(), "quarantined",
-                    )
-                    cleanupDao.deleteQuarantineByIds(purged.map { it.id })
+            // App 看不到或删不掉的文件（特权进程移入的）：一次批删，「本就不存在」也算删除
+            if (leftover.isNotEmpty()) {
+                val gone = deleteLeftovers(leftover.map { it.second.absolutePath })
+                leftover.forEachIndexed { i, (r, file) ->
+                    if (gone[i]) purged.add(r) else Timber.w("PurgeByRecords: delete failed, keep record ${r.id} (${file.absolutePath})")
                 }
-                // 事务提交后级联清理派生数据（OCR/FTS/标签/向量/排斥）；幂等，
-                // 与状态事务同处 NonCancellable 块，取消不会打断在两步之间
-                imageRepository.purgeDerivedData(purged.map { it.imageId })
             }
+            purged.forEach { r -> r.thumbnailPath?.let { runCatching { File(it).delete() } } }
+            if (purged.isNotEmpty()) {
+                withContext(NonCancellable) {
+                    db.withTransaction {
+                        // 守卫 from='quarantined'：逐页清空期间被用户恢复成 active 的行，
+                        // 不会被拿着旧页快照的 purge 误标 deleted（status='deleted' 是纯净统计源）
+                        val now = System.currentTimeMillis()
+                        purged.map { it.imageId }.chunked(SQL_CHUNK).forEach { imageDao.markDeletedFromStatus(it, now, "quarantined") }
+                        purged.map { it.id }.chunked(SQL_CHUNK).forEach { cleanupDao.deleteQuarantineByIds(it) }
+                    }
+                    // 事务提交后级联清理派生数据（OCR/FTS/标签/向量/排斥）；幂等，
+                    // 与状态事务同处 NonCancellable 块，取消不会打断在两步之间
+                    imageRepository.purgeDerivedData(purged.map { it.imageId })
+                }
+            }
+        } finally {
+            claimed.forEach { inFlight.remove(it.imageId) }
         }
         Timber.i("PurgeByRecords: purged ${purged.size}/${records.size}")
-        purged.size
+        purged
+    }
+
+    /** 特权批删（已删或本就不存在 = true）；服务连不上时逐个走 provider */
+    private suspend fun deleteLeftovers(paths: List<String>): List<Boolean> {
+        val provider = accessManager.current()
+        val bound = if (provider.isAvailable()) fileOpsClient.bind(provider.getAccessMode()) else null
+        if (bound != null) {
+            try {
+                return paths.chunked(PATH_CHUNK).flatMap { page -> bound.callWithTimeout { it.deleteFiles(page.toTypedArray()) }.toList() }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                Timber.w(t, "PurgeByRecords: batch delete failed, falling back to provider")
+            } finally {
+                bound.close()
+            }
+        }
+        return paths.map { path ->
+            !providerExists(provider, path, defaultOnError = true) || try {
+                provider.deleteFile(path)
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                Timber.w(t, "PurgeByRecords: privileged delete failed for $path")
+                false
+            }
+        }
     }
 
     /**
@@ -438,6 +460,8 @@ class QuarantineManager(
     private suspend fun reconcilePendingWithProvider(provider: FileAccessProvider): Int {
         var afterId = 0L
         var reconciled = 0
+        // 同组记录按组整体对账，一组只处理一次
+        val groups = HashSet<String>()
         while (true) {
             kotlinx.coroutines.currentCoroutineContext().ensureActive()
             val page = cleanupDao.listPendingQuarantinePaged(afterId, RECONCILE_PAGE)
@@ -445,6 +469,7 @@ class QuarantineManager(
             afterId = page.last().id
             for (record in page) {
                 if (record.sourceStamp != null) {
+                    if (record.groupId != null && !groups.add(record.groupId)) continue
                     val bound=fileOpsClient.bind(provider.getAccessMode())?:continue
                     try { linkedOperations(bound,provider).reconcileByRecord(record) }
                     finally { bound.close() }
@@ -672,9 +697,9 @@ class QuarantineManager(
     }
 
     /**
-     * 缩略图生成：读原图（fd 直读优先，带上限）→ 降采样解码到 ≤480px → 按 EXIF Orientation
-     * 校正 → JPEG 压缩写入 App 私有 [thumbDir]（App 可读）。超过 [THUMB_SOURCE_MAX] 的
-     * 超大图直接跳过，避免整读进内存的瞬时堆压力。
+     * 缩略图生成：读源图（fd 直读优先，带上限；批量移入时每组只取最小的可用版本）→ 降采样解码到 ≤480px →
+     * 按 EXIF Orientation 校正 → JPEG 压缩写入 App 私有 [thumbDir]（App 可读）；本身就很小的图原样存下。
+     * 超过 [THUMB_SOURCE_MAX] 的超大图直接跳过，避免整读进内存的瞬时堆压力。
      */
     private suspend fun generateThumbnail(
         bound: BoundFileOps?,
@@ -690,6 +715,12 @@ class QuarantineManager(
             val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
             if (opts.outWidth <= 0) return null
+            val dest = File(thumbDir, "${image.id}.jpg")
+            // 本身就是小图（QQ 的缩略图）：原样存下，显示时图片加载器会按 EXIF 方向解码，省掉一次解码和重新压缩
+            if (bytes.size <= THUMB_COPY_MAX_BYTES && maxOf(opts.outWidth, opts.outHeight) <= THUMB_COPY_MAX_PX) {
+                dest.writeBytes(bytes)
+                return dest.absolutePath
+            }
             var sample = 1
             var w = opts.outWidth
             var h = opts.outHeight
@@ -700,7 +731,6 @@ class QuarantineManager(
             val opts2 = BitmapFactory.Options().apply { inSampleSize = sample }
             val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts2) ?: return null
             val bitmap = applyExifOrientation(bytes, decoded)
-            val dest = File(thumbDir, "${image.id}.jpg")
             dest.outputStream().use { out -> bitmap.compress(Bitmap.CompressFormat.JPEG, 70, out) }
             bitmap.recycle()
             dest.absolutePath
@@ -751,6 +781,10 @@ class QuarantineManager(
     companion object {
         private const val ONE_DAY_MS = 86_400_000L
 
+        /** IN 查询分块（低版本系统 SQLite 变量上限 999） */
+        private const val SQL_CHUNK = 900
+        private const val PATH_CHUNK = 200
+
         /** 过期清理逐页大小。 */
         private const val EXPIRE_PAGE = 200
 
@@ -763,6 +797,10 @@ class QuarantineManager(
 
         /** 缩略图源文件读取上限：超过则跳过缩略图，与分析期单图读取上限同级。 */
         private const val THUMB_SOURCE_MAX = 32 * 1024 * 1024
+
+        /** 不超过这个大小与边长的源图直接当缩略图存下 */
+        private const val THUMB_COPY_MAX_BYTES = 160 * 1024
+        private const val THUMB_COPY_MAX_PX = 640
     }
 
     private enum class RestoreFileResult {

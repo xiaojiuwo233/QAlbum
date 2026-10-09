@@ -14,6 +14,7 @@ import com.xjw.qalbum.data.db.entity.QqImageContextEntity
 import com.xjw.qalbum.data.db.entity.QqOriginEntity
 import com.xjw.qalbum.data.db.entity.QqOriginPathEntity
 import com.xjw.qalbum.data.db.entity.QqSourceAccountEntity
+import com.xjw.qalbum.domain.model.TimelineSection
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -60,6 +61,7 @@ data class QqSourceSummary(
 data class QqFacetKindCount(val kind: Int, val chatType: Int, val count: Int)
 data class QqPicturePathEdge(val originId: String, val path: String)
 data class QqPictureContext(val conversationKey: String, val senderKey: String)
+data class QqPathContext(val path: String, val conversationKey: String, val senderKey: String)
 data class QqOriginDetails(
     val conversationName: String, val senderName: String, val memberName: String,
     val chatType: Int, val messageTime: Long, val messageCount: Int, val accountName: String,
@@ -92,9 +94,22 @@ interface QqSourceDao {
         WHERE p.origin_id IN (SELECT origin_id FROM qq_origin_paths WHERE path IN (:paths))""")
     suspend fun picturePathEdges(paths: List<String>): List<QqPicturePathEdge>
 
-    @Query("""SELECT DISTINCT conversation_key AS conversationKey,sender_key AS senderKey FROM qq_origins
-        WHERE id IN (SELECT origin_id FROM qq_origin_paths WHERE path IN (:paths))""")
-    suspend fun pictureContexts(paths: List<String>): List<QqPictureContext>
+    /** 每个路径出现过的会话 / 发送人（删除规划一次查整批，按组合并） */
+    @Query("""SELECT DISTINCT p.path AS path,o.conversation_key AS conversationKey,o.sender_key AS senderKey
+        FROM qq_origin_paths p JOIN qq_origins o ON o.id = p.origin_id WHERE p.path IN (:paths)""")
+    suspend fun pathContexts(paths: List<String>): List<QqPathContext>
+
+    /** [paths] 中出现在不止一个会话 / 发送人组合里的（与删除时「共用」的判断一致） */
+    @Query("""SELECT p.path FROM qq_origin_paths p JOIN qq_origins o ON o.id = p.origin_id
+        WHERE p.path IN (:paths)
+        GROUP BY p.path HAVING COUNT(DISTINCT o.conversation_key || char(31) || o.sender_key) > 1""")
+    suspend fun pathsInSeveralContexts(paths: List<String>): List<String>
+
+    /** [paths] 中也出现在范围之外的：会话不是 [groupKey]，或发送人不是 [senderKey]（为 null 的不限） */
+    @Query("""SELECT DISTINCT p.path FROM qq_origin_paths p JOIN qq_origins o ON o.id = p.origin_id
+        WHERE p.path IN (:paths)
+          AND ((:groupKey IS NOT NULL AND o.conversation_key <> :groupKey) OR (:senderKey IS NOT NULL AND o.sender_key <> :senderKey))""")
+    suspend fun pathsOutsideScope(paths: List<String>, groupKey: String?, senderKey: String?): List<String>
 
     // ---- 统计缓存（增量维护；标脏后由仓库分段重建，见 QqSourceStatsSql） ----
 
@@ -232,12 +247,22 @@ interface QqSourceDao {
     suspend fun clear()
 }
 
-/** 排序：日期 / 大小 × 降序 / 升序（与 SourceSort 的顺序一致） */
-enum class QqScopeOrder(val sql: String) {
-    DATE_DESC("i.mtime DESC, i.id DESC"),
-    DATE_ASC("i.mtime ASC, i.id ASC"),
-    SIZE_DESC("i.size DESC, i.id DESC"),
-    SIZE_ASC("i.size ASC, i.id ASC"),
+/** 排序：日期 / 大小 × 降序 / 升序（与 SourceSort 的顺序一致）；合并显示时大小按整组合计 */
+enum class QqScopeOrder(private val column: String?, private val direction: String) {
+    DATE_DESC(null, "DESC"),
+    DATE_ASC(null, "ASC"),
+    SIZE_DESC("size", "DESC"),
+    SIZE_ASC("size", "ASC"),
+    ;
+
+    fun sql(stacked: Boolean): String {
+        val key = when {
+            column == null -> "i.mtime"
+            stacked -> "i.variant_bytes"
+            else -> "i.size"
+        }
+        return "$key $direction, i.id $direction"
+    }
 }
 
 /**
@@ -274,11 +299,22 @@ object QqScopeSql {
         return "${contents(set, indexed = all)} AND $scopeSql" to args
     }
 
+    /** 浏览网格的条件：合并显示时同一张图只留代表图（只对图片生效，缩略图本就各自独立） */
+    private fun browse(ids: QqScopeIds, content: QqContent, stacked: Boolean): Pair<String, List<Any>> {
+        val (w, args) = where(ids, setOf(content))
+        return (if (stacked(content, stacked)) "$w AND +i.variant_hidden = 0" else w) to args
+    }
+
+    private fun stacked(content: QqContent, stacked: Boolean) = stacked && content == QqContent.IMAGES
+
+    /** 合并显示时按整组合计的大小 */
+    private fun sizeColumn(content: QqContent, stacked: Boolean) = if (stacked(content, stacked)) "i.variant_bytes" else "i.size"
+
     private fun query(sql: String, args: List<Any>) = SimpleSQLiteQuery(sql, args.toTypedArray())
 
-    fun page(ids: QqScopeIds, content: QqContent, order: QqScopeOrder): SupportSQLiteQuery {
-        val (w, args) = where(ids, setOf(content))
-        return query("SELECT i.* FROM images i WHERE $w ORDER BY ${order.sql}", args)
+    fun page(ids: QqScopeIds, content: QqContent, order: QqScopeOrder, stacked: Boolean): SupportSQLiteQuery {
+        val (w, args) = browse(ids, content, stacked)
+        return query("SELECT i.* FROM images i WHERE $w ORDER BY ${order.sql(stacked(content, stacked))}", args)
     }
 
     fun stats(ids: QqScopeIds, content: QqContent): SupportSQLiteQuery {
@@ -286,29 +322,43 @@ object QqScopeSql {
         return query("SELECT COUNT(*) AS count, COALESCE(SUM(i.size), 0) AS bytes FROM images i WHERE $w", args)
     }
 
-    fun dateBuckets(ids: QqScopeIds, content: QqContent): SupportSQLiteQuery {
-        val (w, args) = where(ids, setOf(content))
+    fun dateBuckets(ids: QqScopeIds, content: QqContent, stacked: Boolean): SupportSQLiteQuery {
+        val (w, args) = browse(ids, content, stacked)
         return query("SELECT i.date_bucket AS bucketKey, COUNT(*) AS count FROM images i WHERE $w GROUP BY i.date_bucket", args)
     }
 
     /** 大小分桶与图库 sizeBucketId 一致 */
-    fun sizeBuckets(ids: QqScopeIds, content: QqContent): SupportSQLiteQuery {
-        val (w, args) = where(ids, setOf(content))
+    fun sizeBuckets(ids: QqScopeIds, content: QqContent, stacked: Boolean): SupportSQLiteQuery {
+        val (w, args) = browse(ids, content, stacked)
+        val size = sizeColumn(content, stacked)
         return query(
             """SELECT CASE
-                WHEN i.size >= 10485760 THEN 100000
-                WHEN i.size >= 1048576 THEN 10000 + (i.size / 1048576)
-                WHEN i.size >= 102400 THEN 1000 + (i.size / 102400)
-                WHEN i.size >= 10240 THEN 100 + (i.size / 10240)
+                WHEN $size >= 10485760 THEN 100000
+                WHEN $size >= 1048576 THEN 10000 + ($size / 1048576)
+                WHEN $size >= 102400 THEN 1000 + ($size / 102400)
+                WHEN $size >= 10240 THEN 100 + ($size / 10240)
                 ELSE 0 END AS bucketKey, COUNT(*) AS count
             FROM images i WHERE $w GROUP BY bucketKey""",
             args,
         )
     }
 
-    fun ids(ids: QqScopeIds, content: QqContent): SupportSQLiteQuery {
-        val (w, args) = where(ids, setOf(content))
+    /** 网格里的全部图片（全选） */
+    fun ids(ids: QqScopeIds, content: QqContent, stacked: Boolean): SupportSQLiteQuery {
+        val (w, args) = browse(ids, content, stacked)
         return query("SELECT i.id FROM images i WHERE $w", args)
+    }
+
+    /** 网格里某个分组的全部图片（点分组标题全选） */
+    fun sectionIds(ids: QqScopeIds, content: QqContent, stacked: Boolean, section: TimelineSection): SupportSQLiteQuery {
+        val (w, args) = browse(ids, content, stacked)
+        return when (section) {
+            is TimelineSection.Day -> query("SELECT i.id FROM images i WHERE $w AND +i.mtime >= ? AND +i.mtime < ?", args + listOf(section.from, section.until))
+            is TimelineSection.Size -> {
+                val size = sizeColumn(content, stacked)
+                query("SELECT i.id FROM images i WHERE $w AND +$size >= ? AND +$size < ?", args + listOf(section.low, section.high))
+            }
+        }
     }
 
     /** 也出现在范围之外（其他会话或其他发送人）的图片 */

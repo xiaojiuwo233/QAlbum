@@ -133,7 +133,7 @@ enum class SettingsCategory(
     ANALYSIS("settings_analysis", "分析", "各分析项的开关、数量与顺序", Icons.Outlined.Analytics, SettingsGroup.DATA),
     CLEANUP("settings_cleanup", "清理规则", "清理维度、门限与审核数量", Icons.Outlined.CleaningServices, SettingsGroup.DATA),
     AI("settings_ai", "AI 服务", "服务地址、密钥与模型", Icons.Outlined.AutoAwesome, SettingsGroup.DATA),
-    PERSONALIZATION("settings_personalization", "外观与导出", "动态取色、图库合并、动效与导出目录", Icons.Outlined.Palette, SettingsGroup.SYSTEM),
+    PERSONALIZATION("settings_personalization", "外观与导出", "动态取色、图库合并与快速滚动、动效与导出目录", Icons.Outlined.Palette, SettingsGroup.SYSTEM),
     ACCESS("settings_access", "权限与访问", "Shizuku / Root 授权与连通性", Icons.Outlined.Security, SettingsGroup.SYSTEM),
     LOGS("settings_logs", "日志", "运行日志、崩溃记录与导出", Icons.AutoMirrored.Outlined.Article, SettingsGroup.SYSTEM),
     ABOUT("settings_about", "关于", "版本信息", Icons.Outlined.Info, SettingsGroup.SYSTEM),
@@ -944,6 +944,7 @@ fun PersonalizationSettingsScreen(
     val state by viewModel.uiState.collectAsState()
     val sharedTransition by viewModel.detailSharedTransition.collectAsState()
     val stackVariants by viewModel.galleryStackVariants.collectAsState()
+    val fastScroll by viewModel.fastScrollEnabled.collectAsState()
     val exportSubdirs by viewModel.exportSubdirs.collectAsState()
     SettingsDetailScaffold(SettingsCategory.PERSONALIZATION, onBack, sharedScope, animatedScope) { _ ->
         SegmentedGroup(header = "外观") {
@@ -962,9 +963,18 @@ fun PersonalizationSettingsScreen(
                 SegmentedSwitchItem(
                     position = position,
                     title = "合并同一张图的多个版本",
-                    subtitle = "QQ 为同一张图保存的原图、预览图和缩略图合成一张：显示最大的那张，左下角标出版本数，大小合计，删除时一起处理。看图时可在底部切换版本",
+                    subtitle = "QQ 为同一张图保存的原图、预览图和缩略图合成一张：显示最大的那张，左下角标出版本数，大小合计，删除时一起处理。看图时可在底部切换版本，图库与聊天来源页都生效",
                     checked = stackVariants,
                     onCheckedChange = viewModel::setGalleryStackVariants,
+                )
+            }
+            item("fastScroll") { position ->
+                SegmentedSwitchItem(
+                    position = position,
+                    title = "快速滚动条",
+                    subtitle = "滚动时右侧出现把手，按住上下拖动快速定位：慢拖逐天细调，快划大步跨越，旁边显示日期",
+                    checked = fastScroll,
+                    onCheckedChange = viewModel::setFastScrollEnabled,
                 )
             }
         }

@@ -25,8 +25,32 @@ class AppDatabaseMigrationTest {
 
     @Test
     fun migrationEdgesCoverEveryPublishedVersion() {
-        assertEquals((1..17).toList(), allMigrations.map { it.startVersion })
-        assertEquals((2..18).toList(), allMigrations.map { it.endVersion })
+        assertEquals((1..18).toList(), allMigrations.map { it.startVersion })
+        assertEquals((2..19).toList(), allMigrations.map { it.endVersion })
+    }
+
+    @Test
+    fun migrate18To19_indexesDisplaySizeAndKeepsPlainRowsInSync() {
+        val name = "migration-18-19"
+        helper.createDatabase(name, 18).use { db ->
+            insertImage(db, 1, "/chatpic/chatimg/plain", "active", 0, null, 1000)
+            insertImage(db, 2, "/chatpic/chatimg/plain-2", "active", 0, null, 1000)
+        }
+        helper.runMigrationsAndValidate(name, 19, true, AppDatabase.MIGRATION_18_19).use { db ->
+            // 已有行不在迁移里重写（由启动后的回填补齐）
+            assertEquals(0L, scalarLong(db, "SELECT variant_bytes FROM images WHERE id = 1"))
+            listOf("image_variants_insert", "image_variants_update", "image_variants_delete",
+                "image_plain_bytes_insert", "image_plain_bytes_update").forEach { trigger ->
+                assertEquals(1L, scalarLong(db, "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='$trigger'"))
+            }
+            // 之后的变化：不属于家族的图，合并显示时的大小跟着自身大小
+            db.execSQL("UPDATE images SET size = 300 WHERE id = 2")
+            assertEquals(300L, scalarLong(db, "SELECT variant_bytes FROM images WHERE id = 2"))
+            insertImage(db, 3, "/chatpic/chatimg/plain-3", "active", 0, null, 1000)
+            assertEquals(100L, scalarLong(db, "SELECT variant_bytes FROM images WHERE id = 3"))
+            db.execSQL(ImageVariantSql.plainBytesRange, arrayOf<Any>(0, Long.MAX_VALUE))
+            assertEquals(100L, scalarLong(db, "SELECT variant_bytes FROM images WHERE id = 1"))
+        }
     }
 
     @Test
@@ -342,6 +366,7 @@ class AppDatabaseMigrationTest {
             AppDatabase.MIGRATION_15_16,
             AppDatabase.MIGRATION_16_17,
             AppDatabase.MIGRATION_17_18,
+            AppDatabase.MIGRATION_18_19,
         )
 
         private const val TEST_DB_V1 = "migration-1-11"

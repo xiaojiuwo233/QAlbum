@@ -74,3 +74,7 @@ fun imageMeta(image: ImageEntity): String {
     val clarity = image.blurScore?.let { " · 清晰度 ${String.format(Locale.ROOT, "%.0f", it)}" } ?: ""
     return "$dimensions · ${formatBytes(image.size)}$clarity"
 }
+
+/** 删除结果文案：因收藏 / 共用 / 文件变化而跳过的要说出来 */
+fun deleteResultText(action: String, done: Int, total: Int): String =
+    if (done < total) "$action $done 张，${total - done} 张未处理" else "$action $done 张"

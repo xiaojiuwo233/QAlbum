@@ -14,10 +14,11 @@ import kotlinx.coroutines.withContext
 import timber.log.Timber
 
 /**
- * 图片家族回填（升级到 v18 后执行一次；新扫描的图片入库时已带家族键）。
+ * 图片家族回填（升级后执行一次；新扫描的图片入库时已带家族键）。
  *
- * 1. 撤掉家族索引与触发器，按 id 分页算出每张图的家族键并写入（几千行一个短事务），写完恢复；
- * 2. 按 id 段重算家族的代表图、版本数与总大小（只写有变化的行，此时触发器已在维护后续变化）；
+ * 1. 撤掉家族索引与触发器，按 id 分页算出每张图的家族键并写入（几千行一个短事务），写完恢复；键已写过（v18 起）则跳过；
+ * 2. 按 id 段重算家族的代表图、版本数与合并显示时的大小，不属于家族的图大小补成自身大小
+ *    （只写有变化的行，此时触发器已在维护后续变化）；
  * 3. 解散旧版查重把同一张图的不同版本当成的「重复组」。
  *
  * 写入直接在底层连接上开事务：Room 的事务每次提交都会通知所有观察 images 的查询（图库分页、
@@ -33,7 +34,8 @@ class PictureVariantIndexer(
     suspend fun ensureIndexed() = withContext(Dispatchers.IO) {
         if (settings.variantIndexVersion.first() >= VERSION) return@withContext
         mutex.withLock {
-            if (settings.variantIndexVersion.first() >= VERSION) return@withLock
+            val indexed = settings.variantIndexVersion.first()
+            if (indexed >= VERSION) return@withLock
             val dao = db.imageDao()
             // 首次访问会打开数据库并执行迁移，不计入回填耗时
             val sql = db.openHelper.writableDatabase
@@ -42,15 +44,16 @@ class PictureVariantIndexer(
                 ?.takeIf { it > 0 } ?: DEFAULT_CHECKPOINT_PAGES
             sql.quietTransaction { sql.pragma("wal_autocheckpoint = $BULK_CHECKPOINT_PAGES") }
             try {
-                val keyed = writeKeys(dao, sql)
+                val keyed = if (indexed < KEYS_VERSION) writeKeys(dao, sql) else null
                 val keysDone = System.currentTimeMillis()
                 recompute(dao, sql)
                 val recomputed = System.currentTimeMillis()
                 sql.quietTransaction { ImageVariantSql.dissolveFamilyDuplicates.forEach(sql::execSQL) }
                 val done = System.currentTimeMillis()
                 Timber.i(
-                    "Picture families indexed: %d keyed files in %d ms (keys %d, recompute %d, duplicates %d)",
-                    keyed, done - started, keysDone - started, recomputed - keysDone, done - recomputed,
+                    "Picture families indexed (v%d) in %d ms: keys %s, recompute %d ms, duplicates %d ms",
+                    VERSION, done - started, keyed?.let { "$it files / ${keysDone - started} ms" } ?: "unchanged",
+                    recomputed - keysDone, done - recomputed,
                 )
             } finally {
                 sql.quietTransaction { sql.pragma("wal_autocheckpoint = $checkpoint") }
@@ -96,8 +99,11 @@ class PictureVariantIndexer(
         var low = 0L
         while (low < maxId) {
             val high = minOf(low + RECOMPUTE_SPAN, maxId)
-            val from = low
-            sql.quietTransaction { sql.execSQL(ImageVariantSql.recomputeRange, arrayOf<Any>(from, high)) }
+            val range = arrayOf<Any>(low, high)
+            sql.quietTransaction {
+                sql.execSQL(ImageVariantSql.recomputeRange, range)
+                sql.execSQL(ImageVariantSql.plainBytesRange, range)
+            }
             low = high
         }
     }
@@ -117,8 +123,10 @@ class PictureVariantIndexer(
         query("PRAGMA $statement").use { cursor -> if (cursor.moveToFirst()) cursor.getLong(0) else null }
 
     private companion object {
-        /** 家族键规则版本；规则变化时递增即可让启动时重新回填 */
-        const val VERSION = 1
+        /** 回填版本：2 起 variant_bytes 为合并显示时的大小（不属于家族的图也要补上） */
+        const val VERSION = 2
+        /** 家族键规则版本；规则变化时改它，启动时会重新写键 */
+        const val KEYS_VERSION = 1
         const val KEY_PAGE = 5_000
         const val RECOMPUTE_SPAN = 20_000L
         /** 回填期间 WAL 累积到约 40MB 才自动回写 */

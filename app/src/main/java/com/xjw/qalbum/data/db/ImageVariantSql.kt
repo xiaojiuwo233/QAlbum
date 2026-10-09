@@ -8,7 +8,9 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  * 家族键 `variant_group` 由路径算出（见 QqCachePaths.familyKey）。每次家族成员的状态 / 大小 / 类型变化，
  * 触发器重算这个家族（成员通常 2~4 个）：
  * - 代表图：在图库可见的成员（active 且非缩略图）里最大的那张；其余可见成员 `variant_hidden = 1`；
- * - 代表图记录家族现存版本数与总大小（缩略图也算在内，≥2 个版本才记）。
+ * - 代表图记录家族现存版本数（缩略图也算在内，≥2 个版本才记）；
+ * - `variant_bytes` 是合并显示时这张图的大小：代表图为全部版本合计，其余（含不属于任何家族的图）为自身大小，
+ *   按大小排序与分组都用它。
  *
  * 回填写键时先撤掉家族索引与触发器（[suspendForBackfill]），写完恢复后由 [recomputeRange] 分段补齐。
  */
@@ -25,7 +27,7 @@ object ImageVariantSql {
 
     private fun hidden(group: String) = "(status = 'active' AND source_type <> 'chatthumb' AND id <> COALESCE(${rep(group)}, id))"
     private fun stackCount(group: String) = "(CASE WHEN id = ${rep(group)} AND ${count(group)} >= 2 THEN ${count(group)} ELSE 0 END)"
-    private fun stackBytes(group: String) = "(CASE WHEN id = ${rep(group)} AND ${count(group)} >= 2 THEN ${bytes(group)} ELSE 0 END)"
+    private fun stackBytes(group: String) = "(CASE WHEN id = ${rep(group)} AND ${count(group)} >= 2 THEN ${bytes(group)} ELSE size END)"
 
     /** 重算一个家族（在触发器里 [group] 为 NEW / OLD 的列，子查询对整条语句只算一次） */
     private fun recomputeFamily(group: String) =
@@ -52,6 +54,14 @@ object ImageVariantSql {
         createTriggers(db)
     }
 
+    /** 触发器的语句有变化时（数据库升级）先删后建 */
+    fun recreateTriggers(db: SupportSQLiteDatabase) {
+        (TRIGGERS + PLAIN_TRIGGERS).forEach { db.execSQL("DROP TRIGGER IF EXISTS $it") }
+        createTriggers(db)
+    }
+
+    private val PLAIN_TRIGGERS = listOf("image_plain_bytes_insert", "image_plain_bytes_update")
+
     fun createTriggers(db: SupportSQLiteDatabase) {
         db.execSQL("""CREATE TRIGGER IF NOT EXISTS image_variants_insert
             AFTER INSERT ON images WHEN NEW.variant_group IS NOT NULL
@@ -64,6 +74,13 @@ object ImageVariantSql {
         db.execSQL("""CREATE TRIGGER IF NOT EXISTS image_variants_delete
             AFTER DELETE ON images WHEN OLD.variant_group IS NOT NULL
             BEGIN ${recomputeFamily("OLD.variant_group")} END""")
+        // 不属于任何家族的图：合并显示时的大小就是自身大小（入库时通常已写好，触发器兜底）
+        db.execSQL("""CREATE TRIGGER IF NOT EXISTS image_plain_bytes_insert
+            AFTER INSERT ON images WHEN NEW.variant_group IS NULL AND NEW.variant_bytes IS NOT NEW.size
+            BEGIN UPDATE images SET variant_bytes = NEW.size WHERE id = NEW.id; END""")
+        db.execSQL("""CREATE TRIGGER IF NOT EXISTS image_plain_bytes_update
+            AFTER UPDATE OF size ON images WHEN NEW.variant_group IS NULL AND NEW.variant_bytes IS NOT NEW.size
+            BEGIN UPDATE images SET variant_bytes = NEW.size WHERE id = NEW.id; END""")
     }
 
     /**
@@ -76,6 +93,10 @@ object ImageVariantSql {
         WHERE variant_group IS NOT NULL AND id > ? AND id <= ?
           AND (variant_hidden IS NOT ${hidden(ROW_GROUP)} OR variant_count IS NOT ${stackCount(ROW_GROUP)}
                OR variant_bytes IS NOT ${stackBytes(ROW_GROUP)})"""
+
+    /** 回填：id 段 (lo, hi] 内不属于任何家族的图，合并显示时的大小补成自身大小 */
+    const val plainBytesRange: String =
+        "UPDATE images SET variant_bytes = size WHERE variant_group IS NULL AND id > ? AND id <= ? AND variant_bytes IS NOT size"
 
     /**
      * 旧版查重把同一张图的原图 / 预览图当成「重复」。家族建好后：隐藏成员退出重复组，

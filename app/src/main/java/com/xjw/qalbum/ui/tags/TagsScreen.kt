@@ -57,6 +57,7 @@ import com.xjw.qalbum.data.db.dao.TagDao
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.ui.cleanup.PurgeProgressDialog
 import com.xjw.qalbum.ui.cleanup.shareChooser
+import com.xjw.qalbum.ui.common.deleteResultText
 import com.xjw.qalbum.ui.components.BackButton
 import com.xjw.qalbum.ui.components.ConfirmDialog
 import com.xjw.qalbum.ui.components.DeleteImagesDialog
@@ -258,6 +259,8 @@ private fun TagImagesContent(
     val columns by viewModel.galleryColumns.collectAsState()
     val exportSubdirs by viewModel.exportSubdirs.collectAsState()
     val timeline = remember(tag.id) { viewModel.timelineFor(tag.id) }.collectAsLazyPagingItems()
+    val directory by remember(tag.id) { viewModel.directoryFor(tag.id) }.collectAsState(initial = null)
+    val fastScroll by viewModel.fastScroll.collectAsState()
     val gridState = rememberLazyGridState()
     var selectedIds by remember(tag.id) { mutableStateOf(setOf<Long>()) }
     var preview by remember { mutableStateOf<ImageEntity?>(null) }
@@ -303,9 +306,12 @@ private fun TagImagesContent(
                 selectedIds = selectedIds,
                 gridState = gridState,
                 onOpen = { preview = it },
-                onSelectionChange = { id, select -> selectedIds = if (select) selectedIds + id else selectedIds - id },
+                onSelectedIdsChange = { selectedIds = it },
                 onColumnsChange = viewModel::setColumns,
                 badges = PhotoBadges(),
+                sectionIds = { section -> viewModel.sectionIds(tag.id, section) },
+                directory = directory,
+                fastScroll = fastScroll,
                 contentPadding = contentPadding,
             )
             FloatingActionToolbar(visible = selectionMode, modifier = Modifier.align(Alignment.BottomCenter)) {
@@ -400,25 +406,15 @@ private fun TagImagesContent(
     if (showDeleteSelected && selectedIds.isNotEmpty()) {
         val ids = selectedIds
         DeleteImagesDialog(
-            count = ids.size,
-            imageIds=ids,
-            onTrashOptions={ options ->
-                showDeleteSelected=false
-                selectedIds=emptySet()
-                viewModel.moveToTrash(tag,ids,options) { moved ->
-                    Toast.makeText(context,"已移入回收站 $moved 张；未处理的图片保留",Toast.LENGTH_SHORT).show()
-                }
-            },
-            note = "收藏或标记保留的图片会被跳过。",
+            imageIds = ids,
             onDismiss = { showDeleteSelected = false },
-            onTrash = {
+            onTrash = { options ->
                 showDeleteSelected = false
                 selectedIds = emptySet()
-                viewModel.moveToTrash(tag, ids) { moved ->
-                    Toast.makeText(context, "已移入回收站 $moved 张", Toast.LENGTH_SHORT).show()
+                viewModel.moveToTrash(tag, ids, options) { moved ->
+                    Toast.makeText(context, deleteResultText("已移入回收站", moved, ids.size), Toast.LENGTH_SHORT).show()
                 }
             },
-            onPermanent = null,
         )
     }
 

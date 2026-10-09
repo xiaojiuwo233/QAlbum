@@ -339,6 +339,8 @@ class ScanPipeline(
             cacheKey = cacheKey,
             // 同一张 QQ 图片的原图 / 预览图 / 缩略图共用家族键，入库即由触发器归入同一家族
             variantGroup = QqCachePaths.familyKey(file.path),
+            // 合并显示时的大小：先按自身大小，属于家族的由触发器改成整组合计
+            variantBytes = file.size,
             size = file.size,
             mtime = file.lastModified,
             firstSeen = now,

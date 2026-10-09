@@ -18,11 +18,14 @@ import coil3.memory.MemoryCache
 import coil3.request.CachePolicy
 import coil3.request.Options
 import coil3.request.crossfade
+import coil3.size.Dimension
+import coil3.size.Size
 import com.xjw.qalbum.access.AccessManager
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.domain.model.AccessMode
 import com.xjw.qalbum.fileops.BoundFileOps
 import com.xjw.qalbum.fileops.FileOpsClient
+import com.xjw.qalbum.qq.QqCachePaths
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -54,8 +57,11 @@ import java.util.concurrent.atomic.AtomicReference
  *    保证滑回不再重走慢路径。
  *
  * 用法：UI 端用 `AsyncImage(model = ImageEntityModel(entity))`。
+ *
+ * [tile] 为真（网格小格子）时先读同一张图更小的版本：QQ 高清缩略图、原图对应的预览图（格子很小时也用普通缩略图），
+ * 几十到几百 KB，比读几 MB 的原图快得多；都没有再读文件本身。看图页等需要原图的地方不设。
  */
-data class ImageEntityModel(val entity: ImageEntity)
+data class ImageEntityModel(val entity: ImageEntity, val tile: Boolean = false)
 
 /** 直接传一个绝对路径（用于详情页的原图加载等场景） */
 data class FileAccessPath(val path: String)
@@ -188,6 +194,11 @@ private class ImageEntityFetcher(
 
     override suspend fun fetch(): FetchResult {
         val entity = data.entity
+        if (data.tile) {
+            for (path in smallerVersions(entity, options.size)) {
+                fetchSmallerVersion(path)?.let { return it }
+            }
+        }
         val diskKey = entityDiskKey(entity)
         if (options.diskCachePolicy.readEnabled) {
             readFromDiskCache(diskKey)?.let { return it }
@@ -203,7 +214,7 @@ private class ImageEntityFetcher(
         )
     }
 
-    private fun readFromDiskCache(key: String): SourceFetchResult? {
+    private fun readFromDiskCache(key: String, mimeType: String? = data.entity.mime): SourceFetchResult? {
         val cache = diskCache ?: return null
         val snapshot = runCatching { cache.openSnapshot(key) }.getOrNull() ?: return null
         return SourceFetchResult(
@@ -213,9 +224,42 @@ private class ImageEntityFetcher(
                 diskCacheKey = key,
                 closeable = snapshot,
             ),
-            mimeType = data.entity.mime,
+            mimeType = mimeType,
             dataSource = DataSource.DISK,
         )
+    }
+
+    /**
+     * 读同一张图的另一个（更小的）版本：先查磁盘缓存，再只走 fd 快路径打开（不存在时一次 binder 往返即返回 null，
+     * 快路径未就绪也返回 null，交给原文件的读取流程）。同一 MD5 的版本内容不变，缓存键不带大小 / 时间。
+     */
+    private suspend fun fetchSmallerVersion(path: String): SourceFetchResult? {
+        val key = "qalbum-version://$path"
+        if (options.diskCachePolicy.readEnabled) readFromDiskCache(key, mimeType = null)?.let { return it }
+        val pfd = fastPath.openRead(path) ?: return null
+        val stream = ParcelFileDescriptor.AutoCloseInputStream(pfd)
+        val cache = diskCache
+        val editor = if (cache != null && options.diskCachePolicy.writeEnabled) runCatching { cache.openEditor(key) }.getOrNull() else null
+        if (cache == null || editor == null) {
+            return SourceFetchResult(ImageSource(stream.source().buffer(), FileSystem.SYSTEM), mimeType = null, dataSource = DataSource.DISK)
+        }
+        return try {
+            val copied = stream.source().use { source -> cache.fileSystem.write(editor.data) { writeAll(source) } }
+            if (copied <= 0L) throw IOException("图片为空：$path")
+            val snapshot = editor.commitAndOpenSnapshot() ?: return null
+            SourceFetchResult(
+                source = ImageSource(file = snapshot.data, fileSystem = cache.fileSystem, diskCacheKey = key, closeable = snapshot),
+                mimeType = null,
+                dataSource = DataSource.DISK,
+            )
+        } catch (ce: CancellationException) {
+            runCatching { editor.abort() }
+            throw ce
+        } catch (t: Throwable) {
+            runCatching { editor.abort() }
+            Timber.w(t, "小版本读取失败，改读原文件：$path")
+            null
+        }
     }
 
     /** 完整源文件流式落盘；任何一步失败返回 null，缓存故障绝不挡住直接展示。 */
@@ -323,10 +367,30 @@ private class FilePathFetcher(
 private fun entityDiskKey(entity: ImageEntity): String =
     "qalbum://${entity.path}?size=${entity.size}&mt=${entity.mtime}"
 
-/** 内存缓存 key 在磁盘 key 之上追加请求尺寸：网格小图与详情页大图各自命中，互不顶替 */
+/**
+ * 网格格子可以改读的同一张图更小的版本，按优先顺序：格子很小时的普通缩略图（长边约 198px）、高清缩略图、
+ * 原图对应的预览图。只有 QQ 缓存命名的图片有（见 QqCachePaths.familyPaths），缩略图本身不再找。
+ */
+internal fun smallerVersions(entity: ImageEntity, size: Size): List<String> {
+    if (entity.sourceType == "chatthumb") return emptyList()
+    val family = QqCachePaths.familyPaths(entity.path)
+    if (family.size < 2) return emptyList()
+    val thumbs = family.filter { "/chatthumb/" in it }
+    val hd = thumbs.filter { it.endsWith("_hd") }
+    val plain = thumbs.filterNot { it.endsWith("_hd") }
+    val requested = listOf(size.width, size.height).mapNotNull { (it as? Dimension.Pixels)?.px }.maxOrNull() ?: Int.MAX_VALUE
+    val tiny = if (requested <= SMALL_THUMB_PX) plain else emptyList()
+    val preview = if (entity.sourceType == "chatraw") family.filter { "/chatimg/" in it } else emptyList()
+    return tiny + hd + preview
+}
+
+/** QQ 普通缩略图长边约 198px：格子不超过这么大时才用它 */
+private const val SMALL_THUMB_PX = 220
+
+/** 内存缓存 key 在磁盘 key 之上追加请求尺寸：网格小图与详情页大图各自命中，互不顶替；格子读的是小版本，再加标记 */
 private object ImageEntityKeyer : Keyer<ImageEntityModel> {
     override fun key(data: ImageEntityModel, options: Options): String =
-        "${entityDiskKey(data.entity)}&vp=${options.size}"
+        "${entityDiskKey(data.entity)}&vp=${options.size}" + if (data.tile) "&tile" else ""
 }
 
 private object FilePathKeyer : Keyer<FileAccessPath> {

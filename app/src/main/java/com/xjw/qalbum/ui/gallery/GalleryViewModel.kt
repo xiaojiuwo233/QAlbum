@@ -7,17 +7,23 @@ import androidx.paging.cachedIn
 import androidx.paging.insertSeparators
 import androidx.paging.map as pagingMap
 import com.xjw.qalbum.data.db.entity.ImageEntity
+import com.xjw.qalbum.data.paging.RefreshGate
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.data.repository.ImageRepository
 import com.xjw.qalbum.domain.model.GallerySort
+import com.xjw.qalbum.domain.model.TimelineSection
+import com.xjw.qalbum.ui.components.ScrollDirectory
 import com.xjw.qalbum.service.cleanup.ImageFileManager
 import com.xjw.qalbum.service.cleanup.QuarantineManager
+import com.xjw.qalbum.ui.cleanup.PurgeProgress
 import com.xjw.qalbum.service.cleanup.PictureDeleteOptions
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
@@ -90,15 +96,18 @@ class GalleryViewModel(
         viewModelScope.launch { settings.setGalleryLargeThresholdBytes(bytes) }
     }
 
-    /** 合并同一张 QQ 图片的原图 / 预览图 / 缩略图：只显示最大的那张，左下角标出版本数 */
+    /** 合并同一张 QQ 图片的原图 / 预览图 / 缩略图：只显示最大的那张，左下角标出版本数（开关在设置里） */
     val stackVariants: StateFlow<Boolean> = settings.galleryStackVariants
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
 
-    fun setStackVariants(enabled: Boolean) {
-        viewModelScope.launch { settings.setGalleryStackVariants(enabled) }
-    }
+    /** 快速滚动条（开关在设置里） */
+    val fastScroll: StateFlow<Boolean> = settings.fastScrollEnabled
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
 
     // ---- 时间线 ----
+
+    /** 批量删除期间关上：网格保持原样，删完统一刷新一次（不逐批重排、不跳位置） */
+    private val refreshGate = RefreshGate()
 
     // 分桶计数固化为热流缓存：withDateHeaders/withSizeHeaders 每个 PagingData generation
     // 都要读一次计数，若每次冷订阅 Room Flow，扫描/分析期间的高频失效会让 200 万行聚合
@@ -116,38 +125,67 @@ class GalleryViewModel(
                 .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
         }
 
+    private val sortAndStack = combine(settings.gallerySort, settings.galleryStackVariants) { sort, stacked -> sort to stacked }
+        // DataStore 任意 key 写入都会重发；等值重发若不去重会经 flatMapLatest
+        // 重建 Pager（滚动位置回顶 + 全量重载），改列数/阈值等无关设置都会触发
+        .distinctUntilChanged()
+
     private val favoriteDateBucketCounts: StateFlow<Map<Long, Int>?> =
         imageRepository.observeFavoriteDateBucketCounts()
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     val timeline: Flow<PagingData<GalleryTimelineItem>> =
-        combine(settings.gallerySort, settings.galleryStackVariants) { sort, stacked -> sort to stacked }
-            // DataStore 任意 key 写入都会重发；等值重发若不去重会经 flatMapLatest
-            // 重建 Pager（滚动位置回顶 + 全量重载），改列数/阈值等无关设置都会触发
-            .distinctUntilChanged()
+        sortAndStack
             .flatMapLatest { (sort, stacked) ->
                 when (sort) {
+                    // 合并显示时按整组合计排序，分组也按它（与排序一致，标题才不会重复出现）
                     GallerySort.SIZE_DESC -> imageRepository
-                        .timelinePager(sort, stacked)
-                        .withSizeHeaders(timelineSizeBucketCounts.getValue(stacked))
+                        .timelinePager(sort, stacked, refreshGate)
+                        .withSizeHeaders(timelineSizeBucketCounts.getValue(stacked), if (stacked) StackedSize else FileSize)
 
                     GallerySort.DATE_DESC, GallerySort.DATE_ASC -> imageRepository
-                        .timelinePager(sort, stacked)
+                        .timelinePager(sort, stacked, refreshGate)
                         .withDateHeaders(timelineDateBucketCounts.getValue(stacked))
                 }
             }.cachedIn(viewModelScope)
 
+    /** 快速滚动条的目录：按当前排序的日期 / 大小分组 */
+    val timelineDirectory: StateFlow<ScrollDirectory?> =
+        sortAndStack
+            .flatMapLatest { (sort, stacked) ->
+                when (sort) {
+                    GallerySort.SIZE_DESC -> timelineSizeBucketCounts.getValue(stacked).flowMap { counts -> counts?.let(::sizeDirectory) }
+                    GallerySort.DATE_DESC, GallerySort.DATE_ASC -> timelineDateBucketCounts.getValue(stacked)
+                        .flowMap { counts -> counts?.let { dateDirectory(it, ascending = sort == GallerySort.DATE_ASC) } }
+                }
+            }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    /** 点分组标题全选：这一组（某天 / 某个大小区间）的全部图片，合并显示时只取代表图 */
+    suspend fun sectionIds(section: TimelineSection): List<Long> {
+        val stacked = settings.galleryStackVariants.first()
+        return when (section) {
+            is TimelineSection.Day -> imageRepository.timelineIdsBetween(section.from, section.until, stacked)
+            is TimelineSection.Size -> imageRepository.timelineIdsBySize(section.low, section.high, stacked)
+        }
+    }
+
+    suspend fun favoriteSectionIds(section: TimelineSection): List<Long> = when (section) {
+        is TimelineSection.Day -> imageRepository.favoriteIdsBetween(section.from, section.until)
+        is TimelineSection.Size -> emptyList()
+    }
+
+    val favoriteDirectory: StateFlow<ScrollDirectory?> = favoriteDateBucketCounts
+        .flowMap { counts -> counts?.let { dateDirectory(it, ascending = false) } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
     val favoriteTimeline: Flow<PagingData<GalleryTimelineItem>> =
         imageRepository
-            .favoriteTimelinePager()
+            .favoriteTimelinePager(refreshGate)
             .withDateHeaders(favoriteDateBucketCounts)
             .cachedIn(viewModelScope)
 
     val favoriteCount: Flow<Int> = imageRepository.observeFavoriteCount()
-
-    /** 选中图片的字节总和（删除确认框「N 张图片 · X MB」）；合并显示时连同其他版本一起结算 */
-    suspend fun selectedSize(ids: Set<Long>): Long =
-        if (stackVariants.value) imageRepository.sumStackSizeByIds(ids.toList()) else imageRepository.sumSizeByIds(ids.toList())
 
     /** 导出子目录列表（保存弹窗用） */
     val exportSubdirs: StateFlow<List<String>> = settings.exportSubdirs
@@ -165,7 +203,7 @@ class GalleryViewModel(
         appScope.launch {
             val savedIds = ids.filter { imageFileManager.exportToGallery(it, subdir) }
             if (alsoTrash && savedIds.isNotEmpty()) {
-                quarantineManager.quarantineBatch(savedIds.map { it to "保存后移入回收站" })
+                refreshGate.hold { quarantineManager.quarantineBatch(savedIds.map { it to "保存后移入回收站" }) }
             }
             withContext(Dispatchers.Main) { onDone(savedIds.size, ids.size - savedIds.size) }
         }
@@ -187,19 +225,34 @@ class GalleryViewModel(
     // 用户确认后返回上一页（压栈路由弹出）会把协程连同 QuarantineManager 的滚动推进一起取消，
     // 留下「文件已移动但 DB 未写」的孤儿块；appScope 随进程存活，完成后回主线程通知 UI。
 
+    /** 批量删除的进度（删除期间网格保持不动，靠它告诉用户还在进行） */
+    private val _deleteProgress = MutableStateFlow<PurgeProgress?>(null)
+    val deleteProgress: StateFlow<PurgeProgress?> = _deleteProgress.asStateFlow()
+
     fun moveImagesToTrash(ids: Set<Long>, options: PictureDeleteOptions = PictureDeleteOptions(), onDone: (Int) -> Unit = {}) {
         appScope.launch {
-            val count = quarantineManager.quarantinePictures(ids,options,"用户批量删除").selectedProcessed
+            val count = withDeleteProgress("正在移入回收站…") { progress ->
+                quarantineManager.quarantinePictures(ids, options, "用户批量删除", onProgress = progress)
+            }.selectedProcessed
             withContext(Dispatchers.Main) { onDone(count) }
         }
     }
 
     fun deleteImagesPermanently(ids: Set<Long>, options: PictureDeleteOptions = PictureDeleteOptions(), onDone: (Int) -> Unit = {}) {
         appScope.launch {
-            val count = quarantineManager.deletePicturesPermanently(ids,options).selectedProcessed
+            val count = withDeleteProgress("正在永久删除…") { progress ->
+                quarantineManager.deletePicturesPermanently(ids, options, onProgress = progress)
+            }.selectedProcessed
             withContext(Dispatchers.Main) { onDone(count) }
         }
     }
+
+    private suspend fun <T> withDeleteProgress(label: String, block: suspend (onProgress: (Int, Int) -> Unit) -> T): T =
+        try {
+            refreshGate.hold { block { done, total -> _deleteProgress.value = PurgeProgress(done, total, label) } }
+        } finally {
+            _deleteProgress.value = null
+        }
 
     private suspend fun setFavoriteState(ids: Set<Long>, favorite: Boolean): Int {
         val targetIds = imageRepository.getByIds(ids.toList())
@@ -211,10 +264,14 @@ class GalleryViewModel(
 }
 
 sealed class GalleryTimelineItem {
-    /** 分类标题：[key] 唯一且稳定（供 Paging/LazyGrid 复用判定），[label] 为展示文案 */
-    data class Header(val key: String, val label: String) : GalleryTimelineItem()
+    /** 分类标题：[key] 唯一且稳定（供 Paging/LazyGrid 复用判定），[label] 为展示文案，[section] 为它覆盖的范围 */
+    data class Header(val key: String, val label: String, val section: TimelineSection) : GalleryTimelineItem()
     data class Photo(val image: ImageEntity) : GalleryTimelineItem()
 }
+
+/** 按大小分组时取哪个大小：文件自身，或合并显示时的整组合计 */
+internal val FileSize: (ImageEntity) -> Long = { it.size }
+internal val StackedSize: (ImageEntity) -> Long = { it.variantBytes }
 
 /** 当前「会被分析」的阶段集合（hash 始终隐含开启，故不在此） */
 data class EnabledPhases(
@@ -256,6 +313,7 @@ internal fun Flow<PagingData<ImageEntity>>.withDateHeaders(
                     GalleryTimelineItem.Header(
                         key = "d-$afterKey",
                         label = headerLabel(dayLabel(afterPhoto.image.mtime), counts[afterKey]),
+                        section = daySection(afterPhoto.image.mtime),
                     )
                 } else {
                     null
@@ -265,6 +323,7 @@ internal fun Flow<PagingData<ImageEntity>>.withDateHeaders(
 
 internal fun Flow<PagingData<ImageEntity>>.withSizeHeaders(
     bucketCounts: Flow<Map<Long, Int>?>,
+    sizeOf: (ImageEntity) -> Long = FileSize,
 ): Flow<PagingData<GalleryTimelineItem>> =
     flowMap { pagingData: PagingData<ImageEntity> ->
         val counts = bucketCounts.filterNotNull().first()
@@ -273,11 +332,12 @@ internal fun Flow<PagingData<ImageEntity>>.withSizeHeaders(
             .insertSeparators { before: GalleryTimelineItem?, after: GalleryTimelineItem? ->
                 val afterPhoto = after as? GalleryTimelineItem.Photo ?: return@insertSeparators null
                 val beforePhoto = before as? GalleryTimelineItem.Photo
-                val afterKey = sizeBucketId(afterPhoto.image.size)
-                if (beforePhoto == null || sizeBucketId(beforePhoto.image.size) != afterKey) {
+                val afterKey = sizeBucketId(sizeOf(afterPhoto.image))
+                if (beforePhoto == null || sizeBucketId(sizeOf(beforePhoto.image)) != afterKey) {
                     GalleryTimelineItem.Header(
                         key = "s-$afterKey",
-                        label = headerLabel(sizeBucketLabel(afterPhoto.image.size), counts[afterKey]),
+                        label = headerLabel(sizeBucketLabel(sizeOf(afterPhoto.image)), counts[afterKey]),
+                        section = sizeBucketSection(afterKey),
                     )
                 } else {
                     null
@@ -290,7 +350,7 @@ private fun headerLabel(label: String, count: Int?): String =
 
 // ---- 日期分桶 ----
 
-private fun dayKey(timestampMs: Long): Long {
+internal fun dayKey(timestampMs: Long): Long {
     val calendar = Calendar.getInstance()
     calendar.timeInMillis = timestampMs
     val year = calendar.get(Calendar.YEAR)
@@ -315,6 +375,59 @@ private fun sameDay(a: Calendar, b: Calendar): Boolean =
     a.get(Calendar.YEAR) == b.get(Calendar.YEAR) &&
         a.get(Calendar.DAY_OF_YEAR) == b.get(Calendar.DAY_OF_YEAR)
 
+/** 时间戳所在的本地自然日 [0 点, 次日 0 点) */
+internal fun daySection(timestampMs: Long): TimelineSection.Day {
+    val start = Calendar.getInstance().apply {
+        timeInMillis = timestampMs
+        set(Calendar.HOUR_OF_DAY, 0)
+        set(Calendar.MINUTE, 0)
+        set(Calendar.SECOND, 0)
+        set(Calendar.MILLISECOND, 0)
+    }
+    val from = start.timeInMillis
+    start.add(Calendar.DAY_OF_YEAR, 1)
+    return TimelineSection.Day(from, start.timeInMillis)
+}
+
+/**
+ * 快速滚动条的日期目录：按显示顺序列出每天的数量，气泡显示具体日期，落点对齐到当天的标题；
+ * 刻度跨年时标年份，只有一年时标月份。[counts] 的键与 date_bucket 相同（year*1000 + dayOfYear）。
+ */
+internal fun dateDirectory(counts: Map<Long, Int>, ascending: Boolean): ScrollDirectory {
+    val keys = counts.keys.sorted().let { if (ascending) it else it.reversed() }
+    val severalYears = keys.map { it / 1000 }.distinct().size > 1
+    val calendar = Calendar.getInstance()
+    var previousMark: String? = null
+    val entries = keys.map { key ->
+        val year = (key / 1000).toInt()
+        calendar.clear()
+        calendar.set(Calendar.YEAR, year)
+        calendar.set(Calendar.DAY_OF_YEAR, (key % 1000).toInt())
+        val month = calendar.get(Calendar.MONTH) + 1
+        val day = calendar.get(Calendar.DAY_OF_MONTH)
+        val mark = if (severalYears) "$year" else "${month}月"
+        val entry = ScrollDirectory.Entry(counts.getValue(key), "${year}年${month}月${day}日", mark.takeIf { it != previousMark }, key = "d-$key")
+        previousMark = mark
+        entry
+    }
+    return ScrollDirectory(entries)
+}
+
+/** 快速滚动条的大小目录：按显示顺序（默认大到小），MB 级的组和「1 MB 以下」作为刻度 */
+internal fun sizeDirectory(counts: Map<Long, Int>, ascending: Boolean = false): ScrollDirectory {
+    var belowMegabyte = false
+    val entries = counts.keys.sorted().let { if (ascending) it else it.reversed() }.map { bucket ->
+        val section = sizeBucketSection(bucket)
+        val mark = when {
+            section.low >= BYTES_MB -> sizeBucketLabel(section.low)
+            !belowMegabyte -> "1 MB 以下".also { belowMegabyte = true }
+            else -> null
+        }
+        ScrollDirectory.Entry(counts.getValue(bucket), sizeBucketLabel(section.low), mark, key = "s-$bucket")
+    }
+    return ScrollDirectory(entries)
+}
+
 // ---- 大小分桶（大到小排序时使用）----
 // ≥10MB 合并为一桶；1~9MB 每 1MB；100KB~1MB 每 100KB；10KB~100KB 每 10KB；<10KB 合并为一桶。
 // id 用互不重叠的数值区间，保证相邻桶判定唯一。
@@ -323,7 +436,7 @@ private const val BYTES_MB = 1024L * 1024L
 private const val BYTES_100KB = 100L * 1024L
 private const val BYTES_10KB = 10L * 1024L
 
-private fun sizeBucketId(size: Long): Long = when {
+internal fun sizeBucketId(size: Long): Long = when {
     size >= 10 * BYTES_MB -> 100000L                       // 10MB 以上
     size >= BYTES_MB -> 10000L + (size / BYTES_MB)         // 1~9MB → 10001..10009
     size >= BYTES_100KB -> 1000L + (size / BYTES_100KB)    // 100KB~1MB → 1001..1010
@@ -331,7 +444,16 @@ private fun sizeBucketId(size: Long): Long = when {
     else -> 0L                                             // <10KB
 }
 
-private fun sizeBucketLabel(size: Long): String = when {
+/** 大小分组的区间 [low, high)，与 [sizeBucketId] 一一对应 */
+internal fun sizeBucketSection(bucket: Long): TimelineSection.Size = when {
+    bucket >= 100000L -> TimelineSection.Size(10 * BYTES_MB, Long.MAX_VALUE)
+    bucket >= 10000L -> (bucket - 10000L).let { TimelineSection.Size(it * BYTES_MB, (it + 1) * BYTES_MB) }
+    bucket >= 1000L -> (bucket - 1000L).let { TimelineSection.Size(it * BYTES_100KB, minOf((it + 1) * BYTES_100KB, BYTES_MB)) }
+    bucket >= 100L -> (bucket - 100L).let { TimelineSection.Size(it * BYTES_10KB, (it + 1) * BYTES_10KB) }
+    else -> TimelineSection.Size(0, BYTES_10KB)
+}
+
+internal fun sizeBucketLabel(size: Long): String = when {
     size >= 10 * BYTES_MB -> "10 MB 以上"
     size >= BYTES_MB -> "${size / BYTES_MB} MB"
     size >= BYTES_100KB -> "${(size / BYTES_100KB) * 100} KB"   // 100 KB ~ 1000 KB

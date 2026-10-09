@@ -3,6 +3,7 @@ package com.xjw.qalbum.data.repository
 import androidx.paging.Pager
 import androidx.paging.PagingConfig
 import androidx.paging.PagingData
+import androidx.paging.PagingSource
 import androidx.room.withTransaction
 import com.xjw.qalbum.data.db.AppDatabase
 import com.xjw.qalbum.data.db.dao.DedupExclusionDao
@@ -14,6 +15,7 @@ import com.xjw.qalbum.data.db.dao.TagDao
 import com.xjw.qalbum.data.db.entity.DedupExclusionEntity
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.db.entity.OcrTextEntity
+import com.xjw.qalbum.data.paging.RefreshGate
 import com.xjw.qalbum.domain.model.GallerySort
 import com.xjw.qalbum.domain.model.TimelineWindow
 import kotlinx.coroutines.delay
@@ -40,49 +42,66 @@ class ImageRepository(
 
     /**
      * 时间线 Paging 流：默认每页 50 条，预加载 4 页；按 [sort] 选择对应排序的 PagingSource。
-     * [stacked] 为真时同一张 QQ 图片的多个版本只显示最大的那张（家族代表图）。
+     * [stacked] 为真时同一张 QQ 图片的多个版本只显示最大的那张（家族代表图），按大小排序时按整组合计。
+     *
+     * 开启占位：网格从一开始就知道总数，快速滚动条可以直接拖到任意位置；跳得远时（超过 [JUMP_THRESHOLD]）
+     * 不再逐页加载过去，而是在目标位置重新加载。
      */
-    fun timelinePager(sort: GallerySort, stacked: Boolean): Flow<PagingData<ImageEntity>> {
+    fun timelinePager(sort: GallerySort, stacked: Boolean, gate: RefreshGate? = null): Flow<PagingData<ImageEntity>> {
         val factory = when (sort) {
             GallerySort.DATE_DESC -> { { imageDao.pagingActiveTimeline(stacked) } }
             GallerySort.DATE_ASC -> { { imageDao.pagingActiveTimelineByDateAsc(stacked) } }
-            GallerySort.SIZE_DESC -> { { imageDao.pagingActiveTimelineBySize(stacked) } }
+            GallerySort.SIZE_DESC -> if (stacked) {
+                { imageDao.pagingStackedTimelineBySize() }
+            } else {
+                { imageDao.pagingActiveTimelineBySize() }
+            }
         }
         return Pager(
             config = PagingConfig(
                 pageSize = 50,
                 prefetchDistance = 200,
-                initialLoadSize = 50,
-                enablePlaceholders = false,
+                // 跳到远处后一次查询就铺满一两屏，不用再接着补几页
+                initialLoadSize = 150,
+                enablePlaceholders = true,
+                jumpThreshold = JUMP_THRESHOLD,
             ),
-            pagingSourceFactory = factory,
+            pagingSourceFactory = gated(gate, factory),
         ).flow
     }
 
-    fun favoriteTimelinePager(): Flow<PagingData<ImageEntity>> {
+    fun favoriteTimelinePager(gate: RefreshGate? = null): Flow<PagingData<ImageEntity>> {
         return Pager(
             config = PagingConfig(
                 pageSize = 50,
                 prefetchDistance = 100,
-                initialLoadSize = 50,
-                enablePlaceholders = false,
+                initialLoadSize = 150,
+                // 占位：快速滚动条可直接拖到任意位置（同 timelinePager）
+                enablePlaceholders = true,
+                jumpThreshold = JUMP_THRESHOLD,
             ),
-            pagingSourceFactory = { imageDao.pagingFavoriteTimeline() },
+            pagingSourceFactory = gated(gate) { imageDao.pagingFavoriteTimeline() },
         ).flow
     }
 
     /** 某标签下活跃图片的 Paging 流（标签管理页用） */
-    fun imagesByTagPager(tagId: Long): Flow<PagingData<ImageEntity>> {
+    fun imagesByTagPager(tagId: Long, gate: RefreshGate? = null): Flow<PagingData<ImageEntity>> {
         return Pager(
             config = PagingConfig(
                 pageSize = 60,
                 prefetchDistance = 120,
-                initialLoadSize = 60,
-                enablePlaceholders = false,
+                initialLoadSize = 180,
+                // 占位：快速滚动条可直接拖到任意位置（同 timelinePager）
+                enablePlaceholders = true,
+                jumpThreshold = JUMP_THRESHOLD,
             ),
-            pagingSourceFactory = { imageDao.pagingImagesByTag(tagId) },
+            pagingSourceFactory = gated(gate) { imageDao.pagingImagesByTag(tagId) },
         ).flow
     }
+
+    /** 给了闸门就包一层：批量操作期间网格保持原样，结束后统一刷新 */
+    private fun gated(gate: RefreshGate?, factory: () -> PagingSource<Int, ImageEntity>): () -> PagingSource<Int, ImageEntity> =
+        gate?.gated(factory) ?: factory
 
     suspend fun countImagesByTag(tagId: Long): Int = imageDao.countActiveImagesByTag(tagId)
 
@@ -94,7 +113,21 @@ class ImageRepository(
         imageDao.observeTimelineDateBucketCounts(stacked).map { rows -> rows.toBucketCountMap() }.throttleLatest()
 
     fun observeTimelineSizeBucketCounts(stacked: Boolean): Flow<Map<Long, Int>> =
-        imageDao.observeTimelineSizeBucketCounts(stacked).map { rows -> rows.toBucketCountMap() }.throttleLatest()
+        (if (stacked) imageDao.observeStackedSizeBucketCounts() else imageDao.observeTimelineSizeBucketCounts())
+            .map { rows -> rows.toBucketCountMap() }.throttleLatest()
+
+    // ---- 点分组标题全选 ----
+
+    suspend fun timelineIdsBetween(from: Long, until: Long, stacked: Boolean): List<Long> =
+        imageDao.timelineIdsBetween(from, until, stacked)
+
+    /** 大小区间 [low, high)：合并显示时按整组合计 */
+    suspend fun timelineIdsBySize(low: Long, high: Long, stacked: Boolean): List<Long> =
+        if (stacked) imageDao.stackedIdsBySize(low, high) else imageDao.timelineIdsBySize(low, high)
+
+    suspend fun favoriteIdsBetween(from: Long, until: Long): List<Long> = imageDao.favoriteIdsBetween(from, until)
+
+    suspend fun tagIdsBetween(tagId: Long, from: Long, until: Long): List<Long> = imageDao.tagIdsBetween(tagId, from, until)
 
     fun observeFavoriteDateBucketCounts(): Flow<Map<Long, Int>> =
         imageDao.observeFavoriteDateBucketCounts().map { rows -> rows.toBucketCountMap() }.throttleLatest()
@@ -123,7 +156,8 @@ class ImageRepository(
         val rank = when (sort) {
             GallerySort.DATE_DESC -> imageDao.timelineRankDateDesc(anchor.mtime, anchor.id, stacked)
             GallerySort.DATE_ASC -> imageDao.timelineRankDateAsc(anchor.mtime, anchor.id, stacked)
-            GallerySort.SIZE_DESC -> imageDao.timelineRankSizeDesc(anchor.size, anchor.id, stacked)
+            GallerySort.SIZE_DESC -> if (stacked) imageDao.stackedRankSizeDesc(anchor.variantBytes, anchor.id)
+                else imageDao.timelineRankSizeDesc(anchor.size, anchor.id)
         }
         val total = imageDao.countActiveTimeline(stacked)
         val before = timelineIdsBefore(anchor, sort, radius, stacked)
@@ -141,14 +175,16 @@ class ImageRepository(
         GallerySort.DATE_DESC -> imageDao.timelineIdsAfterDateDesc(anchor.mtime, anchor.id, limit, stacked)
         // ASC 与 DESC 互为镜像：asc 的「后方」即 desc 的「前方」，该 DAO 返回序恰为 mtime ASC
         GallerySort.DATE_ASC -> imageDao.timelineIdsBeforeDateDesc(anchor.mtime, anchor.id, limit, stacked)
-        GallerySort.SIZE_DESC -> imageDao.timelineIdsAfterSizeDesc(anchor.size, anchor.id, limit, stacked)
+        GallerySort.SIZE_DESC -> if (stacked) imageDao.stackedIdsAfterSizeDesc(anchor.variantBytes, anchor.id, limit)
+            else imageDao.timelineIdsAfterSizeDesc(anchor.size, anchor.id, limit)
     }
 
     /** [sort] 序上 [anchor] 之前（时间线前方）的一页 id，不含锚点；DAO 返回序离键近→远，翻转后即时间线顺序，可直接接到窗口头部 */
     suspend fun timelineIdsBefore(anchor: ImageEntity, sort: GallerySort, limit: Int, stacked: Boolean): List<Long> = when (sort) {
         GallerySort.DATE_DESC -> imageDao.timelineIdsBeforeDateDesc(anchor.mtime, anchor.id, limit, stacked).reversed()
         GallerySort.DATE_ASC -> imageDao.timelineIdsAfterDateDesc(anchor.mtime, anchor.id, limit, stacked).reversed()
-        GallerySort.SIZE_DESC -> imageDao.timelineIdsBeforeSizeDesc(anchor.size, anchor.id, limit, stacked).reversed()
+        GallerySort.SIZE_DESC -> (if (stacked) imageDao.stackedIdsBeforeSizeDesc(anchor.variantBytes, anchor.id, limit)
+            else imageDao.timelineIdsBeforeSizeDesc(anchor.size, anchor.id, limit)).reversed()
     }
 
     // ---- 详情 ----
@@ -180,18 +216,6 @@ class ImageRepository(
     /** 取若干图的视觉特征（反馈学习用） */
     suspend fun featuresByIds(ids: List<Long>): List<ImageFeatureRow> =
         if (ids.isEmpty()) emptyList() else imageDao.featuresByIds(ids)
-
-    /** 选中图片的原始字节总和；分块查询，避免 id 过多触及 SQLite 变量上限 */
-    suspend fun sumSizeByIds(ids: List<Long>): Long {
-        if (ids.isEmpty()) return 0L
-        return ids.chunked(SQL_IDS_CHUNK).sumOf { imageDao.sumSizeByIds(it) }
-    }
-
-    /** 按家族结算的总大小（合并显示时一张图连同它的其他版本一起算） */
-    suspend fun sumStackSizeByIds(ids: List<Long>): Long {
-        if (ids.isEmpty()) return 0L
-        return ids.chunked(SQL_IDS_CHUNK).sumOf { imageDao.sumStackSizeByIds(it) }
-    }
 
     /** 同一张图的全部现存版本（原图 / 预览图 / 缩略图） */
     suspend fun familyMembers(group: Long): List<ImageEntity> = imageDao.familyMembers(group)
@@ -300,6 +324,9 @@ class ImageRepository(
 
         /** 详情页时间线窗口默认半径（锚点前后各取的 id 数），滑动耗尽再续页 */
         const val TIMELINE_WINDOW_RADIUS = 500
+
+        /** 图库网格离已加载范围超过这么多项（快速滚动拖得远）时直接在目标位置重新加载 */
+        const val JUMP_THRESHOLD = 600
 
         /** 派生数据级联清理的分块大小（< SQLite 变量上限） */
         private const val DERIVED_PURGE_CHUNK = 500

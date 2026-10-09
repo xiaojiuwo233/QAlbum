@@ -15,6 +15,7 @@ import java.time.ZoneId
  * - `variant_group`：图片家族键——同一张 QQ 图片的 chatimg / chatraw / chatthumb 由文件名 CRC 推出同一个键
  *   （见 QqCachePaths.familyKey）；`variant_hidden` / `variant_count` / `variant_bytes` 由触发器维护：
  *   图库合并显示时只露出家族中最大的那张，它带上家族的版本数与总大小。`is_variant_primary` 为历史遗留列，不再使用。
+ * - `variant_bytes`：合并显示时的大小（代表图为整组合计，其余为自身大小），合并显示下按大小排序 / 分组用它。
  * - `duplicate_group_id` / `is_duplicate_best`：基于 xxHash + pHash 检测出的"重复组"。
  * - `status = thumbnail_trash`：历史状态名；现在表示 QQ 缩略图（chatthumb），不进图库时间线，可在缩略图页与来源页清理。
  */
@@ -30,6 +31,8 @@ import java.time.ZoneId
         Index("phash"),
         Index("cache_key"),
         Index("variant_group"),
+        // 合并显示下按大小排序（同 size 索引的用法：按序走索引、逐行核对条件）
+        Index("variant_bytes"),
         Index("status"),
         Index("mtime"),
         // size 是「大到小」排序与 cleanup 聚合的高频排序列；25w 图无索引会退化成全表 filesort。
@@ -58,7 +61,7 @@ data class ImageEntity(
     @ColumnInfo(name = "is_variant_primary") val isVariantPrimary: Boolean = false,
     // 家族里的其他版本（图库合并显示时隐藏）；仅 active 的非缩略图可能为真
     @ColumnInfo(name = "variant_hidden", defaultValue = "0") val variantHidden: Boolean = false,
-    // 仅家族代表图（最大的那张）记录：家族现存版本数（≥2 才记）与总大小，其余为 0
+    // 家族代表图（最大的那张）记录家族现存版本数（≥2 才记），其余为 0；variant_bytes 见类注释
     @ColumnInfo(name = "variant_count", defaultValue = "0") val variantCount: Int = 0,
     @ColumnInfo(name = "variant_bytes", defaultValue = "0") val variantBytes: Long = 0,
     @ColumnInfo(name = "size") val size: Long,

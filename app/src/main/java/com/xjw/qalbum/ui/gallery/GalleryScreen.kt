@@ -71,6 +71,8 @@ import androidx.paging.compose.collectAsLazyPagingItems
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.domain.model.GallerySort
 import com.xjw.qalbum.ui.anim.sharedContainer
+import com.xjw.qalbum.ui.cleanup.PurgeProgressDialog
+import com.xjw.qalbum.ui.common.deleteResultText
 import com.xjw.qalbum.ui.components.BackButton
 import com.xjw.qalbum.ui.components.ConnectedChoiceRow
 import com.xjw.qalbum.ui.components.DeleteImagesDialog
@@ -81,8 +83,6 @@ import com.xjw.qalbum.ui.components.PhotoBadges
 import com.xjw.qalbum.ui.components.PhotoGrid
 import com.xjw.qalbum.ui.components.SaveToAlbumSheet
 import com.xjw.qalbum.ui.components.SectionHeader
-import com.xjw.qalbum.ui.components.SegmentPosition
-import com.xjw.qalbum.ui.components.SegmentedSwitchItem
 import com.xjw.qalbum.ui.components.SelectionTopBar
 import com.xjw.qalbum.ui.components.ToolbarIconAction
 import com.xjw.qalbum.ui.components.ToolbarPrimaryAction
@@ -115,6 +115,18 @@ fun GalleryScreen(
     val largeThreshold by viewModel.largeThresholdBytes.collectAsState()
     val stackVariants by viewModel.stackVariants.collectAsState()
     val enabledPhases by viewModel.enabledPhases.collectAsState()
+    val directory by viewModel.timelineDirectory.collectAsState()
+    val fastScroll by viewModel.fastScroll.collectAsState()
+    val deleteProgress by viewModel.deleteProgress.collectAsState()
+    // 换排序 / 合并方式后回到顶部（网格带占位、知道总数，不回顶会停在新列表的中间）；旋转屏幕不算
+    var shownOrder by rememberSaveable { mutableStateOf("${sort.name}/$stackVariants") }
+    LaunchedEffect(sort, stackVariants) {
+        val order = "${sort.name}/$stackVariants"
+        if (order != shownOrder) {
+            shownOrder = order
+            gridState.scrollToItem(0)
+        }
+    }
     // 多选状态与 rememberSaveable 的弹窗开关成对存亡：否则旋转 / 进程重建后
     // 确认框恢复显示而选中集已清空，出现「删除 0 张」的幽灵对话框
     var selectedIds by rememberSaveable(stateSaver = SelectedIdsSaver) { mutableStateOf(setOf<Long>()) }
@@ -190,13 +202,14 @@ fun GalleryScreen(
                         selectedIds = selectedIds,
                         gridState = gridState,
                         onOpen = { onImageClick(it.id) },
-                        onSelectionChange = { id, selected ->
-                            selectedIds = if (selected) selectedIds + id else selectedIds - id
-                        },
+                        onSelectedIdsChange = { selectedIds = it },
                         onColumnsChange = viewModel::setColumns,
                         minColumns = SettingsRepository.MIN_GALLERY_COLUMNS,
                         maxColumns = SettingsRepository.MAX_GALLERY_COLUMNS,
                         badges = PhotoBadges(largeThresholdBytes = largeThreshold, analyzedPhases = enabledPhases, stack = stackVariants),
+                        sectionIds = viewModel::sectionIds,
+                        directory = directory,
+                        fastScroll = fastScroll,
                         contentPadding = contentPadding,
                         sharedScope = if (imageShared) sharedScope else null,
                         animatedScope = animatedScope,
@@ -222,36 +235,20 @@ fun GalleryScreen(
     if (showDeleteConfirm && selectedIds.isNotEmpty()) {
         val ids = selectedIds
         DeleteImagesDialog(
-            count = ids.size,
             imageIds = ids,
-            onTrashOptions = { options ->
-                showDeleteConfirm=false
-                viewModel.moveImagesToTrash(ids,options) { count ->
-                    Toast.makeText(context,"已移入回收站 $count 张；未处理的图片保留",Toast.LENGTH_SHORT).show()
-                    clearSelection();items.refresh()
-                }
-            },
-            onPermanentOptions = { options ->
-                showDeleteConfirm=false
-                viewModel.deleteImagesPermanently(ids,options) { count ->
-                    Toast.makeText(context,"已永久删除 $count 张；未处理的图片保留",Toast.LENGTH_SHORT).show()
-                    clearSelection();items.refresh()
-                }
-            },
-            sizeOf = { viewModel.selectedSize(ids) },
             onDismiss = { showDeleteConfirm = false },
-            onTrash = {
+            onTrash = { options ->
                 showDeleteConfirm = false
-                viewModel.moveImagesToTrash(ids) { count ->
-                    Toast.makeText(context, "已移入回收站 $count 张", Toast.LENGTH_SHORT).show()
+                viewModel.moveImagesToTrash(ids, options) { count ->
+                    Toast.makeText(context, deleteResultText("已移入回收站", count, ids.size), Toast.LENGTH_SHORT).show()
                     clearSelection()
                     items.refresh()
                 }
             },
-            onPermanent = {
+            onPermanent = { options ->
                 showDeleteConfirm = false
-                viewModel.deleteImagesPermanently(ids) { count ->
-                    Toast.makeText(context, "已永久删除 $count 张", Toast.LENGTH_SHORT).show()
+                viewModel.deleteImagesPermanently(ids, options) { count ->
+                    Toast.makeText(context, deleteResultText("已永久删除", count, ids.size), Toast.LENGTH_SHORT).show()
                     clearSelection()
                     items.refresh()
                 }
@@ -264,11 +261,9 @@ fun GalleryScreen(
             columns = columns,
             sort = sort,
             thresholdBytes = largeThreshold,
-            stackVariants = stackVariants,
             onColumns = viewModel::setColumns,
             onSort = viewModel::setSort,
             onThreshold = viewModel::setLargeThreshold,
-            onStackVariants = viewModel::setStackVariants,
             onDismiss = { showPrefsSheet = false },
         )
     }
@@ -290,6 +285,8 @@ fun GalleryScreen(
             },
         )
     }
+
+    deleteProgress?.let { PurgeProgressDialog(it) }
 }
 
 /**
@@ -336,6 +333,9 @@ fun FavoriteGalleryScreen(
 ) {
     val items = viewModel.favoriteTimeline.collectAsLazyPagingItems()
     val favoriteCount by viewModel.favoriteCount.collectAsState(initial = 0)
+    val directory by viewModel.favoriteDirectory.collectAsState()
+    val fastScroll by viewModel.fastScroll.collectAsState()
+    val deleteProgress by viewModel.deleteProgress.collectAsState()
     val largeThreshold by viewModel.largeThresholdBytes.collectAsState()
     val gridState = rememberLazyGridState()
     val context = LocalContext.current
@@ -390,12 +390,13 @@ fun FavoriteGalleryScreen(
                     selectedIds = selectedIds,
                     gridState = gridState,
                     onOpen = { onImageClick(it.id) },
-                    onSelectionChange = { id, selected ->
-                        selectedIds = if (selected) selectedIds + id else selectedIds - id
-                    },
+                    onSelectedIdsChange = { selectedIds = it },
                     onColumnsChange = { columns = it },
                     maxColumns = 6,
                     badges = PhotoBadges(favorite = false, largeThresholdBytes = largeThreshold),
+                    sectionIds = viewModel::favoriteSectionIds,
+                    directory = directory,
+                    fastScroll = fastScroll,
                     contentPadding = contentPadding,
                     sharedScope = if (imageShared) sharedScope else null,
                     animatedScope = animatedScope,
@@ -420,37 +421,20 @@ fun FavoriteGalleryScreen(
     if (showDeleteConfirm && selectedIds.isNotEmpty()) {
         val ids = selectedIds
         DeleteImagesDialog(
-            count = ids.size,
             imageIds = ids,
-            onTrashOptions = { options ->
-                showDeleteConfirm=false
-                viewModel.moveImagesToTrash(ids,options) { count ->
-                    Toast.makeText(context,"已移入回收站 $count 张；未处理的图片保留",Toast.LENGTH_SHORT).show()
-                    clearSelection();items.refresh()
-                }
-            },
-            onPermanentOptions = { options ->
-                showDeleteConfirm=false
-                viewModel.deleteImagesPermanently(ids,options) { count ->
-                    Toast.makeText(context,"已永久删除 $count 张；未处理的图片保留",Toast.LENGTH_SHORT).show()
-                    clearSelection();items.refresh()
-                }
-            },
-            sizeOf = { viewModel.selectedSize(ids) },
-            note = "收藏的图片受保护：请先取消收藏，再执行删除。",
             onDismiss = { showDeleteConfirm = false },
-            onTrash = {
+            onTrash = { options ->
                 showDeleteConfirm = false
-                viewModel.moveImagesToTrash(ids) { count ->
-                    Toast.makeText(context, "已移入回收站 $count 张", Toast.LENGTH_SHORT).show()
+                viewModel.moveImagesToTrash(ids, options) { count ->
+                    Toast.makeText(context, deleteResultText("已移入回收站", count, ids.size), Toast.LENGTH_SHORT).show()
                     clearSelection()
                     items.refresh()
                 }
             },
-            onPermanent = {
+            onPermanent = { options ->
                 showDeleteConfirm = false
-                viewModel.deleteImagesPermanently(ids) { count ->
-                    Toast.makeText(context, "已永久删除 $count 张", Toast.LENGTH_SHORT).show()
+                viewModel.deleteImagesPermanently(ids, options) { count ->
+                    Toast.makeText(context, deleteResultText("已永久删除", count, ids.size), Toast.LENGTH_SHORT).show()
                     clearSelection()
                     items.refresh()
                 }
@@ -475,19 +459,19 @@ fun FavoriteGalleryScreen(
             },
         )
     }
+
+    deleteProgress?.let { PurgeProgressDialog(it) }
 }
 
-/** 图库显示与排序：每行张数、排列顺序（连接式按钮组）、大图标记阈值、合并同一张图的多个版本 */
+/** 图库显示与排序：每行张数、排列顺序（连接式按钮组）、大图标记阈值（合并与快速滚动在「设置 → 外观与导出」） */
 @Composable
 private fun GalleryPreferenceSheet(
     columns: Int,
     sort: GallerySort,
     thresholdBytes: Long,
-    stackVariants: Boolean,
     onColumns: (Int) -> Unit,
     onSort: (GallerySort) -> Unit,
     onThreshold: (Long) -> Unit,
-    onStackVariants: (Boolean) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -543,16 +527,6 @@ private fun GalleryPreferenceSheet(
                     )
                 }
             }
-            SectionHeader("同一张图的多个版本")
-            SegmentedSwitchItem(
-                position = SegmentPosition.Single,
-                title = "合并显示",
-                subtitle = "QQ 为同一张图保存的原图、预览图和缩略图合成一张，显示最大的那张，大小按全部版本合计，删除时一起处理",
-                checked = stackVariants,
-                onCheckedChange = onStackVariants,
-                icon = Icons.Outlined.PhotoLibrary,
-                modifier = Modifier.padding(horizontal = 8.dp),
-            )
             Spacer(Modifier.height(8.dp))
         }
     }

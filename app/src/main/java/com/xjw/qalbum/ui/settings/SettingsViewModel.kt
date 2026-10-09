@@ -140,6 +140,14 @@ class SettingsViewModel(
         persist { settings.setGalleryStackVariants(enabled) }
     }
 
+    /** 图片网格的快速滚动条 */
+    val fastScrollEnabled: StateFlow<Boolean> = settings.fastScrollEnabled
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
+
+    fun setFastScrollEnabled(enabled: Boolean) {
+        persist { settings.setFastScrollEnabled(enabled) }
+    }
+
     // ---- 导出相册目录管理 ----
 
     val exportSubdirs: StateFlow<List<String>> = settings.exportSubdirs

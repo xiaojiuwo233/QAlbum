@@ -66,7 +66,7 @@ import com.xjw.qalbum.data.db.entity.TagEntity
         QqImageContextEntity::class,
         QqSourceMemberEntity::class,
     ],
-    version = 18,
+    version = 19,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -144,6 +144,17 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("DROP INDEX IF EXISTS index_images_status_source_type_date_bucket_is_protected")
                 db.execSQL("CREATE INDEX IF NOT EXISTS `index_images_status_source_type_date_bucket_is_protected_variant_hidden` ON `images` (`status`, `source_type`, `date_bucket`, `is_protected`, `variant_hidden`)")
                 ImageVariantSql.createTriggers(db)
+            }
+        }
+
+        /**
+         * v18 → v19：`variant_bytes` 改为合并显示时的大小（代表图为整组合计，其余为自身大小），供按大小排序与分组；
+         * 只建索引并更新触发器，已有行由启动后的后台回填补齐。
+         */
+        val MIGRATION_18_19 = object : Migration(18, 19) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_images_variant_bytes` ON `images` (`variant_bytes`)")
+                ImageVariantSql.recreateTriggers(db)
             }
         }
 
@@ -720,6 +731,7 @@ abstract class AppDatabase : RoomDatabase() {
                     MIGRATION_15_16,
                     MIGRATION_16_17,
                     MIGRATION_17_18,
+                    MIGRATION_18_19,
                 )
                 .addCallback(creationCallback)
                 // 刻意不配置任何 destructive 回退：未覆盖的版本跳变（含降级）宁可 fail-fast

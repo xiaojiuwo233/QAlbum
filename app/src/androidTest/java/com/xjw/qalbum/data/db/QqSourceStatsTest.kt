@@ -80,10 +80,10 @@ class QqSourceStatsTest {
 
             // 浏览范围：群里的图片按时间倒序、共用统计、可清理 id
             val groupScope = QqScopeIds(conversationId = group)
-            assertEquals(listOf(3L, 1L), ids(db, QqScopeSql.page(groupScope, QqContent.IMAGES, QqScopeOrder.DATE_DESC)))
-            assertEquals(listOf(5L), ids(db, QqScopeSql.page(groupScope, QqContent.THUMBNAILS, QqScopeOrder.SIZE_DESC)))
-            assertEquals(listOf(1L), ids(db, QqScopeSql.page(QqScopeIds(group, alice), QqContent.IMAGES, QqScopeOrder.DATE_ASC)))
-            assertEquals(listOf(3L, 1L), ids(db, QqScopeSql.page(QqScopeIds(), QqContent.IMAGES, QqScopeOrder.SIZE_DESC)))
+            assertEquals(listOf(3L, 1L), ids(db, QqScopeSql.page(groupScope, QqContent.IMAGES, QqScopeOrder.DATE_DESC, stacked = false)))
+            assertEquals(listOf(5L), ids(db, QqScopeSql.page(groupScope, QqContent.THUMBNAILS, QqScopeOrder.SIZE_DESC, stacked = false)))
+            assertEquals(listOf(1L), ids(db, QqScopeSql.page(QqScopeIds(group, alice), QqContent.IMAGES, QqScopeOrder.DATE_ASC, stacked = false)))
+            assertEquals(listOf(3L, 1L), ids(db, QqScopeSql.page(QqScopeIds(), QqContent.IMAGES, QqScopeOrder.SIZE_DESC, stacked = false)))
             db.query(QqScopeSql.counts(groupScope, setOf(QqContent.IMAGES), includeShared = false)).use { c ->
                 c.moveToFirst()
                 // total, totalBytes, shared, protected, removable, removableBytes

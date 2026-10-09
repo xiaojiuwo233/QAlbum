@@ -6,36 +6,27 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.SharedTransitionScope
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
@@ -47,7 +38,6 @@ import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -73,16 +63,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.util.VelocityTracker
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.semantics.selected
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import coil3.compose.AsyncImage
-import coil3.request.ImageRequest
-import coil3.request.crossfade
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.ui.anim.sharedImage
 import com.xjw.qalbum.ui.common.formatBytes
@@ -92,8 +76,8 @@ import com.xjw.qalbum.ui.components.DeleteImagesDialog
 import com.xjw.qalbum.service.cleanup.PictureDeleteOptions
 import com.xjw.qalbum.ui.components.PreviewAction
 import com.xjw.qalbum.ui.components.SaveToAlbumSheet
+import com.xjw.qalbum.ui.components.VariantStrip
 import com.xjw.qalbum.ui.components.ViewerActionBar
-import com.xjw.qalbum.ui.components.ViewerChromeColor
 import com.xjw.qalbum.ui.components.ViewerIconButton
 import com.xjw.qalbum.ui.components.ZoomableImage
 import com.xjw.qalbum.ui.imageloading.ImageEntityModel
@@ -426,19 +410,15 @@ private fun ImmersivePhotoViewer(
 
         if (confirmDelete) {
             DeleteImagesDialog(
-                count = 1,
-                imageIds=listOf(state.current.id),
-                onTrashOptions={ options -> confirmDelete=false;onMoveToTrash(options) },
-                onPermanentOptions={ options -> confirmDelete=false;onDeletePermanently(options) },
-                note = if (state.current.isFavorite || state.current.userKeep == true) "这张图片已收藏或标记为保留，不会被删除；请先取消收藏。" else null,
+                imageIds = listOf(state.current.id),
                 onDismiss = { confirmDelete = false },
-                onTrash = {
+                onTrash = { options ->
                     confirmDelete = false
-                    onMoveToTrash(PictureDeleteOptions())
+                    onMoveToTrash(options)
                 },
-                onPermanent = {
+                onPermanent = { options ->
                     confirmDelete = false
-                    onDeletePermanently(PictureDeleteOptions())
+                    onDeletePermanently(options)
                 },
             )
         }
@@ -542,83 +522,6 @@ private fun BottomActions(
             PreviewAction(Icons.Outlined.Delete, "删除", onClick = onDelete)
         }
     }
-}
-
-/**
- * 底部版本条：同一张图的原图 / 预览图 / 缩略图（类似相册的图集），点选切换显示，标出各自大小与合计。
- */
-@Composable
-private fun VariantStrip(variants: List<ImageEntity>, currentId: Long, onSelect: (Long) -> Unit) {
-    Surface(
-        shape = MaterialTheme.shapes.extraLarge,
-        color = ViewerChromeColor,
-        contentColor = Color.White,
-        modifier = Modifier
-            .padding(start = 16.dp, end = 16.dp, bottom = 8.dp)
-            .widthIn(max = 520.dp),
-    ) {
-        Column(Modifier.padding(start = 12.dp, end = 12.dp, top = 10.dp, bottom = 8.dp)) {
-            Text(
-                "同一张图的 ${variants.size} 个版本 · 合计 ${formatBytes(variants.sumOf { it.size })}",
-                style = MaterialTheme.typography.labelMedium,
-                color = Color.White.copy(alpha = 0.78f),
-                modifier = Modifier.padding(start = 4.dp, bottom = 6.dp),
-            )
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                modifier = Modifier.horizontalScroll(rememberScrollState()),
-            ) {
-                variants.forEach { variant ->
-                    VariantThumb(variant, selected = variant.id == currentId, onClick = { onSelect(variant.id) })
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun VariantThumb(image: ImageEntity, selected: Boolean, onClick: () -> Unit) {
-    val context = LocalContext.current
-    val border by animateColorAsState(
-        if (selected) Color.White else Color.Transparent,
-        MaterialTheme.motionScheme.fastEffectsSpec(),
-        label = "variantBorder",
-    )
-    val scale by animateFloatAsState(if (selected) 1f else 0.9f, MaterialTheme.motionScheme.fastSpatialSpec(), label = "variantScale")
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier
-            .clip(MaterialTheme.shapes.large)
-            .clickable(onClick = onClick)
-            .semantics { this.selected = selected }
-            .padding(horizontal = 6.dp, vertical = 4.dp),
-    ) {
-        AsyncImage(
-            model = ImageRequest.Builder(context).data(ImageEntityModel(image)).crossfade(true).build(),
-            contentDescription = variantLabel(image),
-            contentScale = ContentScale.Crop,
-            modifier = Modifier
-                .size(52.dp)
-                .graphicsLayer {
-                    scaleX = scale
-                    scaleY = scale
-                }
-                .clip(RoundedCornerShape(12.dp))
-                .background(Color.White.copy(alpha = 0.08f))
-                .border(2.dp, border, RoundedCornerShape(12.dp)),
-        )
-        Spacer(Modifier.height(4.dp))
-        Text(variantLabel(image), style = MaterialTheme.typography.labelSmall, color = Color.White)
-        Text(formatBytes(image.size), style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.66f))
-    }
-}
-
-/** 版本名称：原图 / 预览图 / 缩略图 / 高清缩略图 */
-internal fun variantLabel(image: ImageEntity): String = when (image.sourceType) {
-    "chatraw" -> "原图"
-    "chatimg" -> "预览图"
-    "chatthumb" -> if (image.filename.endsWith("_hd")) "高清缩略图" else "缩略图"
-    else -> sourceLabel(image.sourceType)
 }
 
 @Composable

@@ -7,14 +7,18 @@ import androidx.paging.cachedIn
 import com.xjw.qalbum.data.db.dao.TagDao
 import com.xjw.qalbum.data.db.entity.OcrTextEntity
 import com.xjw.qalbum.data.db.entity.TAG_USER_KEEP
+import com.xjw.qalbum.data.paging.RefreshGate
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.data.repository.ImageRepository
+import com.xjw.qalbum.domain.model.TimelineSection
 import com.xjw.qalbum.service.cleanup.CleanupController
 import com.xjw.qalbum.service.cleanup.PictureDeleteOptions
 import com.xjw.qalbum.service.cleanup.ExternalViewTarget
 import com.xjw.qalbum.service.cleanup.ImageFileManager
 import com.xjw.qalbum.ui.cleanup.PurgeProgress
+import com.xjw.qalbum.ui.components.ScrollDirectory
 import com.xjw.qalbum.ui.gallery.GalleryTimelineItem
+import com.xjw.qalbum.ui.gallery.dateDirectory
 import com.xjw.qalbum.ui.gallery.withDateHeaders
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -27,6 +31,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -56,6 +61,10 @@ class TagsViewModel(
         tagDao.observeAiTagsWithCounts()
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
+    /** 快速滚动条（开关在设置里） */
+    val fastScroll: StateFlow<Boolean> = settings.fastScrollEnabled
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
+
     /** 每行图片数：与图库共用同一设置，保证两页布局一致。 */
     val galleryColumns: StateFlow<Int> = settings.galleryColumns
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsRepository.DEFAULT_GALLERY_COLUMNS)
@@ -74,6 +83,10 @@ class TagsViewModel(
     private var timelineScope: CoroutineScope? = null
     private var timelineTagId: Long? = null
     private var timelineFlow: Flow<PagingData<GalleryTimelineItem>>? = null
+    private var timelineCounts: StateFlow<Map<Long, Int>?> = MutableStateFlow(null)
+
+    /** 批量移入回收站期间关上：网格保持原样，结束后统一刷新一次 */
+    private val refreshGate = RefreshGate()
 
     /**
      * 某标签下活跃图片，按时间（新→旧）分页并插入日期分组标题，与图库时间线同一渲染。
@@ -93,10 +106,23 @@ class TagsViewModel(
         // 不再各自触发一次 Room 聚合冷查询（与 GalleryViewModel 同范式）
         val bucketCounts = imageRepository.observeTagDateBucketCounts(tagId)
             .stateIn(scope, SharingStarted.WhileSubscribed(5_000), null)
-        return imageRepository.imagesByTagPager(tagId)
+        timelineCounts = bucketCounts
+        return imageRepository.imagesByTagPager(tagId, refreshGate)
             .withDateHeaders(bucketCounts)
             .cachedIn(scope)
             .also { timelineFlow = it }
+    }
+
+    /** 快速滚动条的目录：与 [timelineFor] 同一份日期计数 */
+    fun directoryFor(tagId: Long): Flow<ScrollDirectory?> {
+        timelineFor(tagId)
+        return timelineCounts.map { counts -> counts?.let { dateDirectory(it, ascending = false) } }
+    }
+
+    /** 点日期标题全选：这一天里带该标签的全部图片 */
+    suspend fun sectionIds(tagId: Long, section: TimelineSection): List<Long> = when (section) {
+        is TimelineSection.Day -> imageRepository.tagIdsBetween(tagId, section.from, section.until)
+        is TimelineSection.Size -> emptyList()
     }
 
     fun setColumns(columns: Int) {
@@ -171,14 +197,16 @@ class TagsViewModel(
         _busy.value = true
         appScope.launch {
             try {
-                val moved = if (selectedIds.isNotEmpty()) {
-                    _progress.value = PurgeProgress(0, selectedIds.size, PROGRESS_LABEL)
-                    cleanupController.moveToTrash(
-                        selectedIds.map { it to reasonFor(tag) },
-                        options,
-                    ) { done, total -> _progress.value = PurgeProgress(done, total, PROGRESS_LABEL) }
-                } else {
-                    deleteWholeTag(tag)
+                val moved = refreshGate.hold {
+                    if (selectedIds.isNotEmpty()) {
+                        _progress.value = PurgeProgress(0, selectedIds.size, PROGRESS_LABEL)
+                        cleanupController.moveToTrash(
+                            selectedIds.map { it to reasonFor(tag) },
+                            options,
+                        ) { done, total -> _progress.value = PurgeProgress(done, total, PROGRESS_LABEL) }
+                    } else {
+                        deleteWholeTag(tag)
+                    }
                 }
                 withContext(Dispatchers.Main.immediate) { onDone(moved) }
             } catch (ce: CancellationException) {

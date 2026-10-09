@@ -83,6 +83,8 @@ internal val ViewerChromeColor = Color(0xFF1E1F22).copy(alpha = 0.82f)
  *
  * 「详情」复用 [PhotoDetailsSheet]，从底部滑入；点详情卡以外任意处关闭。
  * [images] 是预览时的快照（调用方负责取已加载的有限集合；删除后传入新列表即可）。
+ * 提供 [variantsOf] 时（合并显示），底部出现版本条，可切换显示同一张图的其他版本；[refreshKey] 变化时重新取版本
+ * （例如收藏状态变了）。[bottomBar] 拿到的是正在显示的那个版本。
  */
 @Composable
 internal fun FullScreenImagePager(
@@ -94,6 +96,8 @@ internal fun FullScreenImagePager(
     onCreateSubdir: (String) -> Unit,
     onSave: (id: Long, subdir: String?, alsoTrash: Boolean) -> Unit,
     onLoadOcr: suspend (Long) -> OcrTextEntity?,
+    variantsOf: (suspend (ImageEntity) -> List<ImageEntity>)? = null,
+    refreshKey: Any? = null,
     bottomBar: @Composable (current: ImageEntity) -> Unit,
 ) {
     if (images.isEmpty()) {
@@ -118,6 +122,13 @@ internal fun FullScreenImagePager(
     var directionDecided by remember { mutableStateOf(false) }
     val springBack = remember { Animatable(0f) }
     val latestOnClose by rememberUpdatedState(onClose)
+    // 合并显示：各页的全部版本，以及每页正在显示的版本（页图片 id → 版本 id）
+    var variantCache by remember { mutableStateOf(mapOf<Long, List<ImageEntity>>()) }
+    var shownVersions by remember { mutableStateOf(mapOf<Long, Long>()) }
+    fun shownOn(pageImage: ImageEntity): ImageEntity {
+        val wanted = shownVersions[pageImage.id] ?: pageImage.id
+        return variantCache[pageImage.id]?.firstOrNull { it.id == wanted } ?: pageImage
+    }
 
     Dialog(
         onDismissRequest = onClose,
@@ -202,11 +213,12 @@ internal fun FullScreenImagePager(
                         clip = radius > 0f
                     },
             ) { page ->
+                val shown = shownOn(images[page])
                 ZoomableImage(
-                    model = ImageEntityModel(images[page]),
-                    contentDescription = images[page].filename,
+                    model = ImageEntityModel(shown),
+                    contentDescription = shown.filename,
                     modifier = Modifier.fillMaxSize(),
-                    stateKey = images[page].id,
+                    stateKey = shown.id,
                     isActive = page == pagerState.currentPage,
                     resetSignal = zoomReset,
                     onTap = {
@@ -218,7 +230,12 @@ internal fun FullScreenImagePager(
             }
 
             val page = pagerState.currentPage.coerceIn(0, images.lastIndex)
-            val current = images[page]
+            val pageImage = images[page]
+            if (variantsOf != null) {
+                LaunchedEffect(pageImage.id, refreshKey) { variantCache = variantCache + (pageImage.id to variantsOf(pageImage)) }
+            }
+            val variants = variantCache[pageImage.id].orEmpty()
+            val current = shownOn(pageImage)
 
             AnimatedVisibility(
                 visible = chromeVisible && !draggingClose,
@@ -263,7 +280,16 @@ internal fun FullScreenImagePager(
                 exit = slideOutVertically(MaterialTheme.motionScheme.fastSpatialSpec()) { it / 2 } + fadeOut(fade),
                 modifier = Modifier.align(Alignment.BottomCenter),
             ) {
-                ViewerActionBar { bottomBar(current) }
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    if (variants.size >= 2) {
+                        VariantStrip(
+                            variants = variants,
+                            currentId = current.id,
+                            onSelect = { id -> shownVersions = shownVersions + (pageImage.id to id) },
+                        )
+                    }
+                    ViewerActionBar { bottomBar(current) }
+                }
             }
 
             // 「查看详情」：复用图库详情卡（元数据 + OCR），从底部滑入

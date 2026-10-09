@@ -72,6 +72,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -94,6 +95,7 @@ import com.xjw.qalbum.data.db.dao.QqContent
 import com.xjw.qalbum.data.db.dao.QqSourceFacet
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.service.cleanup.PictureDeleteOptions
+import com.xjw.qalbum.ui.cleanup.PurgeProgressDialog
 import com.xjw.qalbum.ui.cleanup.shareChooser
 import com.xjw.qalbum.ui.common.formatBytes
 import com.xjw.qalbum.ui.common.formatCountExact
@@ -155,9 +157,13 @@ fun QqSourceBrowseScreen(
     val filterOptions by viewModel.filterOptions.collectAsState()
     val confirmation by viewModel.confirmation.collectAsState()
     val progress by viewModel.progress.collectAsState()
+    val deleteProgress by viewModel.deleteProgress.collectAsState()
     val message by viewModel.message.collectAsState()
     val repositoryMessage by viewModel.repositoryMessage.collectAsState()
     val exportSubdirs by viewModel.exportSubdirs.collectAsState()
+    val stacked by viewModel.stacked.collectAsState()
+    val directory by viewModel.directory.collectAsState()
+    val fastScroll by viewModel.fastScroll.collectAsState()
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val gridState = rememberLazyGridState()
@@ -187,6 +193,15 @@ fun QqSourceBrowseScreen(
     }
     // 换内容后旧的选择不再对应当前网格
     LaunchedEffect(content) { clearSelection() }
+    // 换筛选 / 内容 / 排序 / 合并方式后回到顶部（网格带占位、知道总数，不回顶会停在新列表的中间）；旋转屏幕不算
+    val browseKey = "${filter?.id}/$content/$sort/$stacked"
+    var shownKey by rememberSaveable { mutableStateOf(browseKey) }
+    LaunchedEffect(browseKey) {
+        if (browseKey != shownKey) {
+            shownKey = browseKey
+            gridState.scrollToItem(0)
+        }
+    }
 
     val filterNoun = when {
         target.kind == SourceKind.SENDER -> "会话"
@@ -327,11 +342,12 @@ fun QqSourceBrowseScreen(
                             val index = loaded.indexOfFirst { it.id == image.id }
                             if (index >= 0) preview = SourcePreview(loaded, index)
                         },
-                        onSelectionChange = { id, selected ->
-                            selectedIds = if (selected) selectedIds + id else selectedIds - id
-                        },
+                        onSelectedIdsChange = { selectedIds = it },
                         onColumnsChange = viewModel::setColumns,
-                        badges = PhotoBadges(size = !sort.byDate),
+                        badges = PhotoBadges(size = !sort.byDate, stack = stacked && content == QqContent.IMAGES),
+                        sectionIds = viewModel::sectionIds,
+                        directory = directory,
+                        fastScroll = fastScroll,
                         contentPadding = PaddingValues(bottom = bottomInset + if (selectionMode) 88.dp else 0.dp),
                         leadingContent = {
                             if (target.kind != SourceKind.ALL) {
@@ -384,23 +400,13 @@ fun QqSourceBrowseScreen(
     if (showDelete && selectedIds.isNotEmpty()) {
         val ids = selectedIds
         DeleteImagesDialog(
-            count = ids.size,
             imageIds = ids,
             sourceScope = deleteScope,
             initialOptions = deleteDefaults,
-            onTrashOptions = { options -> showDelete = false; viewModel.moveToTrash(ids, options = options) { clearSelection(); items.refresh() } },
-            onPermanentOptions = { options -> showDelete = false; viewModel.deletePermanently(ids, options = options) { clearSelection(); items.refresh() } },
-            sizeOf = { viewModel.sizeOf(ids) },
-            note = "收藏或标记为保留的图片会被跳过。删除 QQ 缓存后，聊天里对应的图片可能需要重新下载。",
+            noun = noun,
             onDismiss = { showDelete = false },
-            onTrash = {
-                showDelete = false
-                viewModel.moveToTrash(ids) { clearSelection(); items.refresh() }
-            },
-            onPermanent = {
-                showDelete = false
-                viewModel.deletePermanently(ids) { clearSelection(); items.refresh() }
-            },
+            onTrash = { options -> showDelete = false; viewModel.moveToTrash(ids, options = options) { clearSelection(); items.refresh() } },
+            onPermanent = { options -> showDelete = false; viewModel.deletePermanently(ids, options = options) { clearSelection(); items.refresh() } },
         )
     }
 
@@ -456,9 +462,13 @@ fun QqSourceBrowseScreen(
 
     preview?.let { current ->
         var confirmDeleteFor by remember { mutableStateOf<ImageEntity?>(null) }
+        // 收藏状态变了要重新取版本条（显示的可能是同一张图的其他版本）
+        var revision by remember { mutableIntStateOf(0) }
         FullScreenImagePager(
             images = current.images,
             startIndex = current.start,
+            variantsOf = viewModel::versionsOf,
+            refreshKey = revision,
             onClose = { preview = null },
             onShare = { id -> viewModel.share(id) { context.startActivity(shareChooser(it)) } },
             exportSubdirs = exportSubdirs,
@@ -466,7 +476,7 @@ fun QqSourceBrowseScreen(
             onSave = { id, subdir, alsoTrash ->
                 viewModel.save(listOf(id), subdir, alsoTrash) { saved ->
                     if (alsoTrash && saved > 0) {
-                        preview = preview?.withoutImage(id)
+                        preview = preview?.withoutPage(id)
                         items.refresh()
                     }
                 }
@@ -479,7 +489,7 @@ fun QqSourceBrowseScreen(
                         label = if (image.isFavorite) "已收藏" else "收藏",
                         onClick = {
                             val next = !image.isFavorite
-                            viewModel.setFavorite(listOf(image.id), next)
+                            viewModel.setFavorite(listOf(image.id), next) { revision++ }
                             preview = preview?.let { state ->
                                 state.copy(images = state.images.map { if (it.id == image.id) it.copy(isFavorite = next) else it })
                             }
@@ -495,45 +505,44 @@ fun QqSourceBrowseScreen(
                     fun removed(count: Int, action: String) {
                         Toast.makeText(context, removalMessage(action, count, 1), Toast.LENGTH_SHORT).show()
                         if (count > 0) {
-                            preview = preview?.withoutImage(pending.id)
+                            preview = preview?.withoutImage(pending)
                             items.refresh()
                         }
                     }
                     DeleteImagesDialog(
-                        count = 1,
                         imageIds = listOf(pending.id),
                         sourceScope = deleteScope,
                         initialOptions = deleteDefaults,
-                        onTrashOptions = { options ->
+                        noun = noun,
+                        onDismiss = { confirmDeleteFor = null },
+                        onTrash = { options ->
                             confirmDeleteFor = null
                             viewModel.moveToTrash(listOf(pending.id), notify = false, options = options) { removed(it, "已移入回收站") }
                         },
-                        onPermanentOptions = { options ->
+                        onPermanent = { options ->
                             confirmDeleteFor = null
                             viewModel.deletePermanently(listOf(pending.id), notify = false, options = options) { removed(it, "已永久删除") }
-                        },
-                        note = if (pending.isFavorite || pending.userKeep == true) "这张图片已收藏或标记为保留，不会被删除；请先取消收藏。" else null,
-                        onDismiss = { confirmDeleteFor = null },
-                        onTrash = {
-                            confirmDeleteFor = null
-                            viewModel.moveToTrash(listOf(pending.id), notify = false) { removed(it, "已移入回收站") }
-                        },
-                        onPermanent = {
-                            confirmDeleteFor = null
-                            viewModel.deletePermanently(listOf(pending.id), notify = false) { removed(it, "已永久删除") }
                         },
                     )
                 }
             },
         )
     }
+
+    deleteProgress?.let { PurgeProgressDialog(it) }
 }
 
 /** 从看图快照移除一张：保持当前位置，即显示下一张（删的是末张则后退一张），删空后关闭 */
-private fun SourcePreview.withoutImage(id: Long): SourcePreview? {
-    val index = images.indexOfFirst { it.id == id }
+private fun SourcePreview.withoutPage(id: Long): SourcePreview? = removeAt(images.indexOfFirst { it.id == id })
+
+/** 删的可能是这一页显示的其他版本：按图片家族找到它所在的页 */
+private fun SourcePreview.withoutImage(image: ImageEntity): SourcePreview? = removeAt(
+    images.indexOfFirst { it.id == image.id || (image.variantGroup != null && it.variantGroup == image.variantGroup) },
+)
+
+private fun SourcePreview.removeAt(index: Int): SourcePreview? {
     if (index < 0) return this
-    val remaining = images.filterNot { it.id == id }
+    val remaining = images.filterIndexed { i, _ -> i != index }
     if (remaining.isEmpty()) return null
     return SourcePreview(remaining, index.coerceAtMost(remaining.lastIndex))
 }

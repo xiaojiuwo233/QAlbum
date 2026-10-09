@@ -123,11 +123,16 @@ private val SelectedIdsSaver = listSaver<Set<Long>, Long>(save = { it.toList() }
 /** 缩略图默认只清理所选缩略图本身；它们本就是可以重新下载的预览缓存 */
 private val ThumbnailDeleteDefaults = PictureDeleteOptions(linkedVersions = false, includeShared = true)
 
+/** 删除缩略图的唯一提醒 */
+private const val ExpiredNote = "QQ 里已过期、又没有原图的图片，删除后无法再查看"
+
 @Composable
 private fun ThumbnailCacheScreen(onBack: () -> Unit, viewModel: ThumbnailCacheViewModel = koinViewModel()) {
     val items = viewModel.photos.collectAsLazyPagingItems()
     val summary by viewModel.summary.collectAsState()
     val columns by viewModel.columns.collectAsState()
+    val directory by viewModel.directory.collectAsState()
+    val fastScroll by viewModel.fastScroll.collectAsState()
     val progress by viewModel.progress.collectAsState()
     val message by viewModel.message.collectAsState()
     val exportSubdirs by viewModel.exportSubdirs.collectAsState()
@@ -249,10 +254,11 @@ private fun ThumbnailCacheScreen(onBack: () -> Unit, viewModel: ThumbnailCacheVi
                             val index = loaded.indexOfFirst { it.id == image.id }
                             if (index >= 0) preview = loaded to index
                         },
-                        onSelectionChange = { id, selected ->
-                            selectedIds = if (selected) selectedIds + id else selectedIds - id
-                        },
+                        onSelectedIdsChange = { selectedIds = it },
                         onColumnsChange = viewModel::setColumns,
+                        sectionIds = viewModel::sectionIds,
+                        directory = directory,
+                        fastScroll = fastScroll,
                         contentPadding = PaddingValues(bottom = bottomInset + if (selectionMode) 88.dp else 16.dp),
                         leadingContent = {
                             item(key = "explain", span = { GridItemSpan(maxLineSpan) }, contentType = "explain") {
@@ -279,20 +285,17 @@ private fun ThumbnailCacheScreen(onBack: () -> Unit, viewModel: ThumbnailCacheVi
     if (showDelete && selectedIds.isNotEmpty()) {
         val ids = selectedIds
         DeleteImagesDialog(
-            count = ids.size,
             imageIds = ids,
             initialOptions = ThumbnailDeleteDefaults,
-            sizeOf = { viewModel.sizeOf(ids) },
-            note = "这些是 QQ 聊天里的图片预览。删除后 QQ 会在打开聊天时重新下载；服务器上已过期、本机又没有原图或预览图的，会显示「图片已过期」。",
+            noun = "缩略图",
+            note = ExpiredNote,
             onDismiss = { showDelete = false },
-            onTrash = {},
-            onPermanent = {},
-            onTrashOptions = { options ->
+            onTrash = { options ->
                 showDelete = false
                 clearSelection()
                 viewModel.remove(ids, options, permanent = false) { items.refresh() }
             },
-            onPermanentOptions = { options ->
+            onPermanent = { options ->
                 showDelete = false
                 clearSelection()
                 viewModel.remove(ids, options, permanent = true) { items.refresh() }
@@ -318,13 +321,12 @@ private fun ThumbnailCacheScreen(onBack: () -> Unit, viewModel: ThumbnailCacheVi
                 }
                 pendingDelete?.let { target ->
                     DeleteImagesDialog(
-                        count = 1,
                         imageIds = listOf(target.id),
                         initialOptions = ThumbnailDeleteDefaults,
+                        noun = "缩略图",
+                        note = ExpiredNote,
                         onDismiss = { pendingDelete = null },
-                        onTrash = {},
-                        onPermanent = {},
-                        onTrashOptions = { options ->
+                        onTrash = { options ->
                             pendingDelete = null
                             viewModel.remove(listOf(target.id), options, permanent = false) { removed ->
                                 if (removed > 0) {
@@ -335,7 +337,7 @@ private fun ThumbnailCacheScreen(onBack: () -> Unit, viewModel: ThumbnailCacheVi
                                 }
                             }
                         },
-                        onPermanentOptions = { options ->
+                        onPermanent = { options ->
                             pendingDelete = null
                             viewModel.remove(listOf(target.id), options, permanent = true) { removed ->
                                 if (removed > 0) {
