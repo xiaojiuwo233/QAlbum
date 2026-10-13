@@ -58,6 +58,7 @@ class QuarantineManager(
     private val settings: SettingsRepository,
     private val fileOpsClient: FileOpsClient,
     private val imageRepository: ImageRepository,
+    private val archive: ArchiveManager,
 ) {
 
     /** 回收站根目录（外部专属目录；存储不可用时回退 filesDir） */
@@ -79,17 +80,19 @@ class QuarantineManager(
 
     /**
      * 删除确认弹窗用的事实（只查库，不碰文件，选得再多也很快）：所选图片自身大小、连同其他版本的大小、
-     * 有其他版本的张数、受保护（收藏 / 保留）的张数、其他聊天也在用的张数，以及文件访问是否就绪。
+     * 有其他版本的张数、受保护（归档 / 保留）的张数、其他聊天也在用的张数，以及文件访问是否就绪。
      * 「共用」与执行时的判断一致：不限范围时出现在不止一个会话 / 发送人里，限定来源时出现在范围之外。
-     * 实际删除时仍逐组核对文件与关联（见 [PictureFamilyPlanner]）。
+     * 实际删除时仍逐组核对文件与关联（见 [PictureFamilyPlanner]）。[includeArchived] 为归档页删除：归档不算保护。
      */
-    suspend fun deleteFacts(ids: Collection<Long>, scope: QqSourceScope? = null): PictureDeleteFacts =
+    suspend fun deleteFacts(ids: Collection<Long>, scope: QqSourceScope? = null, includeArchived: Boolean = false): PictureDeleteFacts =
         withContext(Dispatchers.IO) {
             val rows = ids.distinct().chunked(SQL_CHUNK).flatMap { imageDao.deleteFactRows(it) }
-            val members = rows.mapNotNullTo(HashSet()) { it.variantGroup }.chunked(SQL_CHUNK).flatMap { imageDao.familyMemberSizes(it) }
+            val members = rows.mapNotNullTo(HashSet()) { it.variantGroup }.chunked(SQL_CHUNK)
+                .flatMap { imageDao.familyMemberSizes(it, includeArchived) }
             val familyIds = members.groupBy({ it.variantGroup }, { it.id })
             val sizes = members.associate { it.id to it.size } + rows.associate { it.id to it.size }
-            val open = rows.filterNot { it.isProtected }
+            fun protected(row: ImageDao.DeleteFactRow) = row.isKept || (row.isArchived && !includeArchived)
+            val open = rows.filterNot(::protected)
             val sources = db.qqSourceDao()
             val sharedPaths = open.map { it.path }.chunked(PATH_CHUNK).flatMapTo(HashSet()) { page ->
                 if (scope == null) sources.pathsInSeveralContexts(page) else sources.pathsOutsideScope(page, scope.groupKey, scope.senderKey)
@@ -99,7 +102,7 @@ class QuarantineManager(
                 bytes = rows.sumOf { it.size },
                 versionBytes = sizes.values.sum(),
                 withVersions = rows.count { row -> familyIds[row.variantGroup].orEmpty().any { it != row.id } },
-                protectedCount = rows.count { it.isProtected },
+                protectedCount = rows.count(::protected),
                 shared = open.count { it.path in sharedPaths },
                 accessError = fileAccessError(),
             )
@@ -141,7 +144,8 @@ class QuarantineManager(
                 PictureFamilyPlanner(db,settings.chatpicPath.first()).batches(ids,options,bound,scope) { groups ->
                     val open=groups.filter { it.blocked==null }
                     result+=PictureDeleteResult(skipped=groups.size-open.size)
-                    if(open.isNotEmpty())result+=if(permanent)operations.permanentlyDeleteAll(open) else operations.quarantineAll(open,reason,expiry)
+                    if(open.isNotEmpty())result+=if(permanent)operations.permanentlyDeleteAll(open,options.includeArchived)
+                        else operations.quarantineAll(open,reason,expiry,options.includeArchived)
                     done+=groups.sumOf { it.selectedIds.size }
                     onProgress(done.coerceAtMost(total),total)
                 }
@@ -150,6 +154,8 @@ class QuarantineManager(
             catch(_:Exception) { result.copy(partial=result.partial+1) }
             finally {
                 bound.close()
+                // 归档页删除：放回原处（核验失败回滚）的归档图按设置重新隐藏
+                if(options.includeArchived)runCatching { archive.sync() }
                 onProgress(total,total)
             }
         }
@@ -165,13 +171,14 @@ class QuarantineManager(
         quarantineBatch(listOf(imageId to reason)) == 1
 
     /**
-     * 批量移入回收站。每块先持久化 pending 日志并在同一事务重验收藏/用户保留，再处理文件。
+     * 批量移入回收站。每块先持久化 pending 日志并在同一事务重验归档/用户保留，再处理文件。
      * 文件成功后把日志转 ready、图片转 quarantined；失败项恢复 active。任何崩溃点都有日志可对账。
      */
     suspend fun quarantineBatch(
         items: List<Pair<Long, String>>,
         onProgress: (done: Int, total: Int) -> Unit = { _, _ -> },
-    ): Int = quarantinePictures(items.map { it.first },PictureDeleteOptions(),items.firstOrNull()?.second.orEmpty(),onProgress=onProgress).selectedProcessed
+        options: PictureDeleteOptions = PictureDeleteOptions(),
+    ): Int = quarantinePictures(items.map { it.first },options,items.firstOrNull()?.second.orEmpty(),onProgress=onProgress).selectedProcessed
 
     /** 直接从原位置永久删除，不进入回收站。 */
     suspend fun deletePermanently(imageId: Long): Boolean =
@@ -183,8 +190,11 @@ class QuarantineManager(
      */
     suspend fun deletePermanentlyBatch(imageIds: List<Long>): Int = deletePicturesPermanently(imageIds,PictureDeleteOptions()).selectedProcessed
 
-    /** 从回收站恢复。 */
-    suspend fun restore(quarantineId: Long): Boolean = withContext(Dispatchers.IO) {
+    /** 从回收站恢复；从归档里删除的图恢复后回到归档（按设置重新隐藏） */
+    suspend fun restore(quarantineId: Long): Boolean =
+        restoreRecord(quarantineId).also { restored -> if (restored) runCatching { archive.sync() } }
+
+    private suspend fun restoreRecord(quarantineId: Long): Boolean = withContext(Dispatchers.IO) {
         val record = cleanupDao.getQuarantineById(quarantineId) ?: return@withContext false
         if (record.state != STATE_READY) return@withContext false
         val provider = accessManager.current()

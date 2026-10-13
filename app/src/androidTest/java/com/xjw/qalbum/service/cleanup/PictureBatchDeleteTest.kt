@@ -9,11 +9,17 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.xjw.qalbum.access.AccessManager
 import com.xjw.qalbum.data.db.AppDatabase
 import com.xjw.qalbum.data.db.entity.ImageEntity
+import com.xjw.qalbum.data.db.entity.QqOriginEntity
+import com.xjw.qalbum.data.db.entity.QqOriginPathEntity
+import com.xjw.qalbum.data.db.entity.QqSourceAccountEntity
+import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.data.repository.ImageRepository
 import com.xjw.qalbum.fileops.BoundFileOps
 import com.xjw.qalbum.fileops.FileOpsImpl
 import com.xjw.qalbum.fileops.IFileOps
 import com.xjw.qalbum.qq.QqCachePaths
+import com.xjw.qalbum.qq.QqSourceStatsBuilder
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
@@ -25,6 +31,7 @@ import org.junit.runner.RunWith
 import org.koin.core.context.GlobalContext
 import java.io.ByteArrayOutputStream
 import java.io.File
+import kotlinx.coroutines.CoroutineScope
 
 /**
  * 批量移入回收站 / 永久删除 / 清空回收站：整批处理后的文件、记录、图片状态与缩略图（文件操作在本进程内执行，
@@ -54,6 +61,52 @@ class PictureBatchDeleteTest {
         override fun moveFilesChecked(sources: Array<String>, targets: Array<String>, stamps: Array<String>): BooleanArray =
             FileOpsImpl.moveFilesChecked(sources, targets, stamps)
         override fun deleteFilesChecked(paths: Array<String>, stamps: Array<String>): BooleanArray = FileOpsImpl.deleteFilesChecked(paths, stamps)
+    }
+
+    @Test
+    fun jpegAliasIsQuarantinedRestoredAndProtectedWithItsFamily() = runBlocking {
+        val (families, ids) = seed(1)
+        val family = families.single()
+        val sources = db.qqSourceDao()
+        sources.putAccount(QqSourceAccountEntity("account", "Account", 1_000, 1))
+        sources.insertOrigins(listOf(QqOriginEntity("origin", "account", "group", "Photography", 2, "sender", "Alice", "", 1_000, "%032x".format(1))))
+        sources.insertPaths(family.files.map { QqOriginPathEntity(it.path, "origin") })
+        sources.reconcileLinks()
+        QqSourceStatsBuilder(db).rebuild {}
+        // .jpg 尚未扫描入库，仍应由精确缓存名发现并一起清理。
+        val jpg = File(family.raw.path + ".jpg")
+        family.raw.copyTo(jpg)
+        val expected = family.raw.readBytes()
+        val files = family.files + jpg
+        val ops = operations(manager())
+        var result = PictureDeleteResult()
+        val planner = PictureFamilyPlanner(db, root.path)
+        planner.batches(ids, PictureDeleteOptions(), bound) { groups -> result += ops.quarantineAll(groups, "测试", Long.MAX_VALUE) }
+        assertEquals(PictureDeleteResult(pictures = 1, files = 5, selectedProcessed = 1), result)
+        assertTrue(files.none { it.exists() })
+        val head = db.cleanupDao().listQuarantinePaged(0, 10).single()
+        val records = db.cleanupDao().getQuarantineGroup(head.groupId!!)
+        assertEquals(files.map { it.path }.toSet(), records.map { it.originalPath }.toSet())
+        assertTrue(ops.restore(records))
+        assertTrue(files.all { it.isFile })
+        assertArrayEquals(expected, jpg.readBytes())
+        assertEquals(0, count("SELECT COUNT(*) FROM quarantine"))
+
+        val jpgId = db.imageDao().getAnyByPaths(listOf(jpg.path)).single().id
+        assertEquals("Alice", sources.observeImageOrigins(jpgId).first().single().senderName)
+        // 归档（照常显示）后整组受保护
+        db.imageDao().archive(listOf(jpgId), hidden = false)
+        planner.batches(ids, PictureDeleteOptions(), bound) { groups ->
+            assertEquals(PictureFileGroup.Block.PROTECTED, groups.single().blocked)
+            assertEquals(PictureDeleteResult(skipped = 1), ops.permanentlyDeleteAll(groups))
+        }
+        assertTrue(files.all { it.isFile })
+        db.imageDao().unarchive(listOf(jpgId))
+        // 从 .jpg 本身发起清理也包含原图、预览图和两份缩略图。
+        planner.batches(listOf(jpgId), PictureDeleteOptions(), bound) { groups ->
+            assertEquals(PictureDeleteResult(pictures = 1, files = 5, selectedProcessed = 1), ops.permanentlyDeleteAll(groups))
+        }
+        assertTrue(files.none { it.exists() })
     }
 
     /** 像 Shizuku 那样改名移不进 App 目录：只能走复制再删原文件 */
@@ -132,8 +185,10 @@ class PictureBatchDeleteTest {
     private fun manager(): QuarantineManager {
         val koin = GlobalContext.get()
         val repository = ImageRepository(db, db.imageDao(), db.ocrDao(), db.dedupExclusionDao(), db.tagDao(), db.embeddingDao())
-        return QuarantineManager(context, koin.get(), db, db.imageDao(), db.cleanupDao(), koin.get(), koin.get(), repository)
+        return QuarantineManager(context, koin.get(), db, db.imageDao(), db.cleanupDao(), koin.get(), koin.get(), repository, archive())
     }
+
+    private fun archive() = ArchiveManager(db, GlobalContext.get().get<SettingsRepository>(), GlobalContext.get().get<CoroutineScope>())
 
     private suspend fun operations(manager: QuarantineManager, files: BoundFileOps = bound) =
         manager.linkedOperations(files, GlobalContext.get().get<AccessManager>().current())
@@ -177,6 +232,31 @@ class PictureBatchDeleteTest {
         assertEquals(0, count("SELECT COUNT(*) FROM quarantine"))
         assertEquals(120, count("SELECT COUNT(*) FROM images WHERE status = 'deleted'"))
         assertEquals(0, trash.walk().count { it.isFile })
+    }
+
+    @Test
+    fun archivedPicturesAreDeletedOnlyFromTheArchiveAndRestoreIntoIt() = runBlocking {
+        val (families, ids) = seed(3)
+        db.imageDao().archive(ids, hidden = true)
+        val ops = operations(manager())
+        val planner = PictureFamilyPlanner(db, root.path)
+        var result = PictureDeleteResult()
+        // 其他入口：归档的图不在可删除的范围里
+        planner.batches(ids, PictureDeleteOptions(), bound) { groups -> result += ops.quarantineAll(groups, "测试", Long.MAX_VALUE) }
+        assertEquals(PictureDeleteResult(), result)
+        assertTrue(families.all { family -> family.files.all { it.isFile } })
+        // 归档页删除：连同还没入库的高清缩略图一起移入回收站，归档标记保留
+        planner.batches(ids, PictureDeleteOptions(includeArchived = true), bound) { groups ->
+            result += ops.quarantineAll(groups, "测试", Long.MAX_VALUE, archived = true)
+        }
+        assertEquals(PictureDeleteResult(pictures = 3, files = 12, selectedProcessed = 3), result)
+        assertEquals(0, families.sumOf { family -> family.files.count { it.exists() } })
+        assertEquals(9, count("SELECT COUNT(*) FROM images WHERE status = 'quarantined' AND is_protected = 1"))
+        // 恢复后回到归档（整张图，包括后来登记的高清缩略图）
+        val head = db.cleanupDao().listQuarantinePaged(0, 10).first()
+        assertTrue(ops.restore(db.cleanupDao().getQuarantineGroup(head.groupId!!)))
+        archive().sync(visible = false)
+        assertEquals(4, count("SELECT COUNT(*) FROM images WHERE status = 'archived' AND is_protected = 1"))
     }
 
     @Test

@@ -148,6 +148,14 @@ class SettingsViewModel(
         persist { settings.setFastScrollEnabled(enabled) }
     }
 
+    /** 归档的图片也在图库中显示（关闭时只在归档页出现） */
+    val archiveVisible: StateFlow<Boolean> = settings.archiveVisible
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    fun setArchiveVisible(visible: Boolean) {
+        persist { settings.setArchiveVisible(visible) }
+    }
+
     // ---- 导出相册目录管理 ----
 
     val exportSubdirs: StateFlow<List<String>> = settings.exportSubdirs
@@ -338,7 +346,7 @@ class SettingsViewModel(
         persist { settings.resetDeleteModel() }
     }
 
-    // ---- 自动收藏配置（分析阶段，默认关闭，规则可自定义）----
+    // ---- 自动归档配置（分析阶段，默认关闭，规则可自定义）----
 
     val autoFavoriteConfig: StateFlow<AutoFavoriteConfig> = settings.autoFavoriteConfig
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AutoFavoriteConfig.DEFAULT)

@@ -10,7 +10,7 @@ import com.xjw.qalbum.domain.model.CleanupConfig
  * 优先级（高 → 低）：损坏 > 空白 > 重复 > 表情包 > 低分辨率 > 模糊 > 极小文件。
  * 返回命中的原因标签；都不命中返回 null（不纳入清理）。
  *
- * 注意：收藏 / 用户保留 / 敏感信息保护在 DAO 查询层排除，本函数不处理。
+ * 注意：归档 / 用户保留 / 敏感信息保护在 DAO 查询层排除，本函数不处理。
  */
 object CleanupRules {
     const val REASON_CORRUPT = "损坏"

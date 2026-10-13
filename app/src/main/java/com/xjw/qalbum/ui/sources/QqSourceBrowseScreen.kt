@@ -33,18 +33,18 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
+import androidx.compose.material.icons.outlined.Archive
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.CleaningServices
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Download
-import androidx.compose.material.icons.outlined.Favorite
-import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.HourglassTop
 import androidx.compose.material.icons.outlined.ImageNotSupported
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.SelectAll
+import androidx.compose.material.icons.outlined.Unarchive
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ButtonGroupDefaults
@@ -91,6 +91,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.paging.LoadState
 import androidx.paging.compose.collectAsLazyPagingItems
+import com.xjw.qalbum.data.db.dao.QqArchiveCounts
 import com.xjw.qalbum.data.db.dao.QqContent
 import com.xjw.qalbum.data.db.dao.QqSourceFacet
 import com.xjw.qalbum.data.db.entity.ImageEntity
@@ -118,6 +119,7 @@ import com.xjw.qalbum.ui.components.ToolbarIconAction
 import com.xjw.qalbum.ui.components.ToolbarPrimaryAction
 import com.xjw.qalbum.ui.components.WavyProgress
 import com.xjw.qalbum.ui.gallery.GalleryTimelineItem
+import com.xjw.qalbum.ui.gallery.archivedText
 import kotlinx.coroutines.launch
 import org.koin.androidx.compose.koinViewModel
 import org.koin.core.parameter.parametersOf
@@ -133,8 +135,8 @@ private data class SourcePreview(val images: List<ImageEntity>, val start: Int)
  * - 会话：顶部成员筛选条（群名片 / 昵称、数量、占用空间），可展开全部成员并搜索；
  * - 发送人：按会话筛选；全部来源：不再细分；
  * - 排序：日期 / 大小 × 升序 / 降序，网格带分组标题；
- * - 长按进入多选（可拖动连续勾选），浮动工具栏收藏 / 保存 / 删除；
- * - 看图页可收藏、删除，上滑查看详情。
+ * - 长按进入多选（可拖动连续勾选），浮动工具栏归档 / 保存 / 删除；右上角菜单可把这里（或当前筛选）的图片整体归档或清理；
+ * - 看图页可归档、删除，上滑查看详情。
  */
 @Composable
 fun QqSourceBrowseScreen(
@@ -158,6 +160,8 @@ fun QqSourceBrowseScreen(
     val confirmation by viewModel.confirmation.collectAsState()
     val progress by viewModel.progress.collectAsState()
     val deleteProgress by viewModel.deleteProgress.collectAsState()
+    val archiveRequest by viewModel.archiveRequest.collectAsState()
+    val archiveVisible by viewModel.archiveVisible.collectAsState()
     val message by viewModel.message.collectAsState()
     val repositoryMessage by viewModel.repositoryMessage.collectAsState()
     val exportSubdirs by viewModel.exportSubdirs.collectAsState()
@@ -266,9 +270,15 @@ fun QqSourceBrowseScreen(
                                     }
                                     DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                                         DropdownMenuItem(
+                                            text = { Text(if (filter == null) "归档这里的全部图片…" else "归档当前筛选的图片…") },
+                                            leadingIcon = { Icon(Icons.Outlined.Archive, contentDescription = null) },
+                                            enabled = progress == null && deleteProgress == null && base != null,
+                                            onClick = { menuOpen = false; viewModel.requestScopeArchive() },
+                                        )
+                                        DropdownMenuItem(
                                             text = { Text(if (filter == null) "清理这里的全部图片…" else "清理当前筛选的图片…") },
                                             leadingIcon = { Icon(Icons.Outlined.CleaningServices, contentDescription = null) },
-                                            enabled = progress == null && base != null,
+                                            enabled = progress == null && deleteProgress == null && base != null,
                                             onClick = { menuOpen = false; viewModel.requestScopeTrash() },
                                         )
                                     }
@@ -384,11 +394,12 @@ fun QqSourceBrowseScreen(
                 visible = selectionMode,
                 modifier = Modifier.align(Alignment.BottomCenter),
             ) {
-                ToolbarIconAction(Icons.Outlined.FavoriteBorder, "收藏", onClick = {
+                ToolbarIconAction(Icons.Outlined.Archive, "归档", onClick = {
                     val ids = selectedIds
-                    viewModel.setFavorite(ids, true) { count ->
-                        scope.launch { snackbar.showSnackbar(if (count > 0) "已收藏 $count 张" else "所选图片都已收藏") }
+                    viewModel.setArchived(ids, true) { visible ->
+                        scope.launch { snackbar.showSnackbar(archivedText(ids.size, visible)) }
                         clearSelection()
+                        items.refresh()
                     }
                 })
                 ToolbarIconAction(Icons.Outlined.Download, "保存到相册", onClick = { showSave = true })
@@ -447,6 +458,17 @@ fun QqSourceBrowseScreen(
         )
     }
 
+    archiveRequest?.let { request ->
+        ScopeArchiveDialog(
+            counts = request.counts,
+            title = title,
+            filterName = filter?.let { facetDisplayName(it, if (target.kind == SourceKind.SENDER) SourceKind.CONVERSATION else SourceKind.SENDER) },
+            hidden = !archiveVisible,
+            onConfirm = viewModel::confirmScopeArchive,
+            onDismiss = viewModel::dismissScopeArchive,
+        )
+    }
+
     confirmation?.let { request ->
         ScopeTrashDialog(
             request = request,
@@ -462,7 +484,7 @@ fun QqSourceBrowseScreen(
 
     preview?.let { current ->
         var confirmDeleteFor by remember { mutableStateOf<ImageEntity?>(null) }
-        // 收藏状态变了要重新取版本条（显示的可能是同一张图的其他版本）
+        // 归档状态变了要重新取版本条（显示的可能是同一张图的其他版本）
         var revision by remember { mutableIntStateOf(0) }
         FullScreenImagePager(
             images = current.images,
@@ -485,13 +507,22 @@ fun QqSourceBrowseScreen(
             bottomBar = { image ->
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                     PreviewAction(
-                        icon = if (image.isFavorite) Icons.Outlined.Favorite else Icons.Outlined.FavoriteBorder,
-                        label = if (image.isFavorite) "已收藏" else "收藏",
+                        icon = if (image.isArchived) Icons.Outlined.Unarchive else Icons.Outlined.Archive,
+                        label = if (image.isArchived) "取消归档" else "归档",
                         onClick = {
-                            val next = !image.isFavorite
-                            viewModel.setFavorite(listOf(image.id), next) { revision++ }
-                            preview = preview?.let { state ->
-                                state.copy(images = state.images.map { if (it.id == image.id) it.copy(isFavorite = next) else it })
+                            val next = !image.isArchived
+                            viewModel.setArchived(listOf(image.id), next) { visible ->
+                                if (visible) {
+                                    revision++
+                                    preview = preview?.let { state ->
+                                        state.copy(images = state.images.map { if (it.id == image.id) it.copy(isArchived = next) else it })
+                                    }
+                                } else {
+                                    // 归档后不在这里显示：像删除那样移出预览
+                                    Toast.makeText(context, archivedText(1, visible = false), Toast.LENGTH_SHORT).show()
+                                    preview = preview?.withoutImage(image)
+                                    items.refresh()
+                                }
                             }
                         },
                     )
@@ -745,6 +776,57 @@ private fun FilterSheet(
  * 按范围整体移入回收站的确认：选择清理图片 / 缩略图，是否包含共用图片、是否连带同一张图的其他缓存版本。
  * 数字直接查库得出；逐个文件的核对放到后台执行时，不在弹窗里等待。
  */
+/** 按范围整体归档的确认：共用的图片照样归档，同一张图的其他版本一起 */
+@Composable
+private fun ScopeArchiveDialog(
+    counts: QqArchiveCounts?,
+    title: String,
+    filterName: String?,
+    hidden: Boolean,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Outlined.Archive, contentDescription = null) },
+        title = { Text("归档这些图片？") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    if (filterName != null) "「$title」中「$filterName」的全部图片" else "「$title」中的全部图片",
+                    style = MaterialTheme.typography.bodyLarge,
+                )
+                Spacer(Modifier.height(4.dp))
+                if (counts == null) {
+                    WavyProgress(fraction = null)
+                } else if (counts.images + counts.thumbs == 0) {
+                    InfoLine("这里的图片都已归档")
+                } else {
+                    InfoLine(
+                        "图片 ${formatCountExact(counts.images)} 张 · ${formatBytes(counts.imageBytes)}，" +
+                            "QQ 缩略图 ${formatCountExact(counts.thumbs)} 张 · ${formatBytes(counts.thumbBytes)}",
+                        MaterialTheme.colorScheme.primary,
+                    )
+                    if (counts.shared > 0) InfoLine("其中 ${formatCountExact(counts.shared)} 张其他聊天也在用，一并归档")
+                }
+                Text(
+                    "同一张图的原图、预览图和缩略图一起归档，之后任何清理都不会删除它们" +
+                        if (hidden) "；归档后只在「图库 → 归档」里显示。" else "。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm, enabled = counts != null && counts.images + counts.thumbs > 0) {
+                Text(if (counts == null) "统计中…" else "归档")
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
+
 @Composable
 private fun ScopeTrashDialog(
     request: QqTrashConfirmation,
@@ -800,7 +882,7 @@ private fun ScopeTrashDialog(
                                 if (request.includeShared) "，将一并清理" else "，将跳过",
                         )
                     }
-                    if (counts.protectedCount > 0) InfoLine("${formatCountExact(counts.protectedCount)} 张已收藏或保留，将跳过")
+                    if (counts.protectedCount > 0) InfoLine("${formatCountExact(counts.protectedCount)} 张已归档或保留，将跳过")
                 }
                 Text(
                     "先移入回收站，保留期内可恢复；在后台进行，可以离开本页。删除 QQ 缓存后，聊天里对应的图片可能需要重新下载，过期的将无法再查看。",

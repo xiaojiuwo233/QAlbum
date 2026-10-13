@@ -29,13 +29,22 @@ class QqCachePathsTest {
     @Test
     fun `同一张图的原图、预览图与缩略图得到同一个家族键`() {
         repeat(10_000) { index ->
-            val paths = QqCachePaths.relativePaths(md5("qq-cache-synthetic-$index")).map { "$root/$it" }
+            val paths = QqCachePaths.relativePaths(md5("qq-cache-synthetic-$index")).flatMap { listOf("$root/$it", "$root/$it.jpg") }
             val keys = paths.map { QqCachePaths.familyKey(it) }
             assertNotNull(keys.first())
             assertEquals(1, keys.toSet().size)
             // 从任一版本都能推出完整的家族路径
             paths.forEach { path -> assertEquals(paths.toSet(), QqCachePaths.familyPaths(path).toSet()) }
         }
+    }
+
+    @Test
+    fun `chatraw 同名 jpg 使用扩展名前的分桶和家族键`() {
+        val path = "$root/chatraw/1f9/Cache_3224b49bbd8391f9.jpg"
+        assertNotNull(QqCachePaths.familyKey(path))
+        assertEquals(QqCachePaths.familyKey(path.removeSuffix(".jpg")), QqCachePaths.familyKey(path))
+        assertEquals(8, QqCachePaths.familyPaths(path).size)
+        assertEquals(true, path in QqCachePaths.familyPaths(path))
     }
 
     @Test
@@ -62,6 +71,10 @@ class QqCachePathsTest {
             "$root/chatimg/_dp/Cache_1_dp",
             "$root/chatimg/1/Cache_1_hd",
             "$root/chatimg/zzz/Cache_50539d06b4b71a2f",
+            "$root/chatraw/jpg/Cache_3224b49bbd8391f9.jpg",
+            "$root/chatraw/1f9/Cache_3224b49bbd8391f9.jpg.jpg",
+            "$root/chatraw/1f9/Cache_3224b49bbd8391f9_hd.jpg",
+            "$root/chatraw/1f9/Cache_3224b49bbd8391f9.png",
             "$root/temp/x1.jpg",
             "/sdcard/DCIM/IMG_0001.jpg",
         ).forEach { assertNull(it, QqCachePaths.familyKey(it)) }
@@ -87,8 +100,8 @@ class QqCachePathsTest {
         names.forEach { digits ->
             val plain = "Cache_$digits"
             folders.forEach { folder ->
-                listOf(plain, "${plain}_hd", "${plain}x", digits).forEach { name ->
-                    val buckets = listOf(name.removeSuffix("_hd").takeLast(3), "abc", "")
+                listOf(plain, "${plain}_hd", "$plain.jpg", "${plain}_hd.jpg", "${plain}x", digits).forEach { name ->
+                    val buckets = listOf(name.removeSuffix(".jpg").removeSuffix("_hd").takeLast(3), "abc", "")
                     buckets.forEach { bucket ->
                         val path = if (folder.equals("temp", ignoreCase = true)) "$root/$folder/$name.thumb_1.tmp.from_orig_avif_aio.ready"
                             else "$root/$folder/$bucket/$name"
@@ -115,13 +128,13 @@ class QqCachePathsTest {
             else -> return null
         }
         val shift = deltas[folder] ?: return null
-        val match = Regex("^Cache_(-?[0-9a-f]{1,16})(_hd)?$").matchEntire(name) ?: return null
+        val match = Regex("^Cache_(-?[0-9a-f]{1,16})(_hd)?(\\.jpg)?$").matchEntire(name) ?: return null
         val hd = match.groupValues[2].isNotEmpty()
         if (hd && folder != "chatthumb") return null
         val digits = match.groupValues[1]
         val value = digits.toLongOrNull(16) ?: return null
         if (java.lang.Long.toString(value, 16) != digits) return null
-        if (name.removeSuffix("_hd").takeLast(3) != bucket) return null
+        if (name.removeSuffix(".jpg").removeSuffix("_hd").takeLast(3) != bucket) return null
         return value xor shift
     }
 

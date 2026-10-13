@@ -9,6 +9,7 @@ import com.xjw.qalbum.data.db.entity.OcrTextEntity
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.data.repository.ImageRepository
 import com.xjw.qalbum.domain.model.GallerySort
+import com.xjw.qalbum.service.cleanup.ArchiveManager
 import com.xjw.qalbum.service.cleanup.ImageFileManager
 import com.xjw.qalbum.service.cleanup.QuarantineManager
 import com.xjw.qalbum.service.cleanup.PictureDeleteOptions
@@ -26,13 +27,14 @@ import kotlinx.coroutines.launch
  *
  * 时间线不再全量装载 id（200 万行时查询秒级、装箱 List 常驻数十 MB），改为以当前图为锚点的
  * keyset **窗口**（[ImageRepository.timelineWindowAround]，前后各 [ImageRepository.TIMELINE_WINDOW_RADIUS]）：
- * 滑近窗口任一端时用端点图为新锚点续页；收藏模式的 id 集由用户手动收藏产生、规模小，仍全量装载。
+ * 滑近窗口任一端时用端点图为新锚点续页；归档页的 id 集由用户手动归档产生、规模小，仍全量装载。
  * 当前图的完整实体按 index 用 [ImageRepository.getById] 按需加载。
  */
 class ImageDetailViewModel(
     private val imageRepository: ImageRepository,
     private val imageFileManager: ImageFileManager,
     private val quarantineManager: QuarantineManager,
+    private val archive: ArchiveManager,
     private val settings: SettingsRepository,
 ) : ViewModel() {
 
@@ -49,7 +51,8 @@ class ImageDetailViewModel(
      */
     private val _operationBusy = MutableStateFlow(false)
     val operationBusy: StateFlow<Boolean> = _operationBusy.asStateFlow()
-    private var favoritesOnly = false
+    /** 从归档页打开：只在归档的图里左右滑动 */
+    private var archiveOnly = false
     private var sort: GallerySort = GallerySort.DATE_DESC
     /** 与图库同一设置：合并显示时窗口里只有家族代表图，当前页可在各版本间切换 */
     private var stacked = false
@@ -63,11 +66,11 @@ class ImageDetailViewModel(
     private var headExhausted = false
     private var tailExhausted = false
 
-    fun load(imageId: Long, favoritesOnly: Boolean = false) {
-        val key = imageId to favoritesOnly
+    fun load(imageId: Long, archiveOnly: Boolean = false) {
+        val key = imageId to archiveOnly
         if (loadedKey == key) return
         loadedKey = key
-        this.favoritesOnly = favoritesOnly
+        this.archiveOnly = archiveOnly
         headExhausted = false
         tailExhausted = false
         viewModelScope.launch {
@@ -77,9 +80,9 @@ class ImageDetailViewModel(
                 return@launch
             }
             val ocr = imageRepository.getOcr(imageId)
-            stacked = !favoritesOnly && settings.galleryStackVariants.first()
-            if (favoritesOnly) {
-                val ids = imageRepository.favoriteTimelineIds()
+            stacked = !archiveOnly && settings.galleryStackVariants.first()
+            if (archiveOnly) {
+                val ids = imageRepository.archiveTimelineIds(archive.pageStatuses.first())
                 val index = ids.indexOf(imageId)
                 if (index < 0) {
                     _state.value = ImageDetailState.NotFound
@@ -159,19 +162,32 @@ class ImageDetailViewModel(
         }
     }
 
-    fun toggleFavorite() {
+    /**
+     * 归档 / 取消归档当前图（连同同一张图的其他版本）。之后若它不再属于这个看图列表（不显示归档时在图库里归档、
+     * 在归档页取消归档），像删除那样切到下一张，已无图则回调 [onExhausted]；否则只局部翻转标记。
+     */
+    fun toggleArchive(onExhausted: () -> Unit = {}) {
         val image = (_state.value as? ImageDetailState.Ready)?.current ?: return
+        if (!_operationBusy.compareAndSet(expect = false, update = true)) return
         viewModelScope.launch {
-            val next = !image.isFavorite
-            imageRepository.setFavorite(image.id, next)
-            _toast.value = if (next) "已收藏" else "已取消收藏"
-            // 只局部更新当前实体，不重建窗口；收藏模式下取消收藏也留在当前页
-            val latest = _state.value as? ImageDetailState.Ready ?: return@launch
-            if (latest.current.id == image.id) {
-                _state.value = latest.copy(
-                    current = latest.current.copy(isFavorite = next),
-                    variants = latest.variants.map { if (it.id == image.id) it.copy(isFavorite = next) else it },
-                )
+            try {
+                val pageId = currentPageId() ?: image.id
+                val next = !image.isArchived
+                if (next) archive.archive(listOf(image.id)) else archive.unarchive(listOf(image.id))
+                _toast.value = if (next) "已归档" else "已取消归档"
+                val leaves = if (archiveOnly) !next else next && !settings.archiveVisible.first()
+                if (leaves) {
+                    afterRemoval(pageId, image, onExhausted)
+                    return@launch
+                }
+                val latest = _state.value as? ImageDetailState.Ready ?: return@launch
+                if (latest.current.id == image.id) {
+                    fun flip(entity: ImageEntity) =
+                        if (entity.id == image.id || (image.variantGroup != null && entity.variantGroup == image.variantGroup)) entity.copy(isArchived = next) else entity
+                    _state.value = latest.copy(current = flip(latest.current), variants = latest.variants.map(::flip))
+                }
+            } finally {
+                _operationBusy.value = false
             }
         }
     }
@@ -205,7 +221,9 @@ class ImageDetailViewModel(
                 }
                 if (alsoTrash) {
                     val pageId = currentPageId() ?: image.id
-                    val trashed = quarantineManager.quarantine(image.id, "保存后移入回收站")
+                    val trashed = quarantineManager.quarantinePictures(
+                        listOf(image.id), PictureDeleteOptions(includeArchived = archiveOnly), "保存后移入回收站",
+                    ).selectedProcessed > 0
                     _toast.value = if (trashed) "已保存并移入回收站" else "已保存（移入回收站失败）"
                     if (trashed) afterRemoval(pageId, image, onExhausted)
                 } else {
@@ -236,7 +254,7 @@ class ImageDetailViewModel(
         viewModelScope.launch {
             try {
                 val pageId = currentPageId() ?: image.id
-                val result = quarantineManager.quarantinePictures(listOf(image.id),options,"用户手动删除")
+                val result = quarantineManager.quarantinePictures(listOf(image.id),options.copy(includeArchived = archiveOnly),"用户手动删除")
                 val ok=result.selectedProcessed>0
                 if (ok) {
                     _toast.value = result.message()
@@ -256,7 +274,7 @@ class ImageDetailViewModel(
         viewModelScope.launch {
             try {
                 val pageId = currentPageId() ?: image.id
-                val result=quarantineManager.deletePicturesPermanently(listOf(image.id),options)
+                val result=quarantineManager.deletePicturesPermanently(listOf(image.id),options.copy(includeArchived = archiveOnly))
                 val ok=result.selectedProcessed>0
                 if (ok) {
                     _toast.value = result.message(permanent=true)
@@ -348,9 +366,9 @@ class ImageDetailViewModel(
         maybeExtendWindow()
     }
 
-    /** 滑近窗口任一端（不足 [EXTEND_THRESHOLD]）时以端点图为新锚点续一页；收藏模式 ids 本就是全量，无需扩窗 */
+    /** 滑近窗口任一端（不足 [EXTEND_THRESHOLD]）时以端点图为新锚点续一页；归档页 ids 本就是全量，无需扩窗 */
     private fun maybeExtendWindow() {
-        if (favoritesOnly) return
+        if (archiveOnly) return
         if (extendJob?.isActive == true) return
         val ready = _state.value as? ImageDetailState.Ready ?: return
         val nearHead = !headExhausted && ready.currentIndex < EXTEND_THRESHOLD
@@ -418,7 +436,7 @@ sealed class ImageDetailState {
     data object NotFound : ImageDetailState()
 
     /**
-     * @param ids 当前持有的时间线 id 窗口（收藏模式为全量收藏 id）
+     * @param ids 当前持有的时间线 id 窗口（归档页为全量归档 id）
      * @param totalCount 时间线总数（COUNT 快照，随删除自减；与 [ids] 非同一快照，仅供「第 x/N 张」展示）
      * @param rankOffset `ids[0]` 在完整时间线中的 0-based 序号（近似快照，仅供展示）
      */

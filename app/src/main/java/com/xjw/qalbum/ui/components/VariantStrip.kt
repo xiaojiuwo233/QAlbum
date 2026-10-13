@@ -112,6 +112,6 @@ private fun VariantThumb(image: ImageEntity, selected: Boolean, onClick: () -> U
 internal fun variantLabel(image: ImageEntity): String = when (image.sourceType) {
     "chatraw" -> "原图"
     "chatimg" -> "预览图"
-    "chatthumb" -> if (image.filename.endsWith("_hd")) "高清缩略图" else "缩略图"
+    "chatthumb" -> if (image.filename.removeSuffix(".jpg").endsWith("_hd")) "高清缩略图" else "缩略图"
     else -> sourceLabel(image.sourceType)
 }

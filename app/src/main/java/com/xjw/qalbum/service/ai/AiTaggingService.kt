@@ -55,7 +55,7 @@ class AiTaggingService(
         val parsed = AiTagResponseParser.parse(resp.content) ?: return Result.Failed("解析 AI 响应失败")
 
         // 写入标签 + 关联（标签在「标签管理页」可见可批量清理）。
-        // 不再因 risk 标签自动收藏：自动收藏改由「设置 → 分析 → 自动收藏」显式控制。
+        // 不再因 risk 标签自动归档：自动归档改由「设置 → 分析 → 自动归档」显式控制。
         val saved = db.withTransaction {
             if (imageDao.markAiTagDone(image.id, image.size, image.mtime) != 1) return@withTransaction false
             tagDao.clearAiTags(imageId)

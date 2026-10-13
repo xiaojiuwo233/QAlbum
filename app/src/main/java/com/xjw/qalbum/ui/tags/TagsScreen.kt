@@ -24,13 +24,13 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Label
 import androidx.compose.material.icons.automirrored.outlined.LabelOff
+import androidx.compose.material.icons.outlined.Archive
 import androidx.compose.material.icons.outlined.Bookmark
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.DeleteSweep
-import androidx.compose.material.icons.outlined.Favorite
-import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.GppMaybe
 import androidx.compose.material.icons.outlined.SearchOff
+import androidx.compose.material.icons.outlined.Unarchive
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -76,6 +76,7 @@ import com.xjw.qalbum.ui.components.ShapeIcon
 import com.xjw.qalbum.ui.components.ToolbarIconAction
 import com.xjw.qalbum.ui.components.ToolbarPrimaryAction
 import com.xjw.qalbum.ui.gallery.GalleryTimelineItem
+import com.xjw.qalbum.ui.gallery.archivedText
 import org.koin.androidx.compose.koinViewModel
 
 /**
@@ -83,7 +84,7 @@ import org.koin.androidx.compose.koinViewModel
  *
  * - 一级：全部标签（AI 标签、敏感信息、「用户保留」），显示活跃图片数，可搜索。
  * - 二级：某标签下的图片按日期分组（与图库同一网格：捏合调列、长按多选并可拖动连续勾选）；
- *   单击全屏预览，可收藏 / 取消标签 / 删除；多选后批量取消标签或移入回收站，
+ *   单击全屏预览，可归档 / 取消标签 / 删除；多选后批量取消标签或移入回收站，
  *   未选择时可把该标签下全部图片移入回收站（按块处理，不一次性装载）。
  */
 @Composable
@@ -356,11 +357,17 @@ private fun TagImagesContent(
                     horizontalArrangement = Arrangement.SpaceEvenly,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    val isFav = current.isFavorite
+                    val archived = current.isArchived
                     PreviewAction(
-                        icon = if (isFav) Icons.Outlined.Favorite else Icons.Outlined.FavoriteBorder,
-                        label = if (isFav) "已收藏" else "收藏",
-                        onClick = { viewModel.setFavorite(current.id, !isFav) },
+                        icon = if (archived) Icons.Outlined.Unarchive else Icons.Outlined.Archive,
+                        label = if (archived) "取消归档" else "归档",
+                        onClick = {
+                            viewModel.setArchived(current.id, !archived) { visible ->
+                                Toast.makeText(context, if (archived) "已取消归档" else archivedText(1, visible), Toast.LENGTH_SHORT).show()
+                                // 不在图库显示归档时，它会从这个标签的列表里消失
+                                if (!visible) preview = null
+                            }
+                        },
                     )
                     PreviewAction(
                         icon = Icons.AutoMirrored.Outlined.LabelOff,
@@ -383,7 +390,7 @@ private fun TagImagesContent(
                     ConfirmDialog(
                         icon = Icons.Outlined.Delete,
                         title = "移入回收站？",
-                        text = "这张图片会移入回收站，保留期内可恢复。收藏或标记保留的图片会被跳过。",
+                        text = "这张图片会移入回收站，保留期内可恢复。已归档或标记保留的图片会被跳过。",
                         confirmLabel = "移入回收站",
                         destructive = true,
                         onDismiss = { confirmDelete = null },
@@ -422,7 +429,7 @@ private fun TagImagesContent(
         ConfirmDialog(
             icon = Icons.Outlined.DeleteSweep,
             title = "全部移入回收站？",
-            text = "将把标签「${tag.name}」下的全部 ${tag.count} 张图片移入回收站，保留期内可恢复。收藏或标记保留的图片会被跳过。",
+            text = "将把标签「${tag.name}」下的全部 ${tag.count} 张图片移入回收站，保留期内可恢复。已归档或标记保留的图片会被跳过。",
             confirmLabel = "全部移入",
             destructive = true,
             onDismiss = { showTrashAll = false },

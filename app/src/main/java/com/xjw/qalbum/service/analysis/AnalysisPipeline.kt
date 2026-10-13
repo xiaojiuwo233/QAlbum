@@ -57,7 +57,7 @@ import kotlin.math.abs
  * 5. AI_TAG / EMBEDDING —— 需全局 AI 服务可用
  *
  * SCORE 前置于 OCR/AI：评分只依赖 DB 里已累积的结果，故放在慢的 OCR 之前先刷新、不被逐图
- * OCR 阻塞；OCR 每批完成后立即定向刷新该批评分与自动收藏。
+ * OCR 阻塞；OCR 每批完成后立即定向刷新该批评分与自动归档。
  *
  * 承载与生命周期：数小时级长任务应经 [com.xjw.qalbum.worker.AnalysisWorker]（前台通知保活）
  * 直接 suspend 调 [runOnce]，取消沿调用链传导；[start]/[cancel] 是进程内 scope 的兼容入口。
@@ -669,15 +669,16 @@ class AnalysisPipeline(
         // 全库遍历主图，重新计算 info_score / delete_score；**只有分数变化的行才写回**（脏检查）：
         // 此前每轮无条件重写全部 hash_done 行，200w 规模下每轮 200w 带双索引 UPDATE ≈ GB 级 WAL 写放大
         // 评分时会读取关联的 OCR 结果（hasPhone / hasAmount 等）作为强信号
-        // 自动收藏改为可选特性：仅当用户在设置中开启后，按其自定义规则命中才收藏
+        // 自动归档为可选特性：仅当用户在设置中开启后，按其自定义规则命中才归档（连同同一张图的其他版本）
         val autoFav = settings.autoFavoriteConfig.first()
+        val hideArchived = !settings.archiveVisible.first()
         var processed = 0
         var written = 0
         var afterId = 0L
         while (true) {
             val page = imageDao.pagePrimaryHashed(afterId, SCORE_BATCH)
             if (page.isEmpty()) break
-            written += db.withTransaction { refreshScores(page.map { it.id }, autoFav) }
+            written += db.withTransaction { refreshScores(page.map { it.id }, autoFav, hideArchived) }
             afterId = page.last().id
             processed += page.size
             _progress.value = AnalysisProgress(AnalysisPhase.SCORE, processed, processed)
@@ -689,21 +690,22 @@ class AnalysisPipeline(
     private suspend fun saveOcrAndRefreshScores(writes: List<OcrWrite>) {
         if (writes.isEmpty()) return
         val autoFav = settings.autoFavoriteConfig.first()
+        val hideArchived = !settings.archiveVisible.first()
         db.withTransaction {
             ocrDao.saveOcrResultsBatch(writes)
-            refreshScores(writes.map { it.imageId }, autoFav)
+            refreshScores(writes.map { it.imageId }, autoFav, hideArchived)
         }
     }
 
-    private suspend fun refreshScores(ids: List<Long>, autoFav: AutoFavoriteConfig): Int {
+    private suspend fun refreshScores(ids: List<Long>, autoFav: AutoFavoriteConfig, hideArchived: Boolean): Int {
         val images = imageDao.getByIds(ids).filter { it.hashDone }
         val ocrMap = ocrDao.getByImageIds(images.map { it.id }).associateBy { it.imageId }
         val writes = ArrayList<ScoreWrite>()
         val favorites = ArrayList<Long>()
         for (image in images) {
             val ocr = ocrMap[image.id]
-            val favorite = autoFav.enabled && !image.isFavorite && ocr != null && matchesAutoFavorite(autoFav, ocr)
-            val scored = if (favorite) image.copy(isFavorite = true) else image
+            val favorite = autoFav.enabled && !image.isArchived && ocr != null && matchesAutoFavorite(autoFav, ocr)
+            val scored = if (favorite) image.copy(isArchived = true) else image
             val info = ScoringEngine.computeInfoScore(scored, ocr)
             val delete = ScoringEngine.computeDeleteScore(scored, ocr)
             if (!scoreEquals(image.infoScore, info) || !scoreEquals(image.deleteScore, delete)) {
@@ -712,14 +714,14 @@ class AnalysisPipeline(
             if (favorite) favorites += image.id
         }
         if (writes.isNotEmpty()) imageDao.saveScoresBatch(writes)
-        favorites.chunked(FAVORITE_CHUNK).forEach { imageDao.favoriteByIds(it) }
+        if (favorites.isNotEmpty()) imageDao.archive(favorites, hideArchived)
         return writes.size
     }
 
     /** 评分脏检查的相等判定（容差比较，避免浮点表示误差造成的无效重写）。 */
     private fun scoreEquals(old: Float, new: Float): Boolean = abs(old - new) < 1e-4f
 
-    /** 判断一条 OCR 结果是否命中用户启用的任一自动收藏规则 */
+    /** 判断一条 OCR 结果是否命中用户启用的任一自动归档规则 */
     private fun matchesAutoFavorite(config: AutoFavoriteConfig, ocr: OcrTextEntity): Boolean =
         (config.idNumber && ocr.hasIdNumber) ||
             (config.orderNo && ocr.hasOrderNo) ||
@@ -751,9 +753,6 @@ class AnalysisPipeline(
 
         /** 无限模式（limit<=0）的待办 id 分页大小：循环消费直到取空，不一次物化全量 id 列表。 */
         private const val UNLIMITED_PAGE = 4096
-
-        /** 自动收藏批量写入的分块大小（< SQLite 变量上限）。 */
-        private const val FAVORITE_CHUNK = 500
 
         /** 基础设施失败连续张数达到该值即中止本轮（Shizuku/Root 整体不可用）。 */
         private const val INFRA_ABORT_STREAK = 20

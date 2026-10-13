@@ -12,6 +12,7 @@ import com.xjw.qalbum.service.ai.SemanticIndex
 import com.xjw.qalbum.service.ai.SemanticSearchEngine
 import com.xjw.qalbum.service.analysis.AnalysisPipeline
 import com.xjw.qalbum.service.analysis.DuplicateDetector
+import com.xjw.qalbum.service.cleanup.ArchiveManager
 import com.xjw.qalbum.service.cleanup.CleanupController
 import com.xjw.qalbum.service.cleanup.CleanupRecommender
 import com.xjw.qalbum.service.cleanup.QuarantineManager
@@ -105,11 +106,13 @@ val appModule = module {
     single { FileOpsClient(context = get()) }
     single { ScanTransportFactory(accessManager = get(), fileOpsClient = get()) }
     single {
+        val archive = get<ArchiveManager>()
         ScanPipeline(
             db = get(),
             imageDao = get(),
             dirSnapshotDao = get(),
             transportFactory = get(),
+            afterScan = { archive.sync() },
         )
     }
     single { ScanController(settings = get(), pipeline = get()) }
@@ -161,9 +164,11 @@ val appModule = module {
             settings = get(),
             fileOpsClient = get(),
             imageRepository = get(),
+            archive = get(),
         )
     }
     single { ThumbnailTrashManager(imageDao = get()) }
+    single { ArchiveManager(db = get(), settings = get(), appScope = get()) }
     single { com.xjw.qalbum.service.indexer.PictureVariantIndexer(db = get(), settings = get()) }
     single { ImageFileManager(context = get(), accessManager = get(), imageDao = get()) }
     single { CleanupController(recommender = get(), quarantineManager = get(), cleanupDao = get()) }
@@ -214,6 +219,7 @@ val appModule = module {
             imageRepository = get(),
             imageFileManager = get(),
             quarantineManager = get(),
+            archive = get(),
             settings = get(),
             appScope = get(),
         )
@@ -223,6 +229,7 @@ val appModule = module {
             imageRepository = get(),
             imageFileManager = get(),
             quarantineManager = get(),
+            archive = get(),
             settings = get(),
         )
     }
@@ -236,6 +243,7 @@ val appModule = module {
             settings = get(),
             tagDao = get(),
             imageFileManager = get(),
+            archive = get(),
             appScope = get(),
         )
     }
@@ -252,6 +260,7 @@ val appModule = module {
             imageRepository = get(),
             cleanupController = get(),
             imageFileManager = get(),
+            archive = get(),
             settings = get(),
             appScope = get(),
         )
@@ -276,6 +285,7 @@ val appModule = module {
             images = get(),
             imageFiles = get(),
             quarantine = get(),
+            archive = get(),
             appScope = get(),
         )
     }

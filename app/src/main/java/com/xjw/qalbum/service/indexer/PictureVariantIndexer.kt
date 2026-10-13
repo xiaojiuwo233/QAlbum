@@ -1,5 +1,6 @@
 package com.xjw.qalbum.service.indexer
 
+import androidx.room.withTransaction
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.xjw.qalbum.data.db.AppDatabase
 import com.xjw.qalbum.data.db.ImageVariantSql
@@ -16,7 +17,7 @@ import timber.log.Timber
 /**
  * 图片家族回填（升级后执行一次；新扫描的图片入库时已带家族键）。
  *
- * 1. 撤掉家族索引与触发器，按 id 分页算出每张图的家族键并写入（几千行一个短事务），写完恢复；键已写过（v18 起）则跳过；
+ * 1. 按 id 分页回填家族键（几千行一个短事务）；首次回填暂时撤掉索引与触发器，已有旧键时只补 .jpg；
  * 2. 按 id 段重算家族的代表图、版本数与合并显示时的大小，不属于家族的图大小补成自身大小
  *    （只写有变化的行，此时触发器已在维护后续变化）；
  * 3. 解散旧版查重把同一张图的不同版本当成的「重复组」。
@@ -44,11 +45,15 @@ class PictureVariantIndexer(
                 ?.takeIf { it > 0 } ?: DEFAULT_CHECKPOINT_PAGES
             sql.quietTransaction { sql.pragma("wal_autocheckpoint = $BULK_CHECKPOINT_PAGES") }
             try {
-                val keyed = if (indexed < KEYS_VERSION) writeKeys(dao, sql) else null
+                val keyed = if (indexed < KEYS_VERSION) writeKeys(dao, sql, jpegOnly = indexed >= 1) else null
                 val keysDone = System.currentTimeMillis()
                 recompute(dao, sql)
                 val recomputed = System.currentTimeMillis()
                 sql.quietTransaction { ImageVariantSql.dissolveFamilyDuplicates.forEach(sql::execSQL) }
+                db.withTransaction {
+                    db.qqSourceDao().markDirty()
+                    db.qqSourceDao().reconcileLinks()
+                }
                 val done = System.currentTimeMillis()
                 Timber.i(
                     "Picture families indexed (v%d) in %d ms: keys %s, recompute %d ms, duplicates %d ms",
@@ -64,15 +69,16 @@ class PictureVariantIndexer(
     }
 
     /** 第 1 步，返回有家族键的文件数 */
-    private suspend fun writeKeys(dao: ImageDao, sql: SupportSQLiteDatabase): Int {
-        sql.quietTransaction { ImageVariantSql.suspendForBackfill(sql) }
+    private suspend fun writeKeys(dao: ImageDao, sql: SupportSQLiteDatabase, jpegOnly: Boolean): Int {
+        if (!jpegOnly) sql.quietTransaction { ImageVariantSql.suspendForBackfill(sql) }
         try {
             var keyed = 0
             var afterId = 0L
             while (true) {
                 val rows = dao.variantKeyRows(afterId, KEY_PAGE)
                 if (rows.isEmpty()) break
-                val keys = rows.mapNotNull { row -> QqCachePaths.familyKey(row.path)?.let { row.id to it } }
+                val keys = rows.asSequence().filter { !jpegOnly || it.path.endsWith(".jpg") }
+                    .mapNotNull { row -> QqCachePaths.familyKey(row.path)?.let { row.id to it } }.toList()
                 if (keys.isNotEmpty()) sql.quietTransaction {
                     sql.compileStatement("UPDATE images SET variant_group = ? WHERE id = ? AND variant_group IS NOT ?").use { statement ->
                         keys.forEach { (id, key) ->
@@ -89,7 +95,7 @@ class PictureVariantIndexer(
             }
             return keyed
         } finally {
-            sql.quietTransaction { ImageVariantSql.resumeAfterBackfill(sql) }
+            if (!jpegOnly) sql.quietTransaction { ImageVariantSql.resumeAfterBackfill(sql) }
         }
     }
 
@@ -123,10 +129,10 @@ class PictureVariantIndexer(
         query("PRAGMA $statement").use { cursor -> if (cursor.moveToFirst()) cursor.getLong(0) else null }
 
     private companion object {
-        /** 回填版本：2 起 variant_bytes 为合并显示时的大小（不属于家族的图也要补上） */
-        const val VERSION = 2
+        /** 回填版本：3 起 .jpg 缓存参与合并，并继承已有来源。 */
+        const val VERSION = 3
         /** 家族键规则版本；规则变化时改它，启动时会重新写键 */
-        const val KEYS_VERSION = 1
+        const val KEYS_VERSION = 3
         const val KEY_PAGE = 5_000
         const val RECOMPUTE_SPAN = 20_000L
         /** 回填期间 WAL 累积到约 40MB 才自动回写 */

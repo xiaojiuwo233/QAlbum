@@ -37,6 +37,15 @@ class FileClassifierTest {
     )
 
     @Test
+    fun `归档的图片文件消失也标记 missing，在原处不变则不动`() {
+        val rows = listOf(row("Cache_a", 1, status = "archived"), row("Cache_b", 2, status = "archived"))
+        val r = FileClassifier.classify(listOf(file("Cache_b")), rows)
+        assertEquals(listOf(1L), r.missingIds)
+        assertEquals(1, r.unchangedCount)
+        assertTrue(r.newFiles.isEmpty() && r.changedFiles.isEmpty() && r.reviveIds.isEmpty())
+    }
+
+    @Test
     fun `库里没有的文件归为新增`() {
         val r = FileClassifier.classify(listOf(file("Cache_a")), emptyList())
         assertEquals(1, r.newFiles.size)

@@ -133,7 +133,7 @@ enum class SettingsCategory(
     ANALYSIS("settings_analysis", "分析", "各分析项的开关、数量与顺序", Icons.Outlined.Analytics, SettingsGroup.DATA),
     CLEANUP("settings_cleanup", "清理规则", "清理维度、门限与审核数量", Icons.Outlined.CleaningServices, SettingsGroup.DATA),
     AI("settings_ai", "AI 服务", "服务地址、密钥与模型", Icons.Outlined.AutoAwesome, SettingsGroup.DATA),
-    PERSONALIZATION("settings_personalization", "外观与导出", "动态取色、图库合并与快速滚动、动效与导出目录", Icons.Outlined.Palette, SettingsGroup.SYSTEM),
+    PERSONALIZATION("settings_personalization", "外观与导出", "动态取色、图库合并、快速滚动与归档、动效与导出目录", Icons.Outlined.Palette, SettingsGroup.SYSTEM),
     ACCESS("settings_access", "权限与访问", "Shizuku / Root 授权与连通性", Icons.Outlined.Security, SettingsGroup.SYSTEM),
     LOGS("settings_logs", "日志", "运行日志、崩溃记录与导出", Icons.AutoMirrored.Outlined.Article, SettingsGroup.SYSTEM),
     ABOUT("settings_about", "关于", "版本信息", Icons.Outlined.Info, SettingsGroup.SYSTEM),
@@ -463,16 +463,16 @@ fun AnalysisSettingsScreen(
             }
         }
 
-        SegmentedGroup(header = "自动收藏") {
+        SegmentedGroup(header = "自动归档") {
             item("auto") { position ->
                 SegmentedSwitchItem(
                     position = position,
-                    title = "分析时自动收藏",
-                    subtitle = "识别到下列敏感信息的图片会自动收藏，收藏后不会被清理",
+                    title = "分析时自动归档",
+                    subtitle = "识别到下列敏感信息的图片会自动归档：不会被清理，默认只在「图库 → 归档」里显示",
                     checked = autoFavorite.enabled,
                     onCheckedChange = {
                         viewModel.setAutoFavoriteEnabled(it)
-                        notify(if (it) "已开启自动收藏" else "已关闭自动收藏")
+                        notify(if (it) "已开启自动归档" else "已关闭自动归档")
                     },
                 )
             }
@@ -486,7 +486,7 @@ fun AnalysisSettingsScreen(
                     item("no-rule") { position ->
                         SegmentedCard(position, containerColor = MaterialTheme.colorScheme.errorContainer) {
                             Text(
-                                "还没有勾选任何规则，自动收藏不会生效。",
+                                "还没有勾选任何规则，自动归档不会生效。",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onErrorContainer,
                             )
@@ -945,6 +945,7 @@ fun PersonalizationSettingsScreen(
     val sharedTransition by viewModel.detailSharedTransition.collectAsState()
     val stackVariants by viewModel.galleryStackVariants.collectAsState()
     val fastScroll by viewModel.fastScrollEnabled.collectAsState()
+    val archiveVisible by viewModel.archiveVisible.collectAsState()
     val exportSubdirs by viewModel.exportSubdirs.collectAsState()
     SettingsDetailScaffold(SettingsCategory.PERSONALIZATION, onBack, sharedScope, animatedScope) { _ ->
         SegmentedGroup(header = "外观") {
@@ -975,6 +976,16 @@ fun PersonalizationSettingsScreen(
                     subtitle = "滚动时右侧出现把手，按住上下拖动快速定位：慢拖逐天细调，快划大步跨越，旁边显示日期",
                     checked = fastScroll,
                     onCheckedChange = viewModel::setFastScrollEnabled,
+                )
+            }
+            item("archiveVisible") { position ->
+                SegmentedSwitchItem(
+                    position = position,
+                    title = "归档的图片也在图库中显示",
+                    subtitle = "关闭时归档的图片只在「图库 → 归档」里出现，图库、聊天来源、标签与搜索都看不到；打开后像收藏一样照常显示。" +
+                        "无论开关，归档的图片（连同同一张图的其他版本）都不会被任何清理删除",
+                    checked = archiveVisible,
+                    onCheckedChange = viewModel::setArchiveVisible,
                 )
             }
         }

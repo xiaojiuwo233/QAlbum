@@ -3,16 +3,16 @@ package com.xjw.qalbum.domain.model
 import kotlinx.serialization.Serializable
 
 /**
- * 自动收藏配置：分析（评分）阶段，根据 OCR 命中的敏感信息自动把图片加入收藏，避免误删。
+ * 自动归档配置：分析（评分）阶段，根据 OCR 命中的敏感信息自动把图片归档，避免误删。
  *
- * 这是一个可选特性，[enabled] 默认关闭——只有用户在「设置 → 分析 → 自动收藏」里主动开启后才生效，
+ * 这是一个可选特性，[enabled] 默认关闭——只有用户在「设置 → 分析 → 自动归档」里主动开启后才生效，
  * 且具体命中哪些信息类型由下面各开关自定义。
  *
  * 字段带默认值，保证 JSON 反序列化缺字段时安全回退。
  */
 @Serializable
 data class AutoFavoriteConfig(
-    /** 总开关：关闭时分析阶段完全不自动收藏 */
+    /** 总开关：关闭时分析阶段完全不自动归档 */
     val enabled: Boolean = false,
     /** 含证件号（身份证等） */
     val idNumber: Boolean = true,
@@ -25,7 +25,7 @@ data class AutoFavoriteConfig(
     /** 含地址 */
     val address: Boolean = false,
 ) {
-    /** 是否启用了至少一条命中规则（总开关开启且任一类型开启才真正会收藏） */
+    /** 是否启用了至少一条命中规则（总开关开启且任一类型开启才真正会归档） */
     val hasAnyRule: Boolean
         get() = idNumber || orderNo || amount || phone || address
 

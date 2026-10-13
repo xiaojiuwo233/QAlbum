@@ -31,7 +31,7 @@ class AnalysisPersistenceTest {
         val db = database()
         try {
             val dao = db.imageDao()
-            val active = dao.insert(image(1).copy(embeddingDone = true, isFavorite = true, userKeep = true))
+            val active = dao.insert(image(1).copy(embeddingDone = true, isArchived = true, userKeep = true))
             val changed = dao.insert(image(2).copy(size = 200))
             val inactive = dao.insert(image(3).copy(status = "quarantined"))
             val index = SemanticIndex(db.embeddingDao())
@@ -42,7 +42,7 @@ class AnalysisPersistenceTest {
             val saved = dao.getById(active)!!
             assertTrue(saved.ocrDone)
             assertFalse(saved.embeddingDone)
-            assertTrue(saved.isFavorite)
+            assertTrue(saved.isArchived)
             assertEquals(true, saved.userKeep)
             assertNull(db.embeddingDao().getByImageId(active))
             assertNotNull(db.ocrDao().getByImageId(active))

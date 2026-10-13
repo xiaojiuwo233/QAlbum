@@ -106,7 +106,7 @@ fun Modifier.pressScale(
 
 /**
  * 容器变换：容器边界在两个页面间 morph，内容各自淡入淡出（入口"长大"成整页）。
- * 用于设置入口、搜索/收藏入口、清理 SummaryCard → 子页。scope 为空（如 preview）时退化为无动画。
+ * 用于设置入口、搜索/归档入口、清理 SummaryCard → 子页。scope 为空（如 preview）时退化为无动画。
  */
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable

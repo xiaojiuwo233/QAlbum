@@ -12,6 +12,7 @@ import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.data.repository.ImageRepository
 import com.xjw.qalbum.domain.model.GallerySort
 import com.xjw.qalbum.domain.model.TimelineSection
+import com.xjw.qalbum.service.cleanup.ArchiveManager
 import com.xjw.qalbum.ui.components.ScrollDirectory
 import com.xjw.qalbum.service.cleanup.ImageFileManager
 import com.xjw.qalbum.service.cleanup.QuarantineManager
@@ -51,6 +52,7 @@ class GalleryViewModel(
     private val imageRepository: ImageRepository,
     private val imageFileManager: ImageFileManager,
     private val quarantineManager: QuarantineManager,
+    private val archive: ArchiveManager,
     private val settings: SettingsRepository,
     private val appScope: CoroutineScope,
 ) : ViewModel() {
@@ -130,8 +132,11 @@ class GalleryViewModel(
         // 重建 Pager（滚动位置回顶 + 全量重载），改列数/阈值等无关设置都会触发
         .distinctUntilChanged()
 
-    private val favoriteDateBucketCounts: StateFlow<Map<Long, Int>?> =
-        imageRepository.observeFavoriteDateBucketCounts()
+    /** 归档页查询用的状态：随「归档的图片也在图库中显示」变化（见 ArchiveManager.statusesOf） */
+    private val archiveStatuses = archive.pageStatuses.distinctUntilChanged()
+
+    private val archiveDateBucketCounts: StateFlow<Map<Long, Int>?> =
+        archiveStatuses.flatMapLatest { imageRepository.observeArchiveDateBucketCounts(it) }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     val timeline: Flow<PagingData<GalleryTimelineItem>> =
@@ -170,22 +175,27 @@ class GalleryViewModel(
         }
     }
 
-    suspend fun favoriteSectionIds(section: TimelineSection): List<Long> = when (section) {
-        is TimelineSection.Day -> imageRepository.favoriteIdsBetween(section.from, section.until)
+    // ---- 归档页 ----
+
+    suspend fun archiveSectionIds(section: TimelineSection): List<Long> = when (section) {
+        is TimelineSection.Day -> imageRepository.archiveIdsBetween(archive.pageStatuses.first(), section.from, section.until)
         is TimelineSection.Size -> emptyList()
     }
 
-    val favoriteDirectory: StateFlow<ScrollDirectory?> = favoriteDateBucketCounts
+    val archiveDirectory: StateFlow<ScrollDirectory?> = archiveDateBucketCounts
         .flowMap { counts -> counts?.let { dateDirectory(it, ascending = false) } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
-    val favoriteTimeline: Flow<PagingData<GalleryTimelineItem>> =
-        imageRepository
-            .favoriteTimelinePager(refreshGate)
-            .withDateHeaders(favoriteDateBucketCounts)
+    val archiveTimeline: Flow<PagingData<GalleryTimelineItem>> =
+        archiveStatuses
+            .flatMapLatest { statuses -> imageRepository.archiveTimelinePager(statuses, refreshGate).withDateHeaders(archiveDateBucketCounts) }
             .cachedIn(viewModelScope)
 
-    val favoriteCount: Flow<Int> = imageRepository.observeFavoriteCount()
+    val archiveCount: Flow<Int> = archiveStatuses.flatMapLatest { imageRepository.observeArchiveCount(it) }
+
+    /** 归档的图片也在图库中显示（关闭时只在归档页出现） */
+    val archiveVisible: StateFlow<Boolean> = settings.archiveVisible
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     /** 导出子目录列表（保存弹窗用） */
     val exportSubdirs: StateFlow<List<String>> = settings.exportSubdirs
@@ -199,26 +209,31 @@ class GalleryViewModel(
      * 移入回收站——导出失败的原图绝不进回收站（否则到期自动清理会把从未保存成功的图永久删掉）。
      * 回调返回成功/失败张数，供 UI 分别告知。
      */
-    fun saveImages(ids: Set<Long>, subdir: String?, alsoTrash: Boolean, onDone: (saved: Int, failed: Int) -> Unit = { _, _ -> }) {
+    fun saveImages(
+        ids: Set<Long>, subdir: String?, alsoTrash: Boolean, includeArchived: Boolean = false,
+        onDone: (saved: Int, failed: Int) -> Unit = { _, _ -> },
+    ) {
         appScope.launch {
             val savedIds = ids.filter { imageFileManager.exportToGallery(it, subdir) }
             if (alsoTrash && savedIds.isNotEmpty()) {
-                refreshGate.hold { quarantineManager.quarantineBatch(savedIds.map { it to "保存后移入回收站" }) }
+                refreshGate.hold {
+                    quarantineManager.quarantineBatch(
+                        savedIds.map { it to "保存后移入回收站" },
+                        options = PictureDeleteOptions(includeArchived = includeArchived),
+                    )
+                }
             }
             withContext(Dispatchers.Main) { onDone(savedIds.size, ids.size - savedIds.size) }
         }
     }
 
-    fun addFavorites(ids: Set<Long>, onDone: (Int) -> Unit = {}) {
-        viewModelScope.launch {
-            onDone(setFavoriteState(ids, true))
-        }
+    /** 归档（连同同一张图的其他版本）；回调处理的张数 */
+    fun archiveImages(ids: Set<Long>, onDone: (Int) -> Unit = {}) {
+        viewModelScope.launch { onDone(archive.archive(ids)) }
     }
 
-    fun removeFavorites(ids: Set<Long>, onDone: (Int) -> Unit = {}) {
-        viewModelScope.launch {
-            onDone(setFavoriteState(ids, false))
-        }
+    fun unarchiveImages(ids: Set<Long>, onDone: (Int) -> Unit = {}) {
+        viewModelScope.launch { onDone(archive.unarchive(ids)) }
     }
 
     // 批量「文件系统 + DB」不可逆操作跑在 App 级 appScope：分钟级批量若挂在 viewModelScope，
@@ -253,14 +268,6 @@ class GalleryViewModel(
         } finally {
             _deleteProgress.value = null
         }
-
-    private suspend fun setFavoriteState(ids: Set<Long>, favorite: Boolean): Int {
-        val targetIds = imageRepository.getByIds(ids.toList())
-            .filter { it.isFavorite != favorite }
-            .map { it.id }
-        imageRepository.setFavoriteBatch(targetIds, favorite)
-        return targetIds.size
-    }
 }
 
 sealed class GalleryTimelineItem {

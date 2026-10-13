@@ -12,6 +12,7 @@ import com.xjw.qalbum.log.AppLog
 import com.xjw.qalbum.log.CrashHandler
 import com.xjw.qalbum.log.FileLoggingTree
 import com.xjw.qalbum.log.LogcatCapture
+import com.xjw.qalbum.service.cleanup.ArchiveManager
 import com.xjw.qalbum.service.cleanup.QuarantineManager
 import com.xjw.qalbum.service.indexer.PictureVariantIndexer
 import com.xjw.qalbum.worker.IncrementalScanWorker
@@ -75,6 +76,8 @@ class App : Application(), Configuration.Provider {
         // 文件操作日志必须在任何新扫描/清理前尽快对账；周期 Worker 仍会再次幂等兜底。
         val quarantineManager = get<QuarantineManager>()
         get<CoroutineScope>().launch { quarantineManager.reconcilePending() }
+        // 归档与「是否在图库显示」设置保持一致（首次运行把旧版逐张收藏补齐为整张图）
+        get<ArchiveManager>().start()
         // 升级后一次性回填图片家族（同一张 QQ 图片的原图 / 预览图 / 缩略图），已完成则立即返回
         val variantIndexer = get<PictureVariantIndexer>()
         get<CoroutineScope>().launch { runCatching { variantIndexer.ensureIndexed() }.onFailure { Timber.w(it, "Picture family indexing failed") } }

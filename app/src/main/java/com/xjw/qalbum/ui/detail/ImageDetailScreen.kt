@@ -31,10 +31,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
+import androidx.compose.material.icons.outlined.Archive
 import androidx.compose.material.icons.outlined.Delete
-import androidx.compose.material.icons.outlined.Favorite
-import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Unarchive
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
@@ -90,12 +90,12 @@ fun ImageDetailScreen(
     imageId: Long,
     onBack: () -> Unit,
     contentPadding: PaddingValues = PaddingValues(0.dp),
-    favoritesOnly: Boolean = false,
+    archiveOnly: Boolean = false,
     sharedScope: SharedTransitionScope? = null,
     animatedScope: AnimatedVisibilityScope? = null,
     viewModel: ImageDetailViewModel = koinViewModel(),
 ) {
-    LaunchedEffect(imageId, favoritesOnly) { viewModel.load(imageId, favoritesOnly) }
+    LaunchedEffect(imageId, archiveOnly) { viewModel.load(imageId, archiveOnly) }
     val state by viewModel.state.collectAsState()
     val toast by viewModel.toast.collectAsState()
     val context = LocalContext.current
@@ -123,7 +123,7 @@ fun ImageDetailScreen(
                 entityFor = viewModel::entityFor,
                 onBack = onBack,
                 onPageSelected = viewModel::selectIndex,
-                onToggleFavorite = viewModel::toggleFavorite,
+                onToggleArchive = { viewModel.toggleArchive(onExhausted = onBack) },
                 onExport = { showSaveSheet = true },
                 onSelectVariant = viewModel::selectVariant,
                 onOpenExternal = {
@@ -142,6 +142,7 @@ fun ImageDetailScreen(
                 },
                 onMoveToTrash = { options -> viewModel.moveCurrentToTrash(options,onExhausted = onBack) },
                 onDeletePermanently = { options -> viewModel.deleteCurrentPermanently(options,onExhausted = onBack) },
+                archiveOnly = archiveOnly,
                 sharedScope = sharedScope,
                 animatedScope = animatedScope,
             )
@@ -158,6 +159,7 @@ fun ImageDetailScreen(
                 showSaveSheet = false
                 viewModel.saveCurrent(subdir, alsoTrash, onExhausted = onBack)
             },
+            allowTrash = archiveOnly || (state as? ImageDetailState.Ready)?.current?.isArchived != true,
         )
     }
 }
@@ -169,11 +171,13 @@ private fun ImmersivePhotoViewer(
     onBack: () -> Unit,
     onPageSelected: (Int) -> Unit,
     onSelectVariant: (Long) -> Unit,
-    onToggleFavorite: () -> Unit,
+    onToggleArchive: () -> Unit,
     onExport: () -> Unit,
     onOpenExternal: () -> Unit,
     onMoveToTrash: (PictureDeleteOptions) -> Unit,
     onDeletePermanently: (PictureDeleteOptions) -> Unit,
+    /** 从归档页打开：归档的图可以在这里删除 */
+    archiveOnly: Boolean = false,
     sharedScope: SharedTransitionScope? = null,
     animatedScope: AnimatedVisibilityScope? = null,
 ) {
@@ -383,7 +387,7 @@ private fun ImmersivePhotoViewer(
                     }
                     BottomActions(
                         image = state.current,
-                        onToggleFavorite = onToggleFavorite,
+                        onToggleArchive = onToggleArchive,
                         onInfo = {
                             chromeVisible = true
                             detailsVisible = true
@@ -411,6 +415,7 @@ private fun ImmersivePhotoViewer(
         if (confirmDelete) {
             DeleteImagesDialog(
                 imageIds = listOf(state.current.id),
+                includeArchived = archiveOnly,
                 onDismiss = { confirmDelete = false },
                 onTrash = { options ->
                     confirmDelete = false
@@ -501,7 +506,7 @@ private fun TopChrome(
 @Composable
 private fun BottomActions(
     image: ImageEntity,
-    onToggleFavorite: () -> Unit,
+    onToggleArchive: () -> Unit,
     onInfo: () -> Unit,
     onExport: () -> Unit,
     onDelete: () -> Unit,
@@ -513,9 +518,9 @@ private fun BottomActions(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             PreviewAction(
-                icon = if (image.isFavorite) Icons.Outlined.Favorite else Icons.Outlined.FavoriteBorder,
-                label = if (image.isFavorite) "已收藏" else "收藏",
-                onClick = onToggleFavorite,
+                icon = if (image.isArchived) Icons.Outlined.Unarchive else Icons.Outlined.Archive,
+                label = if (image.isArchived) "取消归档" else "归档",
+                onClick = onToggleArchive,
             )
             PreviewAction(Icons.Outlined.Info, "详情", onClick = onInfo)
             PreviewAction(Icons.Outlined.Download, "保存", onClick = onExport)

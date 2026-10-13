@@ -8,6 +8,7 @@ import androidx.paging.PagingConfig
 import androidx.paging.PagingData
 import androidx.paging.cachedIn
 import com.xjw.qalbum.data.db.dao.ImageDao
+import com.xjw.qalbum.data.db.dao.QqArchiveCounts
 import com.xjw.qalbum.data.db.dao.QqScopeStats
 import com.xjw.qalbum.data.db.dao.QqSourceCounts
 import com.xjw.qalbum.data.db.dao.QqContent
@@ -24,10 +25,12 @@ import com.xjw.qalbum.domain.model.SourceSort
 import com.xjw.qalbum.domain.model.TimelineSection
 import com.xjw.qalbum.qq.QqSourceRepository
 import com.xjw.qalbum.qq.QqSourceScope
+import com.xjw.qalbum.service.cleanup.ArchiveManager
 import com.xjw.qalbum.service.cleanup.ExternalViewTarget
 import com.xjw.qalbum.service.cleanup.ImageFileManager
 import com.xjw.qalbum.service.cleanup.QuarantineManager
 import com.xjw.qalbum.ui.cleanup.PurgeProgress
+import com.xjw.qalbum.ui.common.formatCountExact
 import com.xjw.qalbum.ui.components.ScrollDirectory
 import com.xjw.qalbum.ui.gallery.FileSize
 import com.xjw.qalbum.service.cleanup.PictureDeleteOptions
@@ -82,7 +85,7 @@ private data class BucketSource(val counts: StateFlow<Map<Long, Int>?>, val sort
  *
  * 内容分「图片 / QQ 缩略图」两类；数量与占用直接取增量维护的分类统计，不再逐次聚合。
  * 网格按范围从关联表取图（索引范围 + 主键回表），排序（日期 / 大小 × 升降序）持久化并插入分组标题。
- * 多选与看图页的删除、收藏、保存都在这里执行；批量文件操作跑在 App 级作用域，返回上一页不中断。
+ * 多选与看图页的删除、归档、保存都在这里执行；批量文件操作跑在 App 级作用域，返回上一页不中断。
  */
 class QqSourceBrowseViewModel(
     val target: SourceBrowseTarget,
@@ -91,6 +94,7 @@ class QqSourceBrowseViewModel(
     private val images: ImageRepository,
     private val imageFiles: ImageFileManager,
     private val quarantine: QuarantineManager,
+    private val archive: ArchiveManager,
     private val appScope: CoroutineScope,
 ) : ViewModel() {
     private val dao = repository.dao
@@ -292,16 +296,16 @@ class QqSourceBrowseViewModel(
         viewModelScope.launch { imageFiles.prepareShare(id)?.let(onReady) }
     }
 
-    /** 收藏 / 取消收藏；已处于目标状态的图片不重复写入 */
-    fun setFavorite(ids: Collection<Long>, favorite: Boolean, onDone: (Int) -> Unit = {}) {
+    /** 归档 / 取消归档（连同同一张图的其他版本）；[onDone] 回调归档后它们是否还在这里显示 */
+    fun setArchived(ids: Collection<Long>, archived: Boolean, onDone: (visible: Boolean) -> Unit = {}) {
+        if (ids.isEmpty()) return
         viewModelScope.launch {
-            val changed = images.getByIds(ids.toList()).filter { it.isFavorite != favorite }.map { it.id }
-            images.setFavoriteBatch(changed, favorite)
-            onDone(changed.size)
+            if (archived) archive.archive(ids) else archive.unarchive(ids)
+            onDone(!archived || settings.archiveVisible.first())
         }
     }
 
-    /** 批量删除的进度（删除期间网格保持不动，靠它告诉用户还在进行） */
+    /** 批量删除 / 整体归档的进度（期间网格保持不动，靠它告诉用户还在进行） */
     private val _deleteProgress = MutableStateFlow<PurgeProgress?>(null)
     val deleteProgress: StateFlow<PurgeProgress?> = _deleteProgress.asStateFlow()
 
@@ -408,11 +412,47 @@ class QqSourceBrowseViewModel(
     }
 
     fun acknowledgeRepositoryMessage() = repository.acknowledgeMessage()
+
+    // ---- 按范围整体归档：这里（或当前筛选）的全部图片与缩略图，共用的也一起 ----
+
+    val archiveRequest = MutableStateFlow<QqArchiveRequest?>(null)
+
+    /** 归档的图片也在图库中显示（关闭时归档后从这里消失） */
+    val archiveVisible: StateFlow<Boolean> = settings.archiveVisible
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    fun requestScopeArchive() {
+        if (!canTrashScope) return
+        val ids = scopeIds.value ?: return
+        archiveRequest.value = QqArchiveRequest(ids, counts = null)
+        viewModelScope.launch {
+            val counts = archive.scopeCounts(ids)
+            if (archiveRequest.value?.ids == ids) archiveRequest.value = QqArchiveRequest(ids, counts)
+        }
+    }
+
+    fun dismissScopeArchive() {
+        archiveRequest.value = null
+    }
+
+    fun confirmScopeArchive() {
+        val request = archiveRequest.value ?: return
+        if (request.counts == null) return
+        archiveRequest.value = null
+        appScope.launch {
+            val done = withDeleteProgress("正在归档…") { progress -> archive.archiveScope(request.ids, progress) }
+            _message.value = "已归档 ${formatCountExact(done)} 张" +
+                if (settings.archiveVisible.first()) "，不会被清理删除" else "，它们只在「图库 → 归档」里显示，不会被清理删除"
+        }
+    }
 }
 
-/** 删除结果文案：收藏 / 保留的图片会被跳过，文件访问未就绪时一张也删不掉，两种情况都要说清楚 */
+/** 按范围归档前的确认状态：[counts] 为 null 表示正在统计 */
+data class QqArchiveRequest(val ids: QqScopeIds, val counts: QqArchiveCounts?)
+
+/** 删除结果文案：归档 / 保留的图片会被跳过，文件访问未就绪时一张也删不掉，两种情况都要说清楚 */
 internal fun removalMessage(action: String, done: Int, total: Int): String = when {
-    done == 0 -> "${action.removePrefix("已")}失败：图片已收藏或保留，或文件访问未就绪"
-    done < total -> "$action $done 张；${total - done} 张未处理（已收藏或保留，或文件访问失败）"
+    done == 0 -> "${action.removePrefix("已")}失败：图片已归档或保留，或文件访问未就绪"
+    done < total -> "$action $done 张；${total - done} 张未处理（已归档或保留，或文件访问失败）"
     else -> "$action $done 张"
 }

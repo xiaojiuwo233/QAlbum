@@ -79,12 +79,12 @@ internal val ViewerChromeColor = Color(0xFF1E1F22).copy(alpha = 0.82f)
  * 全屏图片预览：左右滑动切换、双指 / 双击缩放（见 [ZoomableImage]），单击显隐浮层。
  * 与图库看图页手势一致：上滑查看详情、详情打开时下滑收起；未缩放时下滑可拖动关闭。
  * 顶部「关闭 + 时间 + 详情 + 保存 + 分享」；底部操作由调用方经 [bottomBar] 提供，
- * 放在胶囊形浮动操作栏里（审核页：收藏 / 勾选 / 清理 / 保留；来源与标签页：收藏 / 删除等）。
+ * 放在胶囊形浮动操作栏里（审核页：归档 / 勾选 / 清理 / 保留；来源与标签页：归档 / 删除等）。
  *
  * 「详情」复用 [PhotoDetailsSheet]，从底部滑入；点详情卡以外任意处关闭。
  * [images] 是预览时的快照（调用方负责取已加载的有限集合；删除后传入新列表即可）。
  * 提供 [variantsOf] 时（合并显示），底部出现版本条，可切换显示同一张图的其他版本；[refreshKey] 变化时重新取版本
- * （例如收藏状态变了）。[bottomBar] 拿到的是正在显示的那个版本。
+ * （例如归档状态变了）。[bottomBar] 拿到的是正在显示的那个版本。
  */
 @Composable
 internal fun FullScreenImagePager(
@@ -325,6 +325,7 @@ internal fun FullScreenImagePager(
                         showSaveSheet = false
                         onSave(current.id, subdir, alsoTrash)
                     },
+                    allowTrash = !current.isArchived,
                 )
             }
         }

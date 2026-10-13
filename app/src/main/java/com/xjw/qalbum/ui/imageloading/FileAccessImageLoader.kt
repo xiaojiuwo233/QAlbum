@@ -376,8 +376,8 @@ internal fun smallerVersions(entity: ImageEntity, size: Size): List<String> {
     val family = QqCachePaths.familyPaths(entity.path)
     if (family.size < 2) return emptyList()
     val thumbs = family.filter { "/chatthumb/" in it }
-    val hd = thumbs.filter { it.endsWith("_hd") }
-    val plain = thumbs.filterNot { it.endsWith("_hd") }
+    val hd = thumbs.filter { it.removeSuffix(".jpg").endsWith("_hd") }
+    val plain = thumbs.filterNot { it.removeSuffix(".jpg").endsWith("_hd") }
     val requested = listOf(size.width, size.height).mapNotNull { (it as? Dimension.Pixels)?.px }.maxOrNull() ?: Int.MAX_VALUE
     val tiny = if (requested <= SMALL_THUMB_PX) plain else emptyList()
     val preview = if (entity.sourceType == "chatraw") family.filter { "/chatimg/" in it } else emptyList()

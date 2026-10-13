@@ -25,13 +25,16 @@ interface ImageDao {
     @Query("SELECT * FROM images WHERE path IN (:paths)")
     suspend fun getAnyByPaths(paths: List<String>): List<ImageEntity>
 
-    @Query("""SELECT * FROM images WHERE id IN (:ids) AND status IN ('active','thumbnail_trash')
-        AND is_protected=0 AND (user_keep IS NULL OR user_keep=0)""")
-    suspend fun getLinkedCleanupEligible(ids: List<Long>): List<ImageEntity>
+    /** [archived]：归档页删除时归档的图也可删（见 PictureDeleteOptions.includeArchived） */
+    @Query("""SELECT * FROM images WHERE id IN (:ids)
+        AND (status IN ('active','thumbnail_trash') OR (:archived AND status='archived'))
+        AND (is_protected=0 OR :archived) AND (user_keep IS NULL OR user_keep=0)""")
+    suspend fun getLinkedCleanupEligible(ids: List<Long>, archived: Boolean = false): List<ImageEntity>
 
     @Query("""UPDATE images SET status='quarantine_pending' WHERE id IN (:ids)
-        AND status IN ('active','thumbnail_trash') AND is_protected=0 AND (user_keep IS NULL OR user_keep=0)""")
-    suspend fun markLinkedQuarantinePending(ids: List<Long>): Int
+        AND (status IN ('active','thumbnail_trash') OR (:archived AND status='archived'))
+        AND (is_protected=0 OR :archived) AND (user_keep IS NULL OR user_keep=0)""")
+    suspend fun markLinkedQuarantinePending(ids: List<Long>, archived: Boolean = false): Int
 
     // ---- 写入 ----
 
@@ -77,7 +80,7 @@ interface ImageDao {
     """)
     suspend fun markDeletedFromStatus(ids: List<Long>, deletedAt: Long, fromStatus: String): Int
 
-    /** 文件移动前的原子 claim：同时重验收藏/用户保留，真实 path 暂时保留以阻止扫描重复插入。 */
+    /** 文件移动前的原子 claim：同时重验归档/用户保留，真实 path 暂时保留以阻止扫描重复插入。 */
     @Query("""
         UPDATE images SET status = 'quarantine_pending'
         WHERE id IN (:ids) AND status = 'active'
@@ -156,15 +159,16 @@ interface ImageDao {
     )
 
     /**
-     * 磁盘上已消失的活跃图片 → missing（图库查询只认 active，幽灵记录自动从图库消失）。
+     * 磁盘上已消失的活跃图片（含已归档的）→ missing（图库查询只认 active，幽灵记录自动从图库消失；
+     * 归档标记 is_protected 保留，文件回来复活后由扫描结束时的归档同步重新隐藏）。
      * `last_seen < :scanStart` 守卫：回收站恢复会在成功事务内 touchLastSeen（恢复时刻），
      * 进行中的扫描批次拿的是恢复前的文件快照，不得把刚恢复的行覆盖成 missing。
      */
-    @Query("UPDATE images SET status = 'missing' WHERE id IN (:ids) AND status IN ('active', 'thumbnail_trash') AND last_seen < :scanStart")
+    @Query("UPDATE images SET status = 'missing' WHERE id IN (:ids) AND status IN ('active', 'thumbnail_trash', 'archived') AND last_seen < :scanStart")
     suspend fun markMissingByIds(ids: List<Long>, scanStart: Long)
 
     /** 整个三字符目录消失时按 path 范围批量标记 missing（last_seen 守卫同 [markMissingByIds]） */
-    @Query("UPDATE images SET status = 'missing' WHERE path >= :low AND path < :high AND status IN ('active', 'thumbnail_trash') AND last_seen < :scanStart")
+    @Query("UPDATE images SET status = 'missing' WHERE path >= :low AND path < :high AND status IN ('active', 'thumbnail_trash', 'archived') AND last_seen < :scanStart")
     suspend fun markMissingInPathRange(low: String, high: String, scanStart: Long)
 
     /** 文件以相同 size/mtime 重新出现：仅恢复 missing（缩略图回到 thumbnail_trash，其余 active），不重置分析状态 */
@@ -194,6 +198,7 @@ interface ImageDao {
             mime = :mime,
             is_animated = :isAnimated,
             status = CASE
+                WHEN status = 'archived' THEN 'archived'
                 WHEN :sourceType = 'chatthumb' THEN 'thumbnail_trash'
                 WHEN status = 'missing' THEN 'active'
                 ELSE status
@@ -213,7 +218,7 @@ interface ImageDao {
             embedding_done = CASE WHEN size != :size OR mtime != :mtime THEN 0 ELSE embedding_done END,
             duplicate_group_id = CASE WHEN size != :size OR mtime != :mtime THEN NULL ELSE duplicate_group_id END,
             is_duplicate_best = CASE WHEN size != :size OR mtime != :mtime THEN 0 ELSE is_duplicate_best END
-        WHERE path = :path AND status IN ('active', 'missing', 'thumbnail_trash')
+        WHERE path = :path AND status IN ('active', 'missing', 'thumbnail_trash', 'archived')
     """)
     suspend fun updateFromScanByPath(
         path: String,
@@ -429,14 +434,6 @@ interface ImageDao {
     """)
     fun observeStackedSizeBucketCounts(): Flow<List<BucketCountRow>>
 
-    @Query("""
-        SELECT date_bucket AS bucketKey, COUNT(*) AS count
-        FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb' AND is_protected = 1
-        GROUP BY date_bucket
-    """)
-    fun observeFavoriteDateBucketCounts(): Flow<List<BucketCountRow>>
-
     data class BucketCountRow(
         val bucketKey: Long,
         val count: Int,
@@ -444,14 +441,6 @@ interface ImageDao {
 
     // 详情页时间线已迁窗口 API（timelineRank* + timelineIdsBefore/After*）：
     // 200w 行全量 id 装载（旧 timelineIds 系列）会阻塞详情页数秒并常驻数十 MB 装箱内存，已删除。
-
-    /** 收藏详情页时间线：只取 id。 */
-    @Query("""
-        SELECT id FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb' AND is_protected = 1
-        ORDER BY mtime DESC, id DESC
-    """)
-    suspend fun favoriteTimelineIds(): List<Long>
 
     // ---- 时间线定位 / 窗口（keyset，替代全量 id 装载）----
     //
@@ -576,12 +565,6 @@ interface ImageDao {
     suspend fun stackedIdsBySize(low: Long, high: Long): List<Long>
 
     @Query("""
-        SELECT id FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb' AND is_protected = 1 AND mtime >= :from AND mtime < :until
-    """)
-    suspend fun favoriteIdsBetween(from: Long, until: Long): List<Long>
-
-    @Query("""
         SELECT i.id FROM images i INNER JOIN image_tags it ON it.image_id = i.id
         WHERE it.tag_id = :tagId AND i.status = 'active' AND i.source_type <> 'chatthumb'
           AND i.mtime >= :from AND i.mtime < :until
@@ -702,7 +685,7 @@ interface ImageDao {
             IFNULL(SUM(CASE WHEN is_corrupt = 1 THEN 1 ELSE 0 END), 0) AS corrupt,
             IFNULL(SUM(CASE WHEN is_blank = 1 THEN 1 ELSE 0 END), 0) AS blank,
             IFNULL(SUM(CASE WHEN is_animated = 1 THEN 1 ELSE 0 END), 0) AS animated,
-            IFNULL(SUM(CASE WHEN is_protected = 1 THEN 1 ELSE 0 END), 0) AS favoriteCount,
+            IFNULL(SUM(CASE WHEN is_protected = 1 THEN 1 ELSE 0 END), 0) AS archivedCount,
             COUNT(DISTINCT duplicate_group_id) AS duplicateGroups,
             IFNULL(SUM(CASE WHEN duplicate_group_id IS NOT NULL AND is_duplicate_best = 0 THEN size ELSE 0 END), 0) AS reclaimableBytes
         FROM images
@@ -714,7 +697,8 @@ interface ImageDao {
         val corrupt: Int,
         val blank: Int,
         val animated: Int,
-        val favoriteCount: Int,
+        /** 照常显示的归档图片数（不在图库显示归档时为 0） */
+        val archivedCount: Int,
         val duplicateGroups: Int,
         val reclaimableBytes: Long,
     )
@@ -1030,18 +1014,19 @@ interface ImageDao {
     """)
     suspend fun familyMembers(group: Long): List<ImageEntity>
 
-    /** 删除确认用：所选图片的路径、大小、家族与是否受保护（收藏 / 保留） */
+    /** 删除确认用：所选图片的路径、大小、家族与是否受保护（归档 / 保留） */
     @Query("""
-        SELECT id, path, size, variant_group AS variantGroup, (is_protected = 1 OR COALESCE(user_keep, 0) = 1) AS isProtected
+        SELECT id, path, size, variant_group AS variantGroup, is_protected AS isArchived, COALESCE(user_keep, 0) = 1 AS isKept
         FROM images WHERE id IN (:ids)
     """)
     suspend fun deleteFactRows(ids: List<Long>): List<DeleteFactRow>
 
-    data class DeleteFactRow(val id: Long, val path: String, val size: Long, val variantGroup: Long?, val isProtected: Boolean)
+    data class DeleteFactRow(val id: Long, val path: String, val size: Long, val variantGroup: Long?, val isArchived: Boolean, val isKept: Boolean)
 
-    /** 这些家族的现存版本（大小用于「连同其他版本」的合计） */
-    @Query("SELECT id, variant_group AS variantGroup, size FROM images WHERE variant_group IN (:groups) AND status IN ('active', 'thumbnail_trash')")
-    suspend fun familyMemberSizes(groups: List<Long>): List<FamilyMemberSize>
+    /** 这些家族的现存版本（大小用于「连同其他版本」的合计）；[archived] 时也算归档隐藏的版本 */
+    @Query("""SELECT id, variant_group AS variantGroup, size FROM images WHERE variant_group IN (:groups)
+        AND (status IN ('active', 'thumbnail_trash') OR (:archived AND status = 'archived'))""")
+    suspend fun familyMemberSizes(groups: List<Long>, archived: Boolean = false): List<FamilyMemberSize>
 
     data class FamilyMemberSize(val id: Long, val variantGroup: Long, val size: Long)
 
@@ -1091,28 +1076,115 @@ interface ImageDao {
     @Query("UPDATE images SET user_keep = :keep WHERE id IN (:ids)")
     suspend fun setUserKeepByIds(ids: List<Long>, keep: Boolean?)
 
-    @Query("UPDATE images SET is_protected = :isFavorite WHERE id = :id")
-    suspend fun setFavorite(id: Long, isFavorite: Boolean)
+    // ---- 归档（is_protected，见 ImageEntity 与 ArchiveManager）----
+    // 总是按整个家族（同一张图的原图 / 预览图 / 缩略图）设置；只动现存的行，回收站里的不碰。
+    // :ids 在语句里出现两次，调用方按 SQLite 变量上限的一半以内分块。
 
-    /** 批量收藏 / 取消收藏（IN 更新）：调用方按 SQLite 变量上限分块并包进外层事务 */
-    @Query("UPDATE images SET is_protected = :isFavorite WHERE id IN (:ids)")
-    suspend fun setFavoriteByIds(ids: List<Long>, isFavorite: Boolean)
+    /** 把这些图连同同一张图的其他版本标为归档 */
+    @Query("""
+        UPDATE images SET is_protected = 1
+        WHERE is_protected = 0 AND status IN ('active', 'thumbnail_trash', 'missing', 'archived')
+          AND (id IN (:ids) OR variant_group IN (SELECT variant_group FROM images WHERE id IN (:ids) AND variant_group IS NOT NULL))
+    """)
+    suspend fun protectFamilies(ids: List<Long>): Int
 
-    /** 自动收藏批量写入（仅置收藏，不取消）：评分页末命中集合一次 IN 更新 */
-    suspend fun favoriteByIds(ids: List<Long>) = setFavoriteByIds(ids, true)
+    /** 不显示归档时：这些图的家族里已归档的行转为 archived */
+    @Query("""
+        UPDATE images SET status = 'archived'
+        WHERE is_protected = 1 AND status IN ('active', 'thumbnail_trash')
+          AND (id IN (:ids) OR variant_group IN (SELECT variant_group FROM images WHERE id IN (:ids) AND variant_group IS NOT NULL))
+    """)
+    suspend fun hideFamilies(ids: List<Long>): Int
+
+    /** 取消归档：整个家族恢复原来的状态（缩略图回到 thumbnail_trash，其余 active） */
+    @Query("""
+        UPDATE images SET is_protected = 0,
+            status = CASE WHEN status <> 'archived' THEN status WHEN source_type = 'chatthumb' THEN 'thumbnail_trash' ELSE 'active' END
+        WHERE is_protected = 1
+          AND (id IN (:ids) OR variant_group IN (SELECT variant_group FROM images WHERE id IN (:ids) AND variant_group IS NOT NULL))
+    """)
+    suspend fun unprotectFamilies(ids: List<Long>): Int
+
+    /** 归档（[hidden] = 不在图库显示归档）；整批一个事务，只触发一次表失效 */
+    @Transaction
+    suspend fun archive(ids: List<Long>, hidden: Boolean) {
+        ids.chunked(ARCHIVE_CHUNK).forEach { page ->
+            protectFamilies(page)
+            if (hidden) hideFamilies(page)
+        }
+    }
+
+    @Transaction
+    suspend fun unarchive(ids: List<Long>) {
+        ids.chunked(ARCHIVE_CHUNK).forEach { unprotectFamilies(it) }
+    }
+
+    /** 后来入库 / 重新出现的版本（如之后才下载的原图）跟随已归档的家族一起归档 */
+    @Query("""
+        UPDATE images SET is_protected = 1
+        WHERE is_protected = 0 AND status IN ('active', 'thumbnail_trash', 'missing', 'archived')
+          AND variant_group IN (SELECT variant_group FROM images WHERE is_protected = 1 AND variant_group IS NOT NULL
+              AND status IN ('active', 'thumbnail_trash', 'missing', 'archived'))
+    """)
+    suspend fun protectArchivedFamilies(): Int
+
+    @Query("UPDATE images SET status = 'archived' WHERE is_protected = 1 AND status IN ('active', 'thumbnail_trash')")
+    suspend fun hideArchived(): Int
+
+    @Query("UPDATE images SET status = CASE WHEN source_type = 'chatthumb' THEN 'thumbnail_trash' ELSE 'active' END WHERE status = 'archived'")
+    suspend fun showArchived(): Int
+
+    /** 让归档与「是否在图库显示」设置一致：补齐家族，再统一隐藏或显示 */
+    @Transaction
+    suspend fun syncArchive(hidden: Boolean): Int = protectArchivedFamilies() + if (hidden) hideArchived() else showArchived()
+
+    // 归档页：每张图只显示一个版本（优先非缩略图、再取最大的），只有缩略图的图也能看到。
+    // [statuses] 不显示归档时为 archived，照常显示时为 active / thumbnail_trash。
 
     @Query("""
-        SELECT * FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb' AND is_protected = 1
-        ORDER BY mtime DESC, id DESC
+        SELECT * FROM images i
+        WHERE i.is_protected = 1 AND i.status IN (:statuses)
+          AND (i.variant_group IS NULL OR i.id = (SELECT f.id FROM images f WHERE f.variant_group = i.variant_group
+              AND f.is_protected = 1 AND f.status IN (:statuses) ORDER BY f.source_type = 'chatthumb', f.size DESC, f.id LIMIT 1))
+        ORDER BY i.mtime DESC, i.id DESC
     """)
-    fun pagingFavoriteTimeline(): PagingSource<Int, ImageEntity>
+    fun pagingArchiveTimeline(statuses: List<String>): PagingSource<Int, ImageEntity>
 
     @Query("""
-        SELECT COUNT(*) FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb' AND is_protected = 1
+        SELECT COUNT(*) FROM images i
+        WHERE i.is_protected = 1 AND i.status IN (:statuses)
+          AND (i.variant_group IS NULL OR i.id = (SELECT f.id FROM images f WHERE f.variant_group = i.variant_group
+              AND f.is_protected = 1 AND f.status IN (:statuses) ORDER BY f.source_type = 'chatthumb', f.size DESC, f.id LIMIT 1))
     """)
-    fun observeFavoriteCount(): Flow<Int>
+    fun observeArchiveCount(statuses: List<String>): Flow<Int>
+
+    @Query("""
+        SELECT i.date_bucket AS bucketKey, COUNT(*) AS count FROM images i
+        WHERE i.is_protected = 1 AND i.status IN (:statuses)
+          AND (i.variant_group IS NULL OR i.id = (SELECT f.id FROM images f WHERE f.variant_group = i.variant_group
+              AND f.is_protected = 1 AND f.status IN (:statuses) ORDER BY f.source_type = 'chatthumb', f.size DESC, f.id LIMIT 1))
+        GROUP BY i.date_bucket
+    """)
+    fun observeArchiveDateBucketCounts(statuses: List<String>): Flow<List<BucketCountRow>>
+
+    /** 归档页某一天的全部图片（点日期标题全选） */
+    @Query("""
+        SELECT i.id FROM images i
+        WHERE i.is_protected = 1 AND i.status IN (:statuses) AND i.mtime >= :from AND i.mtime < :until
+          AND (i.variant_group IS NULL OR i.id = (SELECT f.id FROM images f WHERE f.variant_group = i.variant_group
+              AND f.is_protected = 1 AND f.status IN (:statuses) ORDER BY f.source_type = 'chatthumb', f.size DESC, f.id LIMIT 1))
+    """)
+    suspend fun archiveIdsBetween(statuses: List<String>, from: Long, until: Long): List<Long>
+
+    /** 归档页看图的左右滑动顺序（归档的图规模小，全量取 id） */
+    @Query("""
+        SELECT i.id FROM images i
+        WHERE i.is_protected = 1 AND i.status IN (:statuses)
+          AND (i.variant_group IS NULL OR i.id = (SELECT f.id FROM images f WHERE f.variant_group = i.variant_group
+              AND f.is_protected = 1 AND f.status IN (:statuses) ORDER BY f.source_type = 'chatthumb', f.size DESC, f.id LIMIT 1))
+        ORDER BY i.mtime DESC, i.id DESC
+    """)
+    suspend fun archiveTimelineIds(statuses: List<String>): List<Long>
 
     /** 已完成 hash 的图片，分页拉出来用于评分 / 全库再聚合 */
     @Query("""
@@ -1264,7 +1336,7 @@ interface ImageDao {
     // ---- 清理候选池（方案 A：按维度规则筛选）----
 
     /**
-     * 清理候选池：已排除收藏 / 用户保留的图，只取规则判定所需的最小字段，
+     * 清理候选池：已排除归档 / 用户保留的图，只取规则判定所需的最小字段，
      * 避免把整行装载进内存。具体命中哪个维度由
      * [com.xjw.qalbum.service.cleanup.CleanupRules] 在内存判定。
      *
@@ -1529,3 +1601,6 @@ data class RecommendCandidateRow(
     val mtime: Long,
     val inDuplicateGroup: Boolean,
 )
+
+/** 归档按家族更新时每块的 id 数（:ids 在语句里出现两次，须在 SQLite 变量上限的一半以内） */
+private const val ARCHIVE_CHUNK = 400

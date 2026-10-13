@@ -208,7 +208,7 @@ class QqSourceRepository(
     }
 
     /**
-     * 按来源范围整体移入回收站（收藏 / 保留的图片跳过）。[includeShared] 决定是否包含也出现在其他会话 /
+     * 按来源范围整体移入回收站（归档 / 保留的图片跳过）。[includeShared] 决定是否包含也出现在其他会话 /
      * 发送人的图片，[contents] 决定清理图片、QQ 缩略图或两者；[linkedVersions] 同时处理同一张图的其他缓存版本。
      */
     fun trash(

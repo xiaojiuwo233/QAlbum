@@ -18,6 +18,9 @@ import java.time.ZoneId
  * - `variant_bytes`：合并显示时的大小（代表图为整组合计，其余为自身大小），合并显示下按大小排序 / 分组用它。
  * - `duplicate_group_id` / `is_duplicate_best`：基于 xxHash + pHash 检测出的"重复组"。
  * - `status = thumbnail_trash`：历史状态名；现在表示 QQ 缩略图（chatthumb），不进图库时间线，可在缩略图页与来源页清理。
+ * - `is_protected`：归档（原「收藏」）。总是按整个家族设置，任何清理都不会删除。归档的图片不在图库显示时
+ *   `status = archived`（只按 status 过滤的图库、来源、标签、搜索、缩略图页自然看不到它们），
+ *   设置为照常显示时保持原 status（见 ArchiveManager）。
  */
 @Entity(
     tableName = "images",
@@ -108,7 +111,8 @@ data class ImageEntity(
 
     // --- 用户操作状态 ---
     @ColumnInfo(name = "status") val status: String = "active",
-    @ColumnInfo(name = "is_protected") val isFavorite: Boolean = false,
+    /** 已归档（列名沿用收藏时期的 is_protected） */
+    @ColumnInfo(name = "is_protected") val isArchived: Boolean = false,
     @ColumnInfo(name = "user_keep") val userKeep: Boolean? = null,
 
     // 永久删除时间戳：仅三条永久删除路径标记 deleted 时写入，用于首页「今日已清理」统计；
@@ -158,7 +162,7 @@ data class ImageEntity(
             duplicateGroupId == other.duplicateGroupId &&
             isDuplicateBest == other.isDuplicateBest &&
             status == other.status &&
-            isFavorite == other.isFavorite &&
+            isArchived == other.isArchived &&
             userKeep == other.userKeep &&
             deletedAt == other.deletedAt
     }

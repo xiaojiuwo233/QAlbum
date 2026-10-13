@@ -24,6 +24,7 @@ import com.xjw.qalbum.service.ai.AiPrivacyGuard
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -435,6 +436,13 @@ class SettingsRepository(
         ds.edit { it[Keys.FAST_SCROLL] = enabled }
     }
 
+    /** 归档的图片也在图库、来源等处照常显示（像收藏一样）；默认关闭，只在归档页出现 */
+    val archiveVisible: Flow<Boolean> = prefsData.map { it[Keys.ARCHIVE_VISIBLE] ?: false }.distinctUntilChanged()
+
+    suspend fun setArchiveVisible(visible: Boolean) {
+        ds.edit { it[Keys.ARCHIVE_VISIBLE] = visible }
+    }
+
     /** 已完成的图片家族回填版本（见 PictureVariantIndexer） */
     val variantIndexVersion: Flow<Int> = prefsData.map { it[Keys.VARIANT_INDEX_VERSION] ?: 0 }
 
@@ -455,9 +463,9 @@ class SettingsRepository(
         ds.edit { it[Keys.CLEANUP_CONFIG] = cleanupJson.encodeToString(config) }
     }
 
-    // ---- 自动收藏配置（分析阶段按敏感信息自动收藏，默认关闭）----
+    // ---- 自动归档配置（分析阶段按敏感信息自动归档，默认关闭；键名沿用收藏时期）----
 
-    /** 自动收藏规则；缺省或解析失败回退到 [AutoFavoriteConfig.DEFAULT]（关闭） */
+    /** 自动归档规则；缺省或解析失败回退到 [AutoFavoriteConfig.DEFAULT]（关闭） */
     val autoFavoriteConfig: Flow<AutoFavoriteConfig> = prefsData.map { prefs ->
         prefs[Keys.AUTO_FAVORITE_CONFIG]?.let { raw ->
             runCatching { cleanupJson.decodeFromString<AutoFavoriteConfig>(raw) }.getOrNull()
@@ -597,6 +605,7 @@ class SettingsRepository(
         val GALLERY_LARGE_BYTES = longPreferencesKey("gallery_large_bytes")
         val GALLERY_STACK_VARIANTS = booleanPreferencesKey("gallery_stack_variants")
         val FAST_SCROLL = booleanPreferencesKey("fast_scroll")
+        val ARCHIVE_VISIBLE = booleanPreferencesKey("archive_visible")
         val VARIANT_INDEX_VERSION = intPreferencesKey("variant_index_version")
         val QQ_SOURCE_SORT = stringPreferencesKey("qq_source_sort")
         val QQ_SOURCE_FACET_ORDER = stringPreferencesKey("qq_source_facet_order")

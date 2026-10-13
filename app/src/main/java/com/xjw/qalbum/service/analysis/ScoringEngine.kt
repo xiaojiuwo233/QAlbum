@@ -23,7 +23,7 @@ object ScoringEngine {
 
         // 用户明确标记
         if (image.userKeep == true) score += 0.5f
-        if (image.isFavorite) score += 0.5f
+        if (image.isArchived) score += 0.5f
 
         // 高分辨率小加分
         val pixels = CleanupSignals.pixelCount(image)
@@ -49,8 +49,8 @@ object ScoringEngine {
     }
 
     fun computeDeleteScore(image: ImageEntity, ocr: OcrTextEntity? = null): Float {
-        // 用户明确保留 / 已收藏 → 直接归零
-        if (image.userKeep == true || image.isFavorite) return 0f
+        // 用户明确保留 / 已归档 → 直接归零
+        if (image.userKeep == true || image.isArchived) return 0f
 
         var score = 0f
 

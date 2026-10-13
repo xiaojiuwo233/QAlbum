@@ -156,7 +156,7 @@ object QqCachePaths {
     }
 
     /**
-     * 图片家族键：同一张 QQ 图片的 chatimg / chatraw / chatthumb（含 `_hd`）以及 Temp 转码缩略图共用一个键
+     * 图片家族键：同一张 QQ 图片的 chatimg / chatraw / chatthumb（含 `_hd`、`.jpg`）以及 Temp 转码缩略图共用一个键
      * （即这张图在 chatimg 下的文件名 CRC），只凭路径算出，不需要读聊天数据库。
      * 不是 `folder:MD5` 命名的文件（旧缓存迁移、导入消息等）返回 null，按独立图片处理。
      *
@@ -181,10 +181,11 @@ object QqCachePaths {
             else -> return null
         }
         if (!path.startsWith("Cache_", nameAt)) return null
-        val hd = path.endsWith("_hd")
+        val stemEnd = if (path.endsWith(".jpg")) path.length - 4 else path.length
+        val hd = stemEnd >= 3 && path.regionMatches(stemEnd - 3, "_hd", 0, 3)
         if (hd && !thumb) return null
-        val end = if (hd) path.length - 3 else path.length
-        // 分桶目录是文件名（不含 _hd）的末 3 位
+        val end = if (hd) stemEnd - 3 else stemEnd
+        // 分桶目录是缓存名（不含 _hd / .jpg）的末 3 位
         if (bucketLength != 3 || !path.regionMatches(bucketAt, path, end - 3, 3)) return null
         val negative = path.getOrNull(nameAt + 6) == '-'
         val digitsAt = nameAt + if (negative) 7 else 6
@@ -219,7 +220,8 @@ object QqCachePaths {
         return folders.flatMap { folder ->
             val name = "Cache_" + java.lang.Long.toString(key xor delta.getValue(folder), 16)
             val variant = "$base/$folder/${name.takeLast(3)}/$name"
-            if (folder == "chatthumb") listOf(variant, variant + "_hd") else listOf(variant)
+            val variants = if (folder == "chatthumb") listOf(variant, variant + "_hd") else listOf(variant)
+            variants.flatMap { listOf(it, "$it.jpg") }
         }
     }
 

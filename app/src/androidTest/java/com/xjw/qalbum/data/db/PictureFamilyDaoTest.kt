@@ -1,6 +1,7 @@
 package com.xjw.qalbum.data.db
 
 import android.content.Context
+import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -9,12 +10,27 @@ import com.xjw.qalbum.data.db.dao.QqScopeIds
 import com.xjw.qalbum.data.db.dao.QqScopeOrder
 import com.xjw.qalbum.data.db.dao.QqScopeSql
 import com.xjw.qalbum.data.db.entity.ImageEntity
+import com.xjw.qalbum.data.db.entity.QqOriginEntity
+import com.xjw.qalbum.data.db.entity.QqOriginPathEntity
+import com.xjw.qalbum.data.db.entity.QqSourceAccountEntity
+import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.domain.model.TimelineSection
 import com.xjw.qalbum.qq.QqCachePaths
+import com.xjw.qalbum.qq.QqSourceStatsBuilder
+import com.xjw.qalbum.service.indexer.PictureVariantIndexer
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.File
+import java.util.UUID
 
 /**
  * 图片家族相关的 DAO 查询：合并显示的时间线计数、家族成员、按整组合计的大小排序与分组、点标题全选的范围、
@@ -80,6 +96,98 @@ class PictureFamilyDaoTest {
         } finally {
             db.close()
         }
+    }
+
+    @Test
+    fun upgradingV2RestacksJpegsAndRetainsSources() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val storeFile = File(context.cacheDir, "jpg-variants-${UUID.randomUUID()}.preferences_pb")
+        val store = PreferenceDataStoreFactory.create(scope = scope) { storeFile }
+        val settings = SettingsRepository(context, scope, store)
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).addCallback(AppDatabase.creationCallback).build()
+        try {
+            val paths = seedSources(db)
+            val (img, raw, thumb) = paths
+            val dao = db.imageDao()
+            dao.insert(image(img, "chatimg", "active", 300))
+            dao.insert(image(raw, "chatraw", "active", 2_000))
+            dao.insert(image(thumb, "chatthumb", "thumbnail_trash", 20))
+            val jpgId = dao.insert(image("$raw.jpg", "chatraw", "active", 3_000).copy(
+                variantGroup = null, isArchived = true, userKeep = true,
+            ))
+            QqSourceStatsBuilder(db).rebuild {}
+            assertEquals(2, dao.countActiveTimeline(stacked = true))
+            settings.setVariantIndexVersion(2)
+
+            val indexer = PictureVariantIndexer(db, settings)
+            indexer.ensureIndexed()
+            assertEquals(3, settings.variantIndexVersion.first())
+            assertEquals(1, dao.countActiveTimeline(stacked = true))
+            val jpg = dao.getAnyByIds(listOf(jpgId)).single()
+            assertEquals(QqCachePaths.familyKey(raw), jpg.variantGroup)
+            assertEquals(4, jpg.variantCount)
+            assertEquals(5_320L, jpg.variantBytes)
+            assertTrue(jpg.isArchived)
+            assertEquals(true, jpg.userKeep)
+            QqSourceStatsBuilder(db).rebuild {}
+            val sources = db.qqSourceDao()
+            val group = sources.facetId(0, "group")!!
+            val sender = sources.facetId(1, "sender")!!
+            val forwarded = sources.facetId(0, "forwarded")!!
+            assertEquals(listOf(jpgId), sources.queryIds(QqScopeSql.ids(QqScopeIds(group, sender), QqContent.IMAGES, stacked = true)))
+            assertEquals(listOf(jpgId), sources.queryIds(QqScopeSql.ids(QqScopeIds(conversationId = forwarded), QqContent.IMAGES, stacked = true)))
+            assertEquals(2, sources.pathContexts(listOf("$raw.jpg")).size)
+            assertEquals(setOf("Alice", "Forwarder"), sources.observeImageOrigins(jpgId).first().map { it.senderName }.toSet())
+            assertFalse(sources.observeSummary().first()!!.dirty)
+            // 同一版本再次启动不回填、不触发来源重建。
+            indexer.ensureIndexed()
+            assertFalse(sources.observeSummary().first()!!.dirty)
+        } finally {
+            db.close()
+            scope.cancel()
+            storeFile.delete()
+        }
+    }
+
+    @Test
+    fun newJpegIsLinkedAndCountedIncrementally() = runBlocking {
+        val db = Room.inMemoryDatabaseBuilder(ApplicationProvider.getApplicationContext<Context>(), AppDatabase::class.java)
+            .addCallback(AppDatabase.creationCallback).build()
+        try {
+            val raw = seedSources(db)[1]
+            QqSourceStatsBuilder(db).rebuild {}
+            val sources = db.qqSourceDao()
+            sources.registerJpegPaths(listOf(raw))
+            val jpgId = db.imageDao().insert(image("$raw.jpg", "chatraw", "active", 1_000))
+            assertEquals(2, sources.observeImageOrigins(jpgId).first().size)
+            val group = sources.facetId(0, "group")!!
+            assertEquals(listOf(jpgId), sources.queryIds(QqScopeSql.ids(QqScopeIds(conversationId = group), QqContent.IMAGES, stacked = true)))
+            val summary = sources.observeSummary().first()!!
+            assertFalse(summary.dirty)
+            assertEquals(1, summary.imageCount)
+            assertEquals(1_000L, summary.imageBytes)
+            sources.reconcileLinks()
+            assertEquals(summary, sources.observeSummary().first())
+            QqSourceStatsBuilder(db).rebuild {}
+            assertEquals(summary, sources.observeSummary().first())
+        } finally {
+            db.close()
+        }
+    }
+
+    private suspend fun seedSources(db: AppDatabase): List<String> {
+        val md5 = "dddddddddddddddddddddddddddddddd"
+        val paths = QqCachePaths.relativePaths(md5).map { "$root/$it" }
+        val sources = db.qqSourceDao()
+        sources.putAccount(QqSourceAccountEntity("account", "Account", 1_000, 2))
+        val origins = listOf(
+            QqOriginEntity("direct", "account", "group", "Photography", 2, "sender", "Alice", "", 1_000, md5),
+            QqOriginEntity("forward", "account", "forwarded", "Forwarded records", 3, "forwarder", "Forwarder", "", 2_000, md5),
+        )
+        sources.insertOrigins(origins)
+        sources.insertPaths(origins.flatMap { origin -> paths.map { QqOriginPathEntity(it, origin.id) } })
+        return paths
     }
 
     private fun image(path: String, sourceType: String, status: String, size: Long): ImageEntity = ImageEntity(

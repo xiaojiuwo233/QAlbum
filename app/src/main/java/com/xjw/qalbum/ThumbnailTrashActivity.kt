@@ -333,7 +333,7 @@ private fun ThumbnailCacheScreen(onBack: () -> Unit, viewModel: ThumbnailCacheVi
                                     preview = preview?.without(target.id)
                                     items.refresh()
                                 } else {
-                                    Toast.makeText(context, "这张缩略图未删除：已收藏、保留或文件已变化", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(context, "这张缩略图未删除：已归档、保留或文件已变化", Toast.LENGTH_SHORT).show()
                                 }
                             }
                         },

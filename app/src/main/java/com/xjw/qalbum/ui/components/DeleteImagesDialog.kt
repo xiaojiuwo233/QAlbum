@@ -36,8 +36,9 @@ import org.koin.compose.koinInject
  * 删除图片的确认：默认「移入回收站」（可恢复），[onPermanent] 不为 null 时另有「永久删除」（错误色）。
  *
  * 只在用得上时才出现选项：所选图片还有其他版本（原图 / 预览图 / 缩略图）时显示「连同其他版本」，
- * 其中有其他聊天也在用的图片时显示「包括共用的 N 张」；已收藏 / 保留的一行带过。
+ * 其中有其他聊天也在用的图片时显示「包括共用的 N 张」；已归档 / 保留的一行带过。
  * 这些都只查库（[QuarantineManager.deleteFacts]），实际删除时再逐组核对文件。
+ * [includeArchived]：归档页里删除，归档不再挡住（删除后归档标记保留，从回收站恢复会回到归档）。
  */
 @Composable
 fun DeleteImagesDialog(
@@ -49,12 +50,13 @@ fun DeleteImagesDialog(
     initialOptions: PictureDeleteOptions = PictureDeleteOptions(),
     noun: String = "图片",
     note: String? = null,
+    includeArchived: Boolean = false,
 ) {
     val manager = koinInject<QuarantineManager>()
-    val facts by produceState<PictureDeleteFacts?>(null, imageIds, sourceScope) {
-        value = manager.deleteFacts(imageIds, sourceScope)
+    val facts by produceState<PictureDeleteFacts?>(null, imageIds, sourceScope, includeArchived) {
+        value = manager.deleteFacts(imageIds, sourceScope, includeArchived)
     }
-    var options by remember(imageIds) { mutableStateOf(initialOptions) }
+    var options by remember(imageIds) { mutableStateOf(initialOptions.copy(includeArchived = includeArchived)) }
     val count = imageIds.size
     val current = facts
     val ready = current != null && current.accessError == null && current.removable(options) > 0
@@ -67,7 +69,7 @@ fun DeleteImagesDialog(
                 Text(
                     buildString {
                         if (current != null) append(formatBytes(current.bytes(options))).append(" · ")
-                        append("移入回收站后可恢复")
+                        append(if (includeArchived) "移入回收站后可恢复，恢复后仍在归档" else "移入回收站后可恢复")
                     },
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -89,8 +91,8 @@ fun DeleteImagesDialog(
                 val hint = when {
                     current == null -> null
                     current.accessError != null -> current.accessError
-                    current.protectedCount >= count -> if (count == 1) "已收藏或保留，不会删除" else "都已收藏或保留，不会删除"
-                    current.protectedCount > 0 -> "已收藏或保留的 ${current.protectedCount} 张不会删除"
+                    current.protectedCount >= count -> if (count == 1) "已归档或保留，不会删除" else "都已归档或保留，不会删除"
+                    current.protectedCount > 0 -> "已归档或保留的 ${current.protectedCount} 张不会删除"
                     else -> null
                 }
                 (listOfNotNull(hint, note)).forEach { line ->

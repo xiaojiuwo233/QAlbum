@@ -39,13 +39,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.CallSplit
+import androidx.compose.material.icons.filled.Archive
+import androidx.compose.material.icons.outlined.Archive
 import androidx.compose.material.icons.outlined.Bookmark
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.DoneAll
-import androidx.compose.material.icons.outlined.Favorite
-import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.RadioButtonUnchecked
@@ -242,7 +242,7 @@ internal fun CleanupReviewScreen(
             busy = busy,
             onClose = { previewId = null },
             onToggleSelect = { viewModel.setReviewItemSelected(it, it !in selectedIds) },
-            onFavorite = { iid, fav -> viewModel.setFavorite(iid, fav) },
+            onArchive = { iid, archived -> viewModel.setArchived(iid, archived) },
             onKeep = { viewModel.keepImage(it); previewId = null },
             onTrash = { viewModel.trashOne(it); previewId = null },
             onShare = { iid -> viewModel.shareImage(iid) { t -> context.startActivity(shareChooser(t)) } },
@@ -475,7 +475,7 @@ private fun SingleTile(
         if (item.image.variantCount >= 2) {
             TileStackBadge(item.image.variantCount, Modifier.align(Alignment.BottomEnd).padding(5.dp))
         }
-        // 保护图（用户保留 / 已收藏）：明确标识且不可勾选（VM 侧同样拦截）
+        // 保护图（用户保留 / 已归档）：明确标识且不可勾选（VM 侧同样拦截）
         val protection = protectionLabel(item.image)
         if (protection != null) {
             TileBadge(text = protection, modifier = Modifier.align(Alignment.TopEnd))
@@ -585,7 +585,7 @@ fun CleanupReviewGroupScreen(
         if (snapshot == null && liveGroup != null) snapshot = liveGroup.members
     }
 
-    // reviewBatch 里仍在审核的实体：快照叠加 live 实体，收藏 / 保留状态变更才能即时反映
+    // reviewBatch 里仍在审核的实体：快照叠加 live 实体，归档 / 保留状态变更才能即时反映
     val liveEntities: Map<Long, ImageEntity> = remember(review) {
         buildMap {
             review?.items?.forEach { item ->
@@ -716,7 +716,7 @@ fun CleanupReviewGroupScreen(
                 busy = busy,
                 onClose = { previewId = null },
                 onToggleSelect = { viewModel.setReviewItemSelected(it, it !in selectedIds) },
-                onFavorite = { iid, fav -> viewModel.setFavorite(iid, fav) },
+                onArchive = { iid, archived -> viewModel.setArchived(iid, archived) },
                 onKeep = { viewModel.keepImage(it); previewId = null },
                 onTrash = { viewModel.trashOne(it); previewId = null },
                 onShare = { iid -> viewModel.shareImage(iid) { t -> context.startActivity(shareChooser(t)) } },
@@ -793,7 +793,7 @@ private fun GroupMemberTile(
 }
 
 /**
- * 审核预览：左右滑动、缩放；顶部「时间 + 详情 + 保存 + 分享」；底部「收藏 / 勾选 / 清理 / 保留」。
+ * 审核预览：左右滑动、缩放；顶部「时间 + 详情 + 保存 + 分享」；底部「归档 / 勾选 / 清理 / 保留」。
  * 清理 / 保留会把该图移出审核并关闭预览。
  */
 @Composable
@@ -804,7 +804,7 @@ internal fun ReviewPreviewPager(
     busy: Boolean,
     onClose: () -> Unit,
     onToggleSelect: (Long) -> Unit,
-    onFavorite: (Long, Boolean) -> Unit,
+    onArchive: (Long, Boolean) -> Unit,
     onKeep: (Long) -> Unit,
     onTrash: (Long) -> Unit,
     onShare: (Long) -> Unit,
@@ -828,15 +828,15 @@ internal fun ReviewPreviewPager(
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            val isFav = current.isFavorite
+            val archived = current.isArchived
             val isSelected = current.id in selectedIds
             val isProtected = isProtectedImage(current)
             PreviewAction(
-                icon = if (isFav) Icons.Outlined.Favorite else Icons.Outlined.FavoriteBorder,
-                label = if (isFav) "已收藏" else "收藏",
-                onClick = { onFavorite(current.id, !isFav) },
+                icon = if (archived) Icons.Filled.Archive else Icons.Outlined.Archive,
+                label = if (archived) "已归档" else "归档",
+                onClick = { onArchive(current.id, !archived) },
             )
-            // 保护图（用户保留 / 已收藏）不可勾入删除集；取消收藏后恢复可勾选
+            // 保护图（用户保留 / 已归档）不可勾入删除集；取消归档后恢复可勾选
             PreviewAction(
                 icon = if (isSelected) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
                 label = if (isProtected) "已保护" else if (isSelected) "已勾选" else "勾选",
@@ -910,7 +910,7 @@ private fun itemReason(item: ReviewItem): String = when (item) {
     is ReviewItem.Group -> CleanupRules.REASON_DUPLICATE
 }
 
-/** 当前可见项里可删除的图片 id：单图本身 + 重复组内非保留图；保护（user_keep / 收藏）图排除 */
+/** 当前可见项里可删除的图片 id：单图本身 + 重复组内非保留图；保护（user_keep / 归档）图排除 */
 private fun deletableIds(items: List<ReviewItem>): List<Long> = items.flatMap { item ->
     when (item) {
         is ReviewItem.Single -> if (isProtectedImage(item.image)) emptyList() else listOf(item.image.id)

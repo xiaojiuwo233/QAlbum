@@ -39,9 +39,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.outlined.Archive
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.CheckCircle
-import androidx.compose.material.icons.outlined.Favorite
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
@@ -100,7 +100,8 @@ import com.xjw.qalbum.ui.imageloading.ImageEntityModel
 /** 网格图块上显示哪些角标 */
 @Immutable
 data class PhotoBadges(
-    val favorite: Boolean = true,
+    /** 左上角标出已归档的图（归档照常显示时才会出现在归档页以外） */
+    val archived: Boolean = true,
     /** 超过该字节数显示「MB+」；null 不显示 */
     val largeThresholdBytes: Long? = null,
     /** 已启用分析项全部完成时显示小对勾；null 不显示 */
@@ -112,7 +113,7 @@ data class PhotoBadges(
 )
 
 /**
- * 图库式照片网格（图库 / 收藏 / 标签 / QQ 来源 / 缩略图共用）。
+ * 图库式照片网格（图库 / 归档 / 标签 / QQ 来源 / 缩略图共用）。
  *
  * - 日期 / 大小分组标题横跨整行；提供 [sectionIds] 时点标题即勾选（或取消）这一组的全部图片，选择态下标题带勾选圈；
  * - 单击：非选择态打开，选择态切换勾选；
@@ -514,8 +515,8 @@ fun PhotoTile(
         // 合并显示时这张图代表整个家族：大小按全部版本合计
         val stacked = badges.stack && image.variantGroup != null && image.variantCount >= 2
         val bytes = if (stacked) image.variantBytes else image.size
-        if (showInfoBadges && badges.favorite && image.isFavorite) {
-            TileIconBadge(Icons.Outlined.Favorite, Modifier.align(Alignment.TopStart))
+        if (showInfoBadges && badges.archived && image.isArchived) {
+            TileIconBadge(Icons.Outlined.Archive, Modifier.align(Alignment.TopStart))
         }
         val threshold = badges.largeThresholdBytes
         if (showInfoBadges && threshold != null && bytes > threshold) {

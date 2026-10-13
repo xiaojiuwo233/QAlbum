@@ -6,6 +6,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.RawQuery
+import androidx.room.Transaction
 import androidx.room.Upsert
 import androidx.sqlite.db.SimpleSQLiteQuery
 import androidx.sqlite.db.SupportSQLiteQuery
@@ -45,6 +46,15 @@ data class QqSourceCounts(
     val protectedCount: Int,
     val removable: Int,
     val removableBytes: Long,
+)
+
+/** 按范围归档前的统计：还没归档的图片与 QQ 缩略图，其中也出现在范围之外（其他聊天也在用）的张数 */
+data class QqArchiveCounts(
+    val images: Int,
+    val imageBytes: Long,
+    val thumbs: Int,
+    val thumbBytes: Long,
+    val shared: Int,
 )
 
 data class QqScopeStats(val count: Int, val bytes: Long)
@@ -201,6 +211,9 @@ interface QqSourceDao {
     @RawQuery
     suspend fun queryCounts(query: SupportSQLiteQuery): QqSourceCounts
 
+    @RawQuery
+    suspend fun queryArchiveCounts(query: SupportSQLiteQuery): QqArchiveCounts
+
     @Query("SELECT MAX(id) FROM images")
     suspend fun maxImageId(): Long?
 
@@ -223,10 +236,30 @@ interface QqSourceDao {
         WHERE account_key = :accountKey AND sender_key = :key AND :name <> ''""")
     suspend fun updateSenderName(accountKey: String, key: String, name: String)
 
+    /** 仅给实际已入库、且符合 QQ 家族命名的 .jpg 版本补来源，避免为每条消息预建额外路径。 */
+    @Query("""INSERT OR IGNORE INTO qq_origin_paths(path, origin_id)
+        SELECT COALESCE(q.original_path, i.path), p.origin_id FROM images i
+        LEFT JOIN quarantine q ON q.image_id = i.id
+        JOIN qq_origin_paths p ON p.path = substr(COALESCE(q.original_path, i.path), 1, length(COALESCE(q.original_path, i.path)) - 4)
+        WHERE i.variant_group IS NOT NULL AND substr(COALESCE(q.original_path, i.path), -4) = '.jpg'
+          AND i.status <> 'deleted'""")
+    suspend fun registerIndexedJpegPaths()
+
+    /** 新图片插入前登记别名，让现有的来源与统计触发器在插入时一起维护关联。 */
+    @Query("""INSERT OR IGNORE INTO qq_origin_paths(path, origin_id)
+        SELECT path || '.jpg', origin_id FROM qq_origin_paths WHERE path IN (:referencePaths)""")
+    suspend fun registerJpegPaths(referencePaths: List<String>)
+
     @Query("""INSERT OR IGNORE INTO image_qq_origins(image_id, origin_id)
         SELECT i.id, p.origin_id FROM images i JOIN qq_origin_paths p ON p.path = i.path
         WHERE i.status NOT IN ('deleted', 'quarantined')""")
-    suspend fun reconcileLinks()
+    suspend fun linkOriginPaths()
+
+    @Transaction
+    suspend fun reconcileLinks() {
+        registerIndexedJpegPaths()
+        linkOriginPaths()
+    }
 
     @Query("""INSERT OR IGNORE INTO qq_origin_paths(path, origin_id)
         SELECT :path, origin_id FROM qq_origin_paths WHERE path = :referencePath""")
@@ -373,7 +406,7 @@ object QqScopeSql {
 
     private const val PROTECTED = "(i.is_protected = 1 OR COALESCE(i.user_keep, 0) = 1)"
 
-    /** 按范围清理前的统计：共用与受保护（收藏 / 保留）的图片分别计数 */
+    /** 按范围清理前的统计：共用与受保护（归档 / 保留）的图片分别计数 */
     fun counts(ids: QqScopeIds, set: Set<QqContent>, includeShared: Boolean): SupportSQLiteQuery {
         val (w, whereArgs) = where(ids, set)
         val (sharedSql, sharedArgs) = shared(ids)
@@ -386,6 +419,30 @@ object QqScopeSql {
             FROM images i WHERE $w"""
         // 参数按出现顺序：shared、removable 两次（各含 shared）、where
         return query(sql, sharedArgs + sharedArgs + sharedArgs + whereArgs)
+    }
+
+    /** 按范围归档前的统计（见 [QqArchiveCounts]）；共用的照样归档，只是告诉用户有多少 */
+    fun archiveCounts(ids: QqScopeIds): SupportSQLiteQuery {
+        val (w, whereArgs) = where(ids, setOf(QqContent.IMAGES, QqContent.THUMBNAILS))
+        val (sharedSql, sharedArgs) = shared(ids)
+        val sql = """SELECT
+            COALESCE(SUM(CASE WHEN i.source_type <> 'chatthumb' THEN 1 ELSE 0 END), 0) AS images,
+            COALESCE(SUM(CASE WHEN i.source_type <> 'chatthumb' THEN i.size ELSE 0 END), 0) AS imageBytes,
+            COALESCE(SUM(CASE WHEN i.source_type = 'chatthumb' THEN 1 ELSE 0 END), 0) AS thumbs,
+            COALESCE(SUM(CASE WHEN i.source_type = 'chatthumb' THEN i.size ELSE 0 END), 0) AS thumbBytes,
+            COALESCE(SUM(CASE WHEN $sharedSql THEN 1 ELSE 0 END), 0) AS shared
+            FROM images i WHERE $w AND +i.is_protected = 0"""
+        return query(sql, sharedArgs + whereArgs)
+    }
+
+    /** 按范围归档的图片 id：范围里还没归档的全部图片与缩略图（含共用的、文件暂时不在的），keyset 分页 */
+    fun archiveIds(ids: QqScopeIds, afterId: Long, limit: Int): SupportSQLiteQuery {
+        val (scopeSql, args) = scope(ids)
+        return query(
+            """SELECT i.id FROM images i WHERE i.status IN ('active', 'thumbnail_trash', 'missing') AND +i.is_protected = 0
+                AND $scopeSql AND i.id > ? ORDER BY i.id LIMIT ?""",
+            args + listOf(afterId, limit),
+        )
     }
 
     /** 可清理的图片 id（keyset 分页） */

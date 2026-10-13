@@ -53,7 +53,7 @@ import com.xjw.qalbum.ui.anim.sharedAxisXPopExit
 import com.xjw.qalbum.ui.cleanup.CleanupScreen
 import com.xjw.qalbum.ui.dashboard.DashboardScreen
 import com.xjw.qalbum.ui.detail.ImageDetailScreen
-import com.xjw.qalbum.ui.gallery.FavoriteGalleryScreen
+import com.xjw.qalbum.ui.gallery.ArchiveScreen
 import com.xjw.qalbum.ui.gallery.GalleryScreen
 import com.xjw.qalbum.ui.logs.LogScreen
 import com.xjw.qalbum.ui.search.SearchScreen
@@ -79,7 +79,7 @@ import org.koin.compose.koinInject
  * - **inset**：NavHost 永远铺满，不随底栏显隐临时加/去 padding；每页用自己的顶栏避让状态栏。
  * - **转场**：
  *   - 一级 Tab 之间 → Fade Through；
- *   - 设置首页 ↔ 设置二级页、图库 ↔ 搜索 / 收藏 → Container Transform（sharedBounds）；
+ *   - 设置首页 ↔ 设置二级页、图库 ↔ 搜索 / 归档 → Container Transform（sharedBounds）；
  *   - 其它二级页（详情、QQ 来源、标签…）→ Shared Axis X；
  *   - 底栏在进入二级页、清理审核、图库多选时滑出，返回时滑入。系统手势走预测式返回。
  */
@@ -165,7 +165,7 @@ fun AppNavigation() {
                         contentPadding = contentPadding,
                         onImageClick = { id -> navController.navigate("image/$id") },
                         onOpenSearch = { navController.navigate(NavDestination.Search.route) },
-                        onOpenFavorites = { navController.navigate("favorites") },
+                        onOpenArchive = { navController.navigate("archive") },
                         onOpenSources = { navController.navigate(QQ_SOURCES_ROUTE) },
                         onSelectionModeChange = { gallerySelecting = it },
                         sharedScope = this@SharedTransitionLayout,
@@ -173,11 +173,11 @@ fun AppNavigation() {
                         imageShared = sharedTransition,
                     )
                 }
-                composable("favorites") {
-                    FavoriteGalleryScreen(
+                composable("archive") {
+                    ArchiveScreen(
                         contentPadding = secondaryPadding,
                         onBack = { navController.popBackStack() },
-                        onImageClick = { id -> navController.navigate("favorites/image/$id") },
+                        onImageClick = { id -> navController.navigate("archive/image/$id") },
                         sharedScope = this@SharedTransitionLayout,
                         animatedScope = this,
                         imageShared = sharedTransition,
@@ -303,13 +303,13 @@ fun AppNavigation() {
                     )
                 }
                 composable(
-                    route = "favorites/image/{imageId}",
+                    route = "archive/image/{imageId}",
                     arguments = listOf(navArgument("imageId") { type = NavType.LongType }),
                 ) { entry ->
                     val id = entry.arguments?.getLong("imageId") ?: 0L
                     ImageDetailScreen(
                         imageId = id,
-                        favoritesOnly = true,
+                        archiveOnly = true,
                         onBack = { navController.popBackStack() },
                         sharedScope = if (sharedTransition) this@SharedTransitionLayout else null,
                         animatedScope = this,
@@ -363,7 +363,7 @@ private val bottomBarRoutes: Set<String> = NavDestination.bottomBarEntries.map {
 private val settingsRoutes: Set<String> =
     setOf(NavDestination.Settings.route) + SettingsCategory.entries.map { it.route }
 
-/** 不在底部导航中的路由都视为"二级页"（设置子页、详情、搜索、收藏、QQ 来源等） */
+/** 不在底部导航中的路由都视为"二级页"（设置子页、详情、搜索、归档、QQ 来源等） */
 private fun NavBackStackEntry.isSecondary(): Boolean =
     (destination.route?.substringBefore("/") ?: "") !in bottomBarRoutes
 
@@ -373,7 +373,7 @@ private fun AnimatedContentTransitionScope<NavBackStackEntry>.involvesSecondary(
 
 /**
  * 本次转场是否走 Container Transform（转场本体用 fade，让共享元素 morph 主导）：
- * 设置域内、图库↔搜索/收藏。
+ * 设置域内、图库↔搜索/归档。
  */
 private fun AnimatedContentTransitionScope<NavBackStackEntry>.isContainerTransition(): Boolean {
     val from = initialState.destination.route ?: return false
@@ -381,11 +381,11 @@ private fun AnimatedContentTransitionScope<NavBackStackEntry>.isContainerTransit
     if (from == to) return false
     if (from in settingsRoutes && to in settingsRoutes) return true
     val gallery = NavDestination.Gallery.route
-    val galleryContainers = setOf(NavDestination.Search.route, "favorites")
+    val galleryContainers = setOf(NavDestination.Search.route, "archive")
     if (from == gallery && to in galleryContainers) return true
     if (to == gallery && from in galleryContainers) return true
     return false
 }
 
 private fun NavBackStackEntry.isImage(): Boolean =
-    (destination.route ?: "").let { it.startsWith("image/") || it.startsWith("favorites/image/") }
+    (destination.route ?: "").let { it.startsWith("image/") || it.startsWith("archive/image/") }

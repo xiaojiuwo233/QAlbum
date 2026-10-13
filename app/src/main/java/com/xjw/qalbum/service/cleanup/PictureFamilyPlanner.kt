@@ -17,9 +17,10 @@ internal class PictureFamilyPlanner(private val db: AppDatabase, private val roo
     ) {
         val seen = HashSet<String>()
         val selectedAll=ids.toHashSet()
+        val visibleStatuses = if (options.includeArchived) setOf("active", "thumbnail_trash", "archived") else setOf("active", "thumbnail_trash")
         for (chunk in ids.distinct().chunked(200)) {
             currentCoroutineContext().ensureActive()
-            val seeds = db.imageDao().getAnyByIds(chunk).filter { it.status in setOf("active", "thumbnail_trash") }
+            val seeds = db.imageDao().getAnyByIds(chunk).filter { it.status in visibleStatuses }
             if (seeds.isEmpty()) continue
             val paths = seeds.associateBy { it.path }
             val parents = paths.keys.associateWith { it }.toMutableMap()
@@ -84,8 +85,9 @@ internal class PictureFamilyPlanner(private val db: AppDatabase, private val roo
                 if(!seen.add(key))continue
                 val linked=members.any { it in linkedPaths }
                 val records=members.mapNotNull { indexed[it] }
-                val protected=records.any { it.isFavorite || it.userKeep==true }
-                var unavailable=uncertain || records.any { it.status !in setOf("active","missing","thumbnail_trash") }
+                // 归档页删除（includeArchived）时归档不算保护，用户保留仍然算
+                val protected=records.any { (it.isArchived && !options.includeArchived) || it.userKeep==true }
+                var unavailable=uncertain || records.any { it.status !in visibleStatuses && it.status != "missing" }
                 val assets=ArrayList<PictureAsset>()
                 if(!unavailable) for(path in members) {
                     val parts=states[path].orEmpty().split('|')
@@ -124,7 +126,7 @@ internal class PictureFamilyPlanner(private val db: AppDatabase, private val roo
     }
 
     companion object {
-        private val CACHE=Regex("Cache_-?[0-9a-fA-F]+(?:_hd)?")
+        private val CACHE=Regex("Cache_-?[0-9a-fA-F]+(?:_hd)?(?:\\.jpg)?")
         private const val MAX_BATCH_PATHS=20_000
     }
 }

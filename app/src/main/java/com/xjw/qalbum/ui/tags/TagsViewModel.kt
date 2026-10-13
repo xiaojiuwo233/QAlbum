@@ -11,6 +11,7 @@ import com.xjw.qalbum.data.paging.RefreshGate
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.data.repository.ImageRepository
 import com.xjw.qalbum.domain.model.TimelineSection
+import com.xjw.qalbum.service.cleanup.ArchiveManager
 import com.xjw.qalbum.service.cleanup.CleanupController
 import com.xjw.qalbum.service.cleanup.PictureDeleteOptions
 import com.xjw.qalbum.service.cleanup.ExternalViewTarget
@@ -31,6 +32,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -46,13 +48,14 @@ import timber.log.Timber
  * - [removeTag]/[removeTagBulk]：从图片上取消该标签；若是「用户保留」标签，同时清除 user_keep（重新可进审核）。
  * - 分钟级批量操作（整标签回收站 / 批量取消标签）跑在 App 级 [appScope]：退出页面 / VM 销毁不中断，
  *   避免取消落在管线「文件已移、DB 未写」的中间窗口。
- * - 预览所需的收藏 / 分享 / 保存 / OCR 与图库 / 审核页同一套实现。
+ * - 预览所需的归档 / 分享 / 保存 / OCR 与图库 / 审核页同一套实现。
  */
 class TagsViewModel(
     private val tagDao: TagDao,
     private val imageRepository: ImageRepository,
     private val cleanupController: CleanupController,
     private val imageFileManager: ImageFileManager,
+    private val archive: ArchiveManager,
     private val settings: SettingsRepository,
     private val appScope: CoroutineScope,
 ) : ViewModel() {
@@ -131,8 +134,12 @@ class TagsViewModel(
 
     fun createSubdir(name: String) = settings.addExportSubdir(name)
 
-    fun setFavorite(imageId: Long, favorite: Boolean) {
-        viewModelScope.launch { imageRepository.setFavorite(imageId, favorite) }
+    /** 归档 / 取消归档（连同同一张图的其他版本）；[onDone] 回调归档后它是否还在图库里显示 */
+    fun setArchived(imageId: Long, archived: Boolean, onDone: (visible: Boolean) -> Unit = {}) {
+        viewModelScope.launch {
+            if (archived) archive.archive(listOf(imageId)) else archive.unarchive(listOf(imageId))
+            onDone(!archived || settings.archiveVisible.first())
+        }
     }
 
     /** 预览「分享」：缓存 + 补后缀，回调拿到可分享的 content Uri */
@@ -221,7 +228,7 @@ class TagsViewModel(
         }
     }
 
-    /** 看图页「删除」：把这一张移入回收站（收藏 / 保留的图片会被跳过），[onDone] 回调是否成功 */
+    /** 看图页「删除」：把这一张移入回收站（归档 / 保留的图片会被跳过），[onDone] 回调是否成功 */
     fun trashOne(tag: TagDao.TagWithCount, imageId: Long, onDone: (Boolean) -> Unit = {}) {
         appScope.launch {
             val moved = try {

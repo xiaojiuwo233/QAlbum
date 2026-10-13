@@ -25,15 +25,15 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Archive
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Download
-import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.Forum
-import androidx.compose.material.icons.outlined.HeartBroken
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material.icons.outlined.Unarchive
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -99,7 +99,7 @@ fun GalleryScreen(
     contentPadding: PaddingValues,
     onImageClick: (Long) -> Unit = {},
     onOpenSearch: () -> Unit = {},
-    onOpenFavorites: () -> Unit = {},
+    onOpenArchive: () -> Unit = {},
     onOpenSources: () -> Unit = {},
     onSelectionModeChange: (Boolean) -> Unit = {},
     sharedScope: SharedTransitionScope? = null,
@@ -118,6 +118,7 @@ fun GalleryScreen(
     val directory by viewModel.timelineDirectory.collectAsState()
     val fastScroll by viewModel.fastScroll.collectAsState()
     val deleteProgress by viewModel.deleteProgress.collectAsState()
+    val archiveVisible by viewModel.archiveVisible.collectAsState()
     // 换排序 / 合并方式后回到顶部（网格带占位、知道总数，不回顶会停在新列表的中间）；旋转屏幕不算
     var shownOrder by rememberSaveable { mutableStateOf("${sort.name}/$stackVariants") }
     LaunchedEffect(sort, stackVariants) {
@@ -167,10 +168,10 @@ fun GalleryScreen(
                                 modifier = Modifier.sharedContainer("search-bar", sharedScope, animatedScope),
                             ) { Icon(Icons.Outlined.Search, contentDescription = "搜索") }
                             IconButton(
-                                onClick = onOpenFavorites,
+                                onClick = onOpenArchive,
                                 shapes = IconButtonDefaults.shapes(),
-                                modifier = Modifier.sharedContainer("favorites-bar", sharedScope, animatedScope),
-                            ) { Icon(Icons.Outlined.FavoriteBorder, contentDescription = "收藏") }
+                                modifier = Modifier.sharedContainer("archive-bar", sharedScope, animatedScope),
+                            ) { Icon(Icons.Outlined.Archive, contentDescription = "归档") }
                             IconButton(onClick = onOpenSources, shapes = IconButtonDefaults.shapes()) {
                                 Icon(Icons.Outlined.Forum, contentDescription = "按聊天来源浏览")
                             }
@@ -218,10 +219,10 @@ fun GalleryScreen(
             }
 
             FloatingActionToolbar(visible = selectionMode, modifier = Modifier.align(Alignment.BottomCenter)) {
-                ToolbarIconAction(Icons.Outlined.FavoriteBorder, "收藏", onClick = {
+                ToolbarIconAction(Icons.Outlined.Archive, "归档", onClick = {
                     val ids = selectedIds
-                    viewModel.addFavorites(ids) { count ->
-                        Toast.makeText(context, if (count > 0) "已收藏 $count 张" else "所选图片已在收藏中", Toast.LENGTH_SHORT).show()
+                    viewModel.archiveImages(ids) { count ->
+                        Toast.makeText(context, archivedText(count, archiveVisible), Toast.LENGTH_SHORT).show()
                         clearSelection()
                         items.refresh()
                     }
@@ -321,8 +322,13 @@ private fun RefreshableGrid(items: LazyPagingItems<*>, content: @Composable () -
 private fun saveResultMessage(saved: Int, failed: Int): String =
     if (failed > 0) "已保存 $saved 张，$failed 张保存失败（未移入回收站）" else "已保存 $saved 张"
 
+/**
+ * 归档：归档的图片（每张图一格）。归档的图片在别处不会被任何清理删除，只有在这里可以明确删除
+ * （移入回收站 / 永久删除 / 保存后移入回收站；从回收站恢复会回到归档）；
+ * 「归档的图片也在图库中显示」关闭时，它们只在这里出现。
+ */
 @Composable
-fun FavoriteGalleryScreen(
+fun ArchiveScreen(
     contentPadding: PaddingValues,
     onBack: () -> Unit,
     onImageClick: (Long) -> Unit = {},
@@ -331,18 +337,19 @@ fun FavoriteGalleryScreen(
     imageShared: Boolean = false,
     viewModel: GalleryViewModel = koinViewModel(),
 ) {
-    val items = viewModel.favoriteTimeline.collectAsLazyPagingItems()
-    val favoriteCount by viewModel.favoriteCount.collectAsState(initial = 0)
-    val directory by viewModel.favoriteDirectory.collectAsState()
-    val fastScroll by viewModel.fastScroll.collectAsState()
+    val items = viewModel.archiveTimeline.collectAsLazyPagingItems()
+    val archiveCount by viewModel.archiveCount.collectAsState(initial = 0)
+    val archiveVisible by viewModel.archiveVisible.collectAsState()
     val deleteProgress by viewModel.deleteProgress.collectAsState()
+    val directory by viewModel.archiveDirectory.collectAsState()
+    val fastScroll by viewModel.fastScroll.collectAsState()
     val largeThreshold by viewModel.largeThresholdBytes.collectAsState()
     val gridState = rememberLazyGridState()
     val context = LocalContext.current
     var columns by rememberSaveable { mutableIntStateOf(4) }
     var selectedIds by rememberSaveable(stateSaver = SelectedIdsSaver) { mutableStateOf(setOf<Long>()) }
-    var showDeleteConfirm by rememberSaveable { mutableStateOf(false) }
     var showSaveSheet by rememberSaveable { mutableStateOf(false) }
+    var showDeleteConfirm by rememberSaveable { mutableStateOf(false) }
     val exportSubdirs by viewModel.exportSubdirs.collectAsState()
     val selectionMode = selectedIds.isNotEmpty()
     val clearSelection = { selectedIds = emptySet() }
@@ -354,20 +361,20 @@ fun FavoriteGalleryScreen(
     val topBarExit = MaterialTheme.motionScheme.fastEffectsSpec<Float>()
     Scaffold(
         modifier = Modifier
-            .sharedContainer("favorites-bar", sharedScope, animatedScope)
+            .sharedContainer("archive-bar", sharedScope, animatedScope)
             .nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
             AnimatedContent(
                 targetState = selectionMode,
                 transitionSpec = { fadeIn(topBarEnter) togetherWith fadeOut(topBarExit) },
-                label = "favoritesTopBar",
+                label = "archiveTopBar",
             ) { selecting ->
                 if (selecting) {
                     SelectionTopBar(count = selectedIds.size, onClose = clearSelection)
                 } else {
                     TopAppBar(
-                        title = { Text("收藏") },
-                        subtitle = { Text("$favoriteCount 张图片 · 不会被清理") },
+                        title = { Text("归档") },
+                        subtitle = { Text("$archiveCount 张 · 不会被清理" + if (archiveVisible) "" else " · 图库中不显示") },
                         navigationIcon = { BackButton(onBack) },
                         scrollBehavior = scrollBehavior,
                     )
@@ -380,9 +387,10 @@ fun FavoriteGalleryScreen(
             when {
                 items.loadState.refresh is LoadState.Loading && items.itemCount == 0 -> LoadingState()
                 items.itemCount == 0 -> EmptyState(
-                    icon = Icons.Outlined.FavoriteBorder,
-                    title = "还没有收藏",
-                    message = "在图库或看图页点收藏后会集中显示在这里，收藏的图片不会被任何清理流程删除。",
+                    icon = Icons.Outlined.Archive,
+                    title = "还没有归档的图片",
+                    message = "在图库、聊天来源或看图页点「归档」，同一张图的原图、预览图和缩略图会一起归档：不会被任何清理删除，" +
+                        "默认也不再在图库和聊天来源中显示（可在「设置 → 外观与导出」调整）。在聊天来源里还能把一个人或一个群的图片整体归档。",
                 )
                 else -> PhotoGrid(
                     items = items,
@@ -393,8 +401,8 @@ fun FavoriteGalleryScreen(
                     onSelectedIdsChange = { selectedIds = it },
                     onColumnsChange = { columns = it },
                     maxColumns = 6,
-                    badges = PhotoBadges(favorite = false, largeThresholdBytes = largeThreshold),
-                    sectionIds = viewModel::favoriteSectionIds,
+                    badges = PhotoBadges(archived = false, largeThresholdBytes = largeThreshold),
+                    sectionIds = viewModel::archiveSectionIds,
                     directory = directory,
                     fastScroll = fastScroll,
                     contentPadding = contentPadding,
@@ -404,10 +412,10 @@ fun FavoriteGalleryScreen(
             }
 
             FloatingActionToolbar(visible = selectionMode, modifier = Modifier.align(Alignment.BottomCenter)) {
-                ToolbarIconAction(Icons.Outlined.HeartBroken, "取消收藏", onClick = {
+                ToolbarIconAction(Icons.Outlined.Unarchive, "取消归档", onClick = {
                     val ids = selectedIds
-                    viewModel.removeFavorites(ids) { count ->
-                        Toast.makeText(context, "已取消收藏 $count 张", Toast.LENGTH_SHORT).show()
+                    viewModel.unarchiveImages(ids) { count ->
+                        Toast.makeText(context, "已取消归档 $count 张", Toast.LENGTH_SHORT).show()
                         clearSelection()
                         items.refresh()
                     }
@@ -422,6 +430,7 @@ fun FavoriteGalleryScreen(
         val ids = selectedIds
         DeleteImagesDialog(
             imageIds = ids,
+            includeArchived = true,
             onDismiss = { showDeleteConfirm = false },
             onTrash = { options ->
                 showDeleteConfirm = false
@@ -451,7 +460,7 @@ fun FavoriteGalleryScreen(
             onConfirm = { subdir, alsoTrash ->
                 val ids = selectedIds
                 showSaveSheet = false
-                viewModel.saveImages(ids, subdir, alsoTrash) { saved, failed ->
+                viewModel.saveImages(ids, subdir, alsoTrash, includeArchived = true) { saved, failed ->
                     Toast.makeText(context, saveResultMessage(saved, failed), Toast.LENGTH_SHORT).show()
                     clearSelection()
                     items.refresh()
@@ -462,6 +471,10 @@ fun FavoriteGalleryScreen(
 
     deleteProgress?.let { PurgeProgressDialog(it) }
 }
+
+/** 归档结果：不在图库显示归档时告诉用户去哪里找 */
+internal fun archivedText(count: Int, visible: Boolean): String =
+    if (visible) "已归档 $count 张，不会被清理" else "已归档 $count 张，可在「归档」里查看"
 
 /** 图库显示与排序：每行张数、排列顺序（连接式按钮组）、大图标记阈值（合并与快速滚动在「设置 → 外观与导出」） */
 @Composable

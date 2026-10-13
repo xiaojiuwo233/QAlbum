@@ -1,6 +1,14 @@
 package com.xjw.qalbum.service.cleanup
 
-data class PictureDeleteOptions(val linkedVersions: Boolean = true, val includeShared: Boolean = false)
+/**
+ * [includeArchived]：只在归档页删除时为 true——用户在归档里明确删除，归档不再挡住；其余入口归档的图一律跳过。
+ * 删除后归档标记保留，从回收站恢复会回到归档。
+ */
+data class PictureDeleteOptions(
+    val linkedVersions: Boolean = true,
+    val includeShared: Boolean = false,
+    val includeArchived: Boolean = false,
+)
 
 /**
  * 删除确认弹窗用的事实（见 QuarantineManager.deleteFacts）。[bytes] 是所选文件自身大小，[versionBytes] 连同

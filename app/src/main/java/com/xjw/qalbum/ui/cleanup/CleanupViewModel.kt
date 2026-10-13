@@ -28,6 +28,7 @@ import com.xjw.qalbum.service.analysis.DeleteFeatures
 import com.xjw.qalbum.service.analysis.DeletePreferenceModel
 import com.xjw.qalbum.service.analysis.SimilarityLearner
 import com.xjw.qalbum.service.analysis.SimilarityModel
+import com.xjw.qalbum.service.cleanup.ArchiveManager
 import com.xjw.qalbum.service.cleanup.CleanupBatch
 import com.xjw.qalbum.service.cleanup.CleanupController
 import com.xjw.qalbum.service.cleanup.CleanupRules
@@ -87,6 +88,7 @@ class CleanupViewModel(
     private val settings: SettingsRepository,
     private val tagDao: TagDao,
     private val imageFileManager: ImageFileManager,
+    private val archive: ArchiveManager,
     private val appScope: CoroutineScope,
 ) : ViewModel() {
 
@@ -284,7 +286,7 @@ class CleanupViewModel(
     }
 
     fun setReviewItemSelected(imageId: Long, selected: Boolean) {
-        // 受保护（用户保留 / 已收藏）的图不接受勾选：所有勾选入口都经这里或下面的批量口
+        // 受保护（用户保留 / 已归档）的图不接受勾选：所有勾选入口都经这里或下面的批量口
         if (selected && _reviewBatch.value?.protectedIds?.contains(imageId) == true) return
         _selectedReviewDeleteIds.update { if (selected) it + imageId else it - imageId }
     }
@@ -320,7 +322,7 @@ class CleanupViewModel(
         launchGuarded(viewModelScope, "按推荐勾选") {
             val review = _reviewBatch.value ?: return@launchGuarded
             _selectedReviewDeleteIds.value = withContext(Dispatchers.Default) {
-                // 保护集兜底再减一次：装载后才被收藏的图，组的 defaultDeleteIds 里可能还留着
+                // 保护集兜底再减一次：装载后才被归档的图，组的 defaultDeleteIds 里可能还留着
                 suggestedSelection(review.items) - review.protectedIds
             }
         }
@@ -420,19 +422,30 @@ class CleanupViewModel(
         }
     }
 
-    /** 预览页：收藏 / 取消收藏。同步刷新审核批次里的实体快照，预览图标即时翻转、取消收藏可用。 */
-    fun setFavorite(imageId: Long, favorite: Boolean) {
-        launchGuarded(appScope, "收藏", withBusy = false) {
-            imageRepository.setFavorite(imageId, favorite)
+    /**
+     * 预览页：归档 / 取消归档（连同同一张图的其他版本）。同步刷新审核批次里的实体快照，
+     * 预览图标即时翻转、取消归档可用。
+     */
+    fun setArchived(imageId: Long, archived: Boolean) {
+        launchGuarded(appScope, "归档", withBusy = false) {
+            if (archived) archive.archive(listOf(imageId)) else archive.unarchive(listOf(imageId))
+            val family = imageRepository.getById(imageId)?.variantGroup
+            fun sameImage(image: ImageEntity) = image.id == imageId || (family != null && image.variantGroup == family)
+            val changed = HashSet<Long>()
             _reviewBatch.update { cur ->
                 cur?.copy(items = cur.items.map { item ->
                     when (item) {
                         is ReviewItem.Single ->
-                            if (item.image.id == imageId) item.copy(image = item.image.copy(isFavorite = favorite)) else item
+                            if (sameImage(item.image)) {
+                                changed += item.image.id
+                                item.copy(image = item.image.copy(isArchived = archived))
+                            } else {
+                                item
+                            }
                         is ReviewItem.Group ->
-                            if (item.members.any { it.id == imageId }) {
+                            if (item.members.any(::sameImage)) {
                                 item.copy(members = item.members.map { m ->
-                                    if (m.id == imageId) m.copy(isFavorite = favorite) else m
+                                    if (sameImage(m)) m.copy(isArchived = archived).also { changed += m.id } else m
                                 })
                             } else {
                                 item
@@ -440,8 +453,8 @@ class CleanupViewModel(
                     }
                 })
             }
-            // 收藏即保护：从删除勾选中移除，避免刚收藏的图仍留在待删集合里被一并清掉
-            if (favorite) _selectedReviewDeleteIds.update { it - imageId }
+            // 归档即保护：从删除勾选中移除，避免刚归档的图仍留在待删集合里被一并清掉
+            if (archived) _selectedReviewDeleteIds.update { it - changed - imageId }
         }
     }
 
@@ -710,13 +723,13 @@ class CleanupViewModel(
  */
 data class PurgeProgress(val done: Int, val total: Int, val label: String = "正在清理…")
 
-/** 受保护的图：用户显式保留或已收藏，审核列表中明确标识且不可被勾入删除集合。 */
-internal fun isProtectedImage(image: ImageEntity): Boolean = image.userKeep == true || image.isFavorite
+/** 受保护的图：用户显式保留或已归档，审核列表中明确标识且不可被勾入删除集合。 */
+internal fun isProtectedImage(image: ImageEntity): Boolean = image.userKeep == true || image.isArchived
 
 /** 保护标识的展示文案；非保护图返回 null。 */
 internal fun protectionLabel(image: ImageEntity): String? = when {
     image.userKeep == true -> "已保留"
-    image.isFavorite -> "已收藏"
+    image.isArchived -> "已归档"
     else -> null
 }
 
@@ -738,7 +751,7 @@ data class CleanupReviewBatch(
         }
     }
 
-    /** 受保护（用户保留 / 已收藏）的图片 id 集合：勾选入口统一据此过滤。懒建一次。 */
+    /** 受保护（用户保留 / 已归档）的图片 id 集合：勾选入口统一据此过滤。懒建一次。 */
     val protectedIds: Set<Long> by lazy {
         buildSet {
             items.forEach { item ->
@@ -789,7 +802,7 @@ internal val HIGH_CONFIDENCE_REASONS: Set<String> =
  *
  * - [ReviewBatchItem.Single] → [ReviewItem.Single]，默认预选与否取决于是否高把握维度（保护图不预选）。
  * - [ReviewBatchItem.Group] → 用 [DuplicateReviewPolicy.decide] 重算保留图与劣质副本，
- *   保护（user_keep / 收藏）成员从默认勾选中排除；组内无 active 成员或决策为空时丢弃该组。
+ *   保护（user_keep / 归档）成员从默认勾选中排除；组内无 active 成员或决策为空时丢弃该组。
  */
 internal fun buildReviewItems(
     batchItems: List<ReviewBatchItem>,

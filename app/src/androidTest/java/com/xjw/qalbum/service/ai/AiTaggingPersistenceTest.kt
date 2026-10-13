@@ -35,7 +35,7 @@ class AiTaggingPersistenceTest {
             val image = db.imageDao().getById(1)!!
             assertTrue(image.aiDone)
             assertFalse(image.embeddingDone)
-            assertTrue(image.isFavorite)
+            assertTrue(image.isArchived)
             assertEquals(true, image.userKeep)
             assertNull(db.embeddingDao().getByImageId(1))
             val cursor = db.openHelper.readableDatabase.query("SELECT source FROM image_tags WHERE image_id = 1 AND tag_id = 1")
@@ -67,7 +67,7 @@ class AiTaggingPersistenceTest {
                 id = 1, path = "/fixture.png", filename = "fixture", parentDir = "/", sourceType = "chatimg",
                 cacheKey = "fixture", size = 100, mtime = 1000, firstSeen = 1000, lastSeen = 1000,
                 mime = "image/png", width = 100, height = 100, hashDone = true, embeddingDone = true,
-                isFavorite = true, userKeep = true,
+                isArchived = true, userKeep = true,
             ))
             db.tagDao().insertTag(TagEntity(id = 1, name = "receipt", type = "user"))
             db.tagDao().linkTag(ImageTagEntity(1, 1, source = "user"))

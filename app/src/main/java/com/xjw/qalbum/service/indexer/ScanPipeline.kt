@@ -53,6 +53,8 @@ class ScanPipeline(
     private val imageDao: ImageDao,
     private val dirSnapshotDao: DirSnapshotDao,
     private val transportFactory: ScanTransportFactory,
+    /** 扫描结束后的维护：新入库 / 重新出现的版本跟随已归档的图（见 ArchiveManager.sync） */
+    private val afterScan: suspend () -> Unit = {},
 ) {
 
     /** 进程级互斥：定时 Worker 增量与手动扫描可能并发触发，串行化避免重复插入 */
@@ -179,6 +181,7 @@ class ScanPipeline(
                     "updated=$updatedFiles missing=$missingFiles " +
                     "in ${System.currentTimeMillis() - startedAt}ms",
             )
+            runCatching { afterScan() }.onFailure { Timber.w(it, "ScanPipeline: after-scan maintenance failed") }
             send(ScanProgress.Done(updatedFiles))
         } catch (ce: CancellationException) {
             throw ce
@@ -251,6 +254,9 @@ class ScanPipeline(
         // 4. 行变更 + 本批目录快照原子提交（崩溃安全：未提交目录下次重扫）
         db.withTransaction {
             retireTerminalIds.chunked(DB_VAR_LIMIT).forEach { imageDao.retireTerminalPaths(it) }
+            newEntities.asSequence().filter { it.variantGroup != null && it.path.endsWith(".jpg") }
+                .map { it.path.removeSuffix(".jpg") }.toList().chunked(DB_VAR_LIMIT)
+                .forEach { db.qqSourceDao().registerJpegPaths(it) }
             newEntities.chunked(INSERT_CHUNK).forEach { imageDao.insertAll(it) }
             if (changedEntities.isNotEmpty()) imageDao.updateBatchFromScan(changedEntities)
             reviveIds.chunked(DB_VAR_LIMIT).forEach { imageDao.reviveByIds(it) }

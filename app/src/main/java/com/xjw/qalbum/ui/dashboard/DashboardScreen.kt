@@ -34,10 +34,10 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Archive
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.CleaningServices
 import androidx.compose.material.icons.outlined.DataUsage
-import androidx.compose.material.icons.outlined.Favorite
 import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material.icons.outlined.HealthAndSafety
 import androidx.compose.material.icons.outlined.Image
@@ -615,11 +615,11 @@ private fun ImageHealthCard(state: DashboardUiState) {
         title = "文件概况",
         icon = Icons.Outlined.HealthAndSafety,
         trailing = {
-            if (health.favoriteCount > 0) {
+            if (health.archivedCount > 0) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Outlined.Favorite, contentDescription = null, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.tertiary)
+                    Icon(Icons.Outlined.Archive, contentDescription = null, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.tertiary)
                     Spacer(Modifier.width(4.dp))
-                    Text("${health.favoriteCount} 已收藏", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.tertiary)
+                    Text("${health.archivedCount} 已归档", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.tertiary)
                 }
             }
         },

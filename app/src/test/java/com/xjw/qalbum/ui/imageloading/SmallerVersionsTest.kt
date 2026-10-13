@@ -26,17 +26,18 @@ class SmallerVersionsTest {
 
     @Test
     fun `原图格子先读高清缩略图再读预览图`() {
-        assertEquals(listOf(hd, img), smallerVersions(entity(raw, "chatraw"), tile))
+        assertEquals(listOf(hd, "$hd.jpg", img, "$img.jpg"), smallerVersions(entity(raw, "chatraw"), tile))
+        assertEquals(listOf(hd, "$hd.jpg", img, "$img.jpg"), smallerVersions(entity("$raw.jpg", "chatraw"), tile))
     }
 
     @Test
     fun `预览图格子只读高清缩略图`() {
-        assertEquals(listOf(hd), smallerVersions(entity(img, "chatimg"), tile))
+        assertEquals(listOf(hd, "$hd.jpg"), smallerVersions(entity(img, "chatimg"), tile))
     }
 
     @Test
     fun `格子很小时普通缩略图也可以用`() {
-        assertEquals(listOf(thumb, hd, img), smallerVersions(entity(raw, "chatraw"), tiny))
+        assertEquals(listOf(thumb, "$thumb.jpg", hd, "$hd.jpg", img, "$img.jpg"), smallerVersions(entity(raw, "chatraw"), tiny))
     }
 
     @Test

@@ -44,21 +44,22 @@ internal class LinkedPictureOperations(
         var result=PictureDeleteResult(skipped=1)
     }
 
-    suspend fun quarantineAll(groups:List<PictureFileGroup>, reason:String, expiresAt:Long):PictureDeleteResult =
-        isolate(groups,reason,expiresAt,thumbnails=true).sum()
+    /** [archived]：归档页删除，归档的图也可移入（见 PictureDeleteOptions.includeArchived） */
+    suspend fun quarantineAll(groups:List<PictureFileGroup>, reason:String, expiresAt:Long, archived:Boolean=false):PictureDeleteResult =
+        isolate(groups,reason,expiresAt,thumbnails=true,archived=archived).sum()
 
     /**
      * 一批文件组移入回收站：登记、写日志、移动文件、落定各做一次批量操作，几百组只有几个事务和几次 binder 调用。
      * 每组仍有自己的组标识与 pending 日志，中断后按组对账；[then] 在这些组仍被占用时处理已就绪的组（永久删除接着删掉它们）。
      */
-    private suspend fun isolate(groups:List<PictureFileGroup>, reason:String, expiresAt:Long, thumbnails:Boolean,
+    private suspend fun isolate(groups:List<PictureFileGroup>, reason:String, expiresAt:Long, thumbnails:Boolean, archived:Boolean,
         then:suspend (List<Item>)->Unit={}):List<Item> {
         val registered=register(groups)
         val items=groups.indices.map { Item(groups[it],registered[it]) }
         val claimed=items.filter { it.rows.isNotEmpty() && it.rows.size==it.group.assets.size && claim(it.rows.map { r->r.id }) }
         try {
             val logged=db.withTransaction {
-                val current=claimed.flatMap { it.rows }.map { it.id }.chunked(SQL_CHUNK).flatMap { images.getLinkedCleanupEligible(it) }.associateBy { it.id }
+                val current=claimed.flatMap { it.rows }.map { it.id }.chunked(SQL_CHUNK).flatMap { images.getLinkedCleanupEligible(it,archived) }.associateBy { it.id }
                 val now=System.currentTimeMillis()
                 val drafts=ArrayList<QuarantineEntity>()
                 val owners=ArrayList<Item>()
@@ -74,7 +75,7 @@ internal class LinkedPictureOperations(
                     }
                 }
                 val ids=cleanup.insertQuarantineAll(drafts)
-                check(drafts.map { it.imageId }.chunked(SQL_CHUNK).sumOf { images.markLinkedQuarantinePending(it) }==drafts.size)
+                check(drafts.map { it.imageId }.chunked(SQL_CHUNK).sumOf { images.markLinkedQuarantinePending(it,archived) }==drafts.size)
                 drafts.indices.groupBy({ owners[it] },{ drafts[it].copy(id=ids[it]) })
             }
             for((item,records) in logged)item.records=records
@@ -134,7 +135,7 @@ internal class LinkedPictureOperations(
     }
 
     private fun thumbnailRank(image:ImageEntity):Int = when {
-        image.sourceType=="chatthumb" && image.path.endsWith("_hd") -> 0
+        image.sourceType=="chatthumb" && image.path.removeSuffix(".jpg").endsWith("_hd") -> 0
         image.sourceType=="chatimg" -> 1
         image.sourceType=="chatthumb" -> 2
         else -> 3
@@ -172,7 +173,8 @@ internal class LinkedPictureOperations(
     }
 
     /** 永久删除也先完成可恢复隔离和日志提交（不生成缩略图），存储写满或进程退出不能丢失原文件位置；再整批删掉已就绪的组。 */
-    suspend fun permanentlyDeleteAll(groups:List<PictureFileGroup>):PictureDeleteResult = isolate(groups,"用户永久删除",Long.MAX_VALUE,thumbnails=false) { ready ->
+    suspend fun permanentlyDeleteAll(groups:List<PictureFileGroup>, archived:Boolean=false):PictureDeleteResult =
+        isolate(groups,"用户永久删除",Long.MAX_VALUE,thumbnails=false,archived=archived) { ready ->
         if(ready.isNotEmpty())withContext(NonCancellable) {
             val records=ready.flatMap { it.records }
             val info=states(records.map { it.quarantinePath }).let { list->records.indices.associate { records[it].id to list[it] } }
@@ -314,6 +316,8 @@ internal class LinkedPictureOperations(
                 mime=types.getValue(asset.path).mime,width=0,height=0,isAnimated=types.getValue(asset.path).isAnimated,
                 status=if(asset.sourceType=="chatthumb")"thumbnail_trash" else "active")
         }
+        drafts.filter { it.variantGroup!=null && it.path.endsWith(".jpg") }.map { it.path.removeSuffix(".jpg") }
+            .chunked(200).forEach { db.qqSourceDao().registerJpegPaths(it) }
         for(page in drafts.chunked(200))images.insertAll(page)
         val rows=usable.flatMap { group->group.assets.map { it.path } }.chunked(200).flatMap { images.getAnyByPaths(it) }.associateBy { it.path }
         val included=usable.mapTo(HashSet()) { it.key }

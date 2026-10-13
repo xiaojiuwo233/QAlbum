@@ -70,7 +70,8 @@ class ImageRepository(
         ).flow
     }
 
-    fun favoriteTimelinePager(gate: RefreshGate? = null): Flow<PagingData<ImageEntity>> {
+    /** 归档页：每张图一格；[statuses] 见 ArchiveManager.statusesOf */
+    fun archiveTimelinePager(statuses: List<String>, gate: RefreshGate? = null): Flow<PagingData<ImageEntity>> {
         return Pager(
             config = PagingConfig(
                 pageSize = 50,
@@ -80,7 +81,7 @@ class ImageRepository(
                 enablePlaceholders = true,
                 jumpThreshold = JUMP_THRESHOLD,
             ),
-            pagingSourceFactory = gated(gate) { imageDao.pagingFavoriteTimeline() },
+            pagingSourceFactory = gated(gate) { imageDao.pagingArchiveTimeline(statuses) },
         ).flow
     }
 
@@ -125,19 +126,20 @@ class ImageRepository(
     suspend fun timelineIdsBySize(low: Long, high: Long, stacked: Boolean): List<Long> =
         if (stacked) imageDao.stackedIdsBySize(low, high) else imageDao.timelineIdsBySize(low, high)
 
-    suspend fun favoriteIdsBetween(from: Long, until: Long): List<Long> = imageDao.favoriteIdsBetween(from, until)
+    suspend fun archiveIdsBetween(statuses: List<String>, from: Long, until: Long): List<Long> =
+        imageDao.archiveIdsBetween(statuses, from, until)
 
     suspend fun tagIdsBetween(tagId: Long, from: Long, until: Long): List<Long> = imageDao.tagIdsBetween(tagId, from, until)
 
-    fun observeFavoriteDateBucketCounts(): Flow<Map<Long, Int>> =
-        imageDao.observeFavoriteDateBucketCounts().map { rows -> rows.toBucketCountMap() }.throttleLatest()
+    fun observeArchiveDateBucketCounts(statuses: List<String>): Flow<Map<Long, Int>> =
+        imageDao.observeArchiveDateBucketCounts(statuses).map { rows -> rows.toBucketCountMap() }.throttleLatest()
 
     /** 某标签下活跃图片的日期分桶计数（标签详情页时间线表头用，与图库同口径） */
     fun observeTagDateBucketCounts(tagId: Long): Flow<Map<Long, Int>> =
         imageDao.observeTagDateBucketCounts(tagId).map { rows -> rows.toBucketCountMap() }.throttleLatest()
 
-    /** 收藏时间线仍全量取 id：集合由用户手动收藏产生，规模与主时间线不同量级 */
-    suspend fun favoriteTimelineIds(): List<Long> = imageDao.favoriteTimelineIds()
+    /** 归档页看图仍全量取 id：集合由用户手动归档产生，规模与主时间线不同量级 */
+    suspend fun archiveTimelineIds(statuses: List<String>): List<Long> = imageDao.archiveTimelineIds(statuses)
 
     // ---- 详情页时间线窗口（keyset 定位，替代全量 id 装载）----
 
@@ -246,7 +248,7 @@ class ImageRepository(
 
     /**
      * 批量设置/清除用户保留：分块 IN 更新并包进单个事务，整批只触发一次表失效——
-     * 逐张独立事务在万级选中时是分钟级 fsync 风暴（同 [setFavoriteBatch]，守「禁全表逐行写」约束）。
+     * 逐张独立事务在万级选中时是分钟级 fsync 风暴（守「禁全表逐行写」约束）。
      */
     suspend fun setUserKeepBatch(ids: List<Long>, keep: Boolean?) {
         if (ids.isEmpty()) return
@@ -280,20 +282,6 @@ class ImageRepository(
     suspend fun deletedIdsPaged(afterId: Long, limit: Int): List<Long> =
         imageDao.deletedIdsPaged(afterId, limit)
 
-    suspend fun setFavorite(imageId: Long, isFavorite: Boolean) =
-        imageDao.setFavorite(imageId, isFavorite)
-
-    /**
-     * 批量收藏 / 取消收藏：分块 IN 更新并包进单个事务，整批只触发一次表失效——
-     * 逐行提交会让 200w 行的收藏计数 / 分桶聚合观察流每行各重跑一遍。
-     */
-    suspend fun setFavoriteBatch(ids: List<Long>, isFavorite: Boolean) {
-        if (ids.isEmpty()) return
-        db.withTransaction {
-            ids.chunked(SQL_IDS_CHUNK).forEach { imageDao.setFavoriteByIds(it, isFavorite) }
-        }
-    }
-
     // ---- 搜索（Phase 3 起） ----
 
     suspend fun search(query: String, limit: Int = 50, offset: Int = 0): List<OcrDao.SearchHit> =
@@ -314,7 +302,7 @@ class ImageRepository(
     fun observeFullyAnalyzedCount(ocrRequired: Boolean, aiRequired: Boolean, embRequired: Boolean): Flow<Int> =
         imageDao.observeFullyAnalyzedCount(ocrRequired, aiRequired, embRequired).throttleLatest()
     fun observeImageHealth(): Flow<ImageDao.ImageHealthRow> = imageDao.observeImageHealth().throttleLatest()
-    fun observeFavoriteCount(): Flow<Int> = imageDao.observeFavoriteCount().throttleLatest()
+    fun observeArchiveCount(statuses: List<String>): Flow<Int> = imageDao.observeArchiveCount(statuses).throttleLatest()
     fun observeThumbnailTrashSummary(): Flow<ImageDao.ThumbnailTrashSummary> =
         imageDao.observeThumbnailTrashSummary()
 

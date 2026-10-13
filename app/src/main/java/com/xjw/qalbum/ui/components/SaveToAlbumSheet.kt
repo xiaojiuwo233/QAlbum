@@ -41,7 +41,7 @@ import com.xjw.qalbum.data.preferences.SettingsRepository
  * 保存到相册：选择目标子目录（含根目录）、临时新建目录、选择「保存后移入回收站」。
  *
  * 图库 / 详情 / 预览的「保存」共用。[onConfirm] 回传所选子目录（null = 根目录）与是否移入回收站；
- * 显示 / 关闭由外部状态控制（[onDismiss] 负责复位）。
+ * 显示 / 关闭由外部状态控制（[onDismiss] 负责复位）。归档的图片不会删除，[allowTrash] 为 false 时不提供移入回收站。
  */
 @Composable
 fun SaveToAlbumSheet(
@@ -50,10 +50,11 @@ fun SaveToAlbumSheet(
     onCreateSubdir: (String) -> Unit,
     onDismiss: () -> Unit,
     onConfirm: (subdir: String?, alsoTrash: Boolean) -> Unit,
+    allowTrash: Boolean = true,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var selected by remember { mutableStateOf<String?>(null) } // null = 根目录
-    var alsoTrash by remember { mutableStateOf(true) }
+    var alsoTrash by remember { mutableStateOf(allowTrash) }
     var newDir by remember { mutableStateOf("") }
 
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
@@ -110,13 +111,15 @@ fun SaveToAlbumSheet(
                 ) { Icon(Icons.Outlined.CreateNewFolder, contentDescription = "新建目录") }
             }
 
-            SegmentedSwitchItem(
-                position = SegmentPosition.Single,
-                title = "保存后移入回收站",
-                subtitle = "只对保存成功的图片生效，保留期内可在回收站恢复",
-                checked = alsoTrash,
-                onCheckedChange = { alsoTrash = it },
-            )
+            if (allowTrash) {
+                SegmentedSwitchItem(
+                    position = SegmentPosition.Single,
+                    title = "保存后移入回收站",
+                    subtitle = "只对保存成功的图片生效，保留期内可在回收站恢复",
+                    checked = alsoTrash,
+                    onCheckedChange = { alsoTrash = it },
+                )
+            }
 
             Button(
                 onClick = { onConfirm(selected, alsoTrash) },
