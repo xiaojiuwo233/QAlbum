@@ -7,16 +7,20 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import coil3.ImageLoader
 import coil3.SingletonImageLoader
+import com.xjw.qalbum.data.db.DatabaseOpener
 import com.xjw.qalbum.di.appModule
 import com.xjw.qalbum.log.AppLog
 import com.xjw.qalbum.log.CrashHandler
 import com.xjw.qalbum.log.FileLoggingTree
 import com.xjw.qalbum.log.LogcatCapture
 import com.xjw.qalbum.service.cleanup.ArchiveManager
+import com.xjw.qalbum.service.cleanup.OriginalCompressor
 import com.xjw.qalbum.service.cleanup.QuarantineManager
+import com.xjw.qalbum.service.indexer.ImageSizeBackfill
 import com.xjw.qalbum.service.indexer.PictureVariantIndexer
 import com.xjw.qalbum.worker.IncrementalScanWorker
 import com.xjw.qalbum.worker.QuarantinePurgeWorker
+import com.xjw.qalbum.service.work.TaskForegroundService
 import com.topjohnwu.superuser.Shell
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
@@ -73,19 +77,30 @@ class App : Application(), Configuration.Provider {
             modules(appModule)
         }
 
+        // 需要升级数据库时立即打开（迁移期间界面显示进度弹窗），其余启动工作照常排队等它
+        get<DatabaseOpener>().upgradeIfNeeded()
+
         // 文件操作日志必须在任何新扫描/清理前尽快对账；周期 Worker 仍会再次幂等兜底。
         val quarantineManager = get<QuarantineManager>()
-        get<CoroutineScope>().launch { quarantineManager.reconcilePending() }
+        val compressor = get<OriginalCompressor>()
+        get<CoroutineScope>().launch {
+            quarantineManager.reconcilePending()
+            runCatching { compressor.reconcile() }.onFailure { Timber.w(it, "Compress reconcile failed") }
+            runCatching { compressor.repairOwnership() }.onFailure { Timber.w(it, "Compress ownership repair failed") }
+        }
+        // 后台任务通知的渠道（Android 8+）；没有任务时不显示任何通知
+        TaskForegroundService.createChannel(this)
         // 归档与「是否在图库显示」设置保持一致（首次运行把旧版逐张收藏补齐为整张图）
         get<ArchiveManager>().start()
         // 升级后一次性回填图片家族（同一张 QQ 图片的原图 / 预览图 / 缩略图），已完成则立即返回
         val variantIndexer = get<PictureVariantIndexer>()
         get<CoroutineScope>().launch { runCatching { variantIndexer.ensureIndexed() }.onFailure { Timber.w(it, "Picture family indexing failed") } }
+        // 以前入库、还没有宽高的图补读一次（只读文件头；没有就什么也不做）
+        get<ImageSizeBackfill>().startIfNeeded()
 
         // 后台任务排程（均 KEEP 幂等，重复调用无副作用）：
         // - 增量扫描：每 6 小时一次（目录剪枝后常态秒级完成）
-        // - 回收站到期清理：每日一次，兑现 UI 承诺的「N 天后自动删除」
-        //   （AnalysisWorker 是 UI 按需触发的一次性工作，不在启动时排程）
+        // - 回收站到期清理：每日一次，兑现 UI 承诺的「N 天后自动删除」（含压缩前的原图）
         IncrementalScanWorker.schedulePeriodic(this)
         WorkManager.getInstance(this).enqueueUniquePeriodicWork(
             QuarantinePurgeWorker.NAME_UNIQUE,

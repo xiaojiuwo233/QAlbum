@@ -38,6 +38,7 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import com.xjw.qalbum.service.work.BackgroundTasks
 
 /**
  * 时间线页 ViewModel
@@ -55,6 +56,7 @@ class GalleryViewModel(
     private val archive: ArchiveManager,
     private val settings: SettingsRepository,
     private val appScope: CoroutineScope,
+    private val tasks: BackgroundTasks,
 ) : ViewModel() {
 
     // ---- 图库偏好 ----
@@ -67,24 +69,6 @@ class GalleryViewModel(
 
     val largeThresholdBytes: StateFlow<Long> = settings.galleryLargeThresholdBytes
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsRepository.DEFAULT_LARGE_THRESHOLD_BYTES)
-
-    /**
-     * 当前「会被分析」的阶段集合：受每项开关 + 全局 AI 服务可用性约束。
-     * 图库完成角标据此判断「已启用的项是否全部完成」。
-     */
-    val enabledPhases: StateFlow<EnabledPhases> =
-        combine(settings.analysisConfig, settings.aiEnabled, settings.aiEndpoint) { config, aiEnabled, endpoint ->
-            val aiReady = aiEnabled && endpoint.isNotBlank()
-            EnabledPhases(
-                ocr = config.ocrEnabled,
-                aiTag = config.aiTagEnabled && aiReady,
-                embedding = config.embeddingEnabled && aiReady,
-            )
-        }.stateIn(
-            viewModelScope,
-            SharingStarted.WhileSubscribed(5_000),
-            EnabledPhases(ocr = true, aiTag = false, embedding = false),
-        )
 
     fun setColumns(columns: Int) {
         viewModelScope.launch { settings.setGalleryColumns(columns) }
@@ -262,11 +246,19 @@ class GalleryViewModel(
         }
     }
 
+    /** 批量操作：页面上显示进度对话框，同时登记为后台任务（通知栏进度，切到后台不中断） */
     private suspend fun <T> withDeleteProgress(label: String, block: suspend (onProgress: (Int, Int) -> Unit) -> T): T =
-        try {
-            refreshGate.hold { block { done, total -> _deleteProgress.value = PurgeProgress(done, total, label) } }
-        } finally {
-            _deleteProgress.value = null
+        tasks.track(label.removePrefix("正在").removeSuffix("…"), cancellable = false) { handle ->
+            try {
+                refreshGate.hold {
+                    block { done, total ->
+                        _deleteProgress.value = PurgeProgress(done, total, label)
+                        handle.update("已处理 $done / $total 张", done.toLong(), total.toLong())
+                    }
+                }
+            } finally {
+                _deleteProgress.value = null
+            }
         }
 }
 
@@ -279,26 +271,6 @@ sealed class GalleryTimelineItem {
 /** 按大小分组时取哪个大小：文件自身，或合并显示时的整组合计 */
 internal val FileSize: (ImageEntity) -> Long = { it.size }
 internal val StackedSize: (ImageEntity) -> Long = { it.variantBytes }
-
-/** 当前「会被分析」的阶段集合（hash 始终隐含开启，故不在此） */
-data class EnabledPhases(
-    val ocr: Boolean,
-    val aiTag: Boolean,
-    val embedding: Boolean,
-)
-
-/**
- * 图片是否「已完成全部需要的分析项」：hash 必做；OCR / AI 标签 / 向量 哪项未启用就不要求。
- * 对损坏 / 过小图宽容（这些图本就被对应阶段跳过，见 pendingOcr/AiTag/Embedding 筛选），
- * 否则它们永远拿不到角标、也会拖累清理页「已分析」进度到不了 100%。
- * 与 `ImageDao.observeFullyAnalyzedCount` 的 SQL 判定保持完全一致。
- */
-fun isFullyAnalyzed(image: ImageEntity, phases: EnabledPhases): Boolean =
-    image.hashDone &&
-        ((image.blockHash != null && image.featureGrid != null) || image.isCorrupt) &&
-        (!phases.ocr || image.ocrDone || image.isCorrupt || image.width < 64 || image.height < 64) &&
-        (!phases.aiTag || image.aiDone || image.isCorrupt) &&
-        (!phases.embedding || image.embeddingDone || image.isCorrupt)
 
 /**
  * 参数接受可空 map 流：调用方可传 stateIn(初值 null) 固化的热流，首个 generation 等到

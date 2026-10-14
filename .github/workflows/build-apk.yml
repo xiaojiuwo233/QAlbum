@@ -68,9 +68,7 @@ jobs:
       - name: Run unit tests
         run: ./gradlew testDebugUnitTest --stacktrace
 
-      # 7. GitHub Linux runner 上启用 KVM，执行 app 模块的 Room 迁移/分页/隐私等设备测试
-      #    不执行根项目 connectedDebugAndroidTest：ppocr-sdk 的 OCR 基准测试依赖外置模型，
-      #    不属于常规 CI，且仓库不会打包这些大型模型文件
+      # 7. GitHub Linux runner 上启用 KVM，执行 app 模块的 Room 迁移/分页/清理等设备测试
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules

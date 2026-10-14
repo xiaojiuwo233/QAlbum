@@ -2,9 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- 基础权限：网络、前台服务 -->
-    <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- 前台服务：扫描、读取聊天来源、清理等长任务切到后台时保持运行（QAlbum 不联网） -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
@@ -33,19 +31,11 @@
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
-        android:networkSecurityConfig="@xml/network_security_config"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.QAlbum"
         android:enableOnBackInvokedCallback="true"
         tools:targetApi="34">
-
-        <activity
-            android:name=".ThumbnailTrashActivity"
-            android:exported="false"
-            android:label="缩略图"
-            android:parentActivityName=".MainActivity"
-            android:theme="@style/Theme.QAlbum" />
 
         <activity
             android:name=".MainActivity"
@@ -78,12 +68,11 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
-        <!-- WorkManager 前台服务（AnalysisWorker.setForeground 使用）：
-             Android 14+ 强制要求为其声明 foregroundServiceType，dataSync 对应长时分析任务 -->
+        <!-- 后台长任务（扫描、读取聊天来源、清理、压缩）的前台服务：通知栏显示进度，切后台不降速 -->
         <service
-            android:name="androidx.work.impl.foreground.SystemForegroundService"
-            android:foregroundServiceType="dataSync"
-            tools:node="merge" />
+            android:name=".service.work.TaskForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
 
         <!-- WorkManager 自定义 Initializer：由 Koin 注入 WorkerFactory -->
         <provider

@@ -10,7 +10,6 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -30,8 +29,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Article
 import androidx.compose.material.icons.automirrored.outlined.FactCheck
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
-import androidx.compose.material.icons.outlined.Analytics
-import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.CleaningServices
 import androidx.compose.material.icons.outlined.Delete
@@ -43,9 +40,6 @@ import androidx.compose.material.icons.outlined.PrivacyTip
 import androidx.compose.material.icons.outlined.RestartAlt
 import androidx.compose.material.icons.outlined.Security
 import androidx.compose.material.icons.outlined.Storage
-import androidx.compose.material.icons.outlined.Visibility
-import androidx.compose.material.icons.outlined.VisibilityOff
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalButton
@@ -53,13 +47,11 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.LargeFlexibleTopAppBar
-import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialShapes
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -87,7 +79,6 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -95,12 +86,6 @@ import com.xjw.qalbum.BuildConfig
 import com.xjw.qalbum.R
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.domain.model.AccessMode
-import com.xjw.qalbum.domain.model.CleanupConfig
-import com.xjw.qalbum.domain.model.CleanupPreset
-import com.xjw.qalbum.domain.model.DuplicateStrictness
-import com.xjw.qalbum.service.ai.AiPrivacyGuard
-import com.xjw.qalbum.service.ocr.OcrModelDownloadState
-import com.xjw.qalbum.service.ocr.OcrModelStatus
 import com.xjw.qalbum.ui.anim.StaggeredEntrance
 import com.xjw.qalbum.ui.anim.pressScale
 import com.xjw.qalbum.ui.components.BackButton
@@ -111,13 +96,12 @@ import com.xjw.qalbum.ui.components.SegmentedGroup
 import com.xjw.qalbum.ui.components.SegmentedListItem
 import com.xjw.qalbum.ui.components.SegmentedSwitchItem
 import com.xjw.qalbum.ui.components.ShapeIcon
-import com.xjw.qalbum.ui.components.WavyProgress
 import kotlinx.coroutines.launch
 import org.koin.androidx.compose.koinViewModel
 
 /** 设置分组：首页按分组聚合二级入口 */
 enum class SettingsGroup(val title: String) {
-    DATA("数据与分析"),
+    DATA("数据与清理"),
     SYSTEM("个性化与系统"),
 }
 
@@ -130,10 +114,8 @@ enum class SettingsCategory(
     val group: SettingsGroup,
 ) {
     SCAN("settings_scan", "扫描", "图片目录与扫描方式", Icons.Outlined.Storage, SettingsGroup.DATA),
-    ANALYSIS("settings_analysis", "分析", "各分析项的开关、数量与顺序", Icons.Outlined.Analytics, SettingsGroup.DATA),
-    CLEANUP("settings_cleanup", "清理规则", "清理维度、门限与审核数量", Icons.Outlined.CleaningServices, SettingsGroup.DATA),
-    AI("settings_ai", "AI 服务", "服务地址、密钥与模型", Icons.Outlined.AutoAwesome, SettingsGroup.DATA),
-    PERSONALIZATION("settings_personalization", "外观与导出", "动态取色、图库合并、快速滚动与归档、动效与导出目录", Icons.Outlined.Palette, SettingsGroup.SYSTEM),
+    CLEANUP("settings_cleanup", "清理", "回收站与原图压缩", Icons.Outlined.CleaningServices, SettingsGroup.DATA),
+    PERSONALIZATION("settings_personalization", "外观与导出", "取色、图库显示、动效与导出目录", Icons.Outlined.Palette, SettingsGroup.SYSTEM),
     ACCESS("settings_access", "权限与访问", "Shizuku / Root 授权与连通性", Icons.Outlined.Security, SettingsGroup.SYSTEM),
     LOGS("settings_logs", "日志", "运行日志、崩溃记录与导出", Icons.AutoMirrored.Outlined.Article, SettingsGroup.SYSTEM),
     ABOUT("settings_about", "关于", "版本信息", Icons.Outlined.Info, SettingsGroup.SYSTEM),
@@ -294,7 +276,7 @@ fun ScanSettingsScreen(
                     InstantSaveTextField(
                         value = state.chatpicPath,
                         label = stringResource(R.string.settings_chatpic_path),
-                        supporting = "TIM、国际版 QQ 的目录不同，请按实际情况修改。",
+                        supporting = "TIM、国际版 QQ 的目录不同，按需修改。",
                         onSave = {
                             // 仓库对空输入静默拒绝（不落盘），这里前置拦截并如实提示，避免「已保存」后回弹旧值
                             if (it.trim().isBlank()) {
@@ -320,7 +302,7 @@ fun ScanSettingsScreen(
             item("scan") { position ->
                 SegmentedCard(position) {
                     SettingsBlurb(
-                        "增量扫描只比对有变化的目录，通常几秒完成；全量扫描重新核对全部目录并检测已删除的文件。",
+                        "增量扫描只看有变化的目录，几秒完成；全量扫描核对全部文件，能发现已删除的。",
                     )
                     AnimatedContent(targetState = running, label = "scanButtons") { isRunning ->
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -341,193 +323,10 @@ fun ScanSettingsScreen(
                     onClick = { if (!running) viewModel.startDeepVerify() },
                     leading = { Icon(Icons.AutoMirrored.Outlined.FactCheck, contentDescription = null) },
                     headline = { Text("深度校验") },
-                    supporting = { Text("重新读取所有文件头、修正格式误判。耗时较长，仅在怀疑识别有误时使用。") },
+                    supporting = { Text("重读全部文件头，修正格式误判。较慢，识别有误时再用。") },
                 )
             }
         }
-    }
-}
-
-@Composable
-fun AnalysisSettingsScreen(
-    onBack: () -> Unit,
-    viewModel: SettingsViewModel = koinViewModel(),
-    sharedScope: SharedTransitionScope? = null,
-    animatedScope: AnimatedVisibilityScope? = null,
-) {
-    val config by viewModel.analysisConfig.collectAsState()
-    val oldestFirst by viewModel.analysisOldestFirst.collectAsState()
-    val autoFavorite by viewModel.autoFavoriteConfig.collectAsState()
-    val ocrModelStatus by viewModel.ocrModelStatus.collectAsState()
-    val ocrDownload by viewModel.ocrModelDownloadState.collectAsState()
-    val analysisResetting by viewModel.analysisResetting.collectAsState()
-    var showResetDialog by remember { mutableStateOf(false) }
-
-    LaunchedEffect(ocrDownload) {
-        if (ocrDownload is OcrModelDownloadState.Done) viewModel.refreshOcrModelStatus()
-    }
-
-    SettingsDetailScaffold(SettingsCategory.ANALYSIS, onBack, sharedScope, animatedScope) { notify ->
-        SegmentedGroup(header = "分析项目与每次数量") {
-            item("hash") { position ->
-                SegmentedCard(position) {
-                    Text("哈希与画质", style = MaterialTheme.typography.titleMedium)
-                    SettingsBlurb("所有图片都要经过的基础阶段，始终开启。数量留空或填 0 表示不限；每次「开始分析」处理完即停，下次从未完成处继续。")
-                    PhaseLimitField(
-                        label = "每次数量（留空 = 不限）",
-                        limit = config.hashLimit,
-                        onSave = { viewModel.setHashLimit(it); notify("已保存哈希数量") },
-                    )
-                }
-            }
-            item("ocr") { position ->
-                SegmentedSwitchItem(
-                    position = position,
-                    title = "文字识别（OCR）",
-                    subtitle = "识别图中文字，用于文字搜索与敏感信息判断",
-                    checked = config.ocrEnabled,
-                    onCheckedChange = { viewModel.setOcrEnabled(it); notify(if (it) "已开启文字识别" else "已关闭文字识别") },
-                )
-            }
-            if (config.ocrEnabled) {
-                item("ocr-detail") { position ->
-                    SegmentedCard(position) {
-                        PhaseLimitField(
-                            label = "OCR 每次数量（留空 = 不限）",
-                            limit = config.ocrLimit,
-                            onSave = { viewModel.setOcrLimit(it); notify("已保存 OCR 数量") },
-                        )
-                        OcrModelRow(
-                            status = ocrModelStatus,
-                            downloadState = ocrDownload,
-                            onDownload = { viewModel.downloadOcrModel(); notify("开始下载 OCR 模型") },
-                            onDelete = { viewModel.deleteOcrModel(); notify("已删除 OCR 模型") },
-                            onRefresh = { viewModel.refreshOcrModelStatus(); notify("已刷新 OCR 模型状态") },
-                        )
-                    }
-                }
-            }
-            item("ai") { position ->
-                SegmentedSwitchItem(
-                    position = position,
-                    title = "AI 标签",
-                    subtitle = "让 AI 为图片生成描述和标签（需先在「AI 服务」中启用）",
-                    checked = config.aiTagEnabled,
-                    onCheckedChange = { viewModel.setAiTagEnabled(it); notify(if (it) "已开启 AI 标签" else "已关闭 AI 标签") },
-                )
-            }
-            if (config.aiTagEnabled) {
-                item("ai-limit") { position ->
-                    SegmentedCard(position) {
-                        PhaseLimitField(
-                            label = "AI 标签每次数量（留空 = 不限）",
-                            limit = config.aiLimit,
-                            onSave = { viewModel.setAiLimit(it); notify("已保存 AI 标签数量") },
-                        )
-                    }
-                }
-            }
-            item("embedding") { position ->
-                SegmentedSwitchItem(
-                    position = position,
-                    title = "语义向量",
-                    subtitle = "生成文本向量，支持按意思搜索（需先在「AI 服务」中启用）",
-                    checked = config.embeddingEnabled,
-                    onCheckedChange = { viewModel.setEmbeddingEnabled(it); notify(if (it) "已开启语义向量" else "已关闭语义向量") },
-                )
-            }
-            if (config.embeddingEnabled) {
-                item("embedding-limit") { position ->
-                    SegmentedCard(position) {
-                        PhaseLimitField(
-                            label = "向量每次数量（留空 = 不限）",
-                            limit = config.embeddingLimit,
-                            onSave = { viewModel.setEmbeddingLimit(it); notify("已保存向量数量") },
-                        )
-                    }
-                }
-            }
-        }
-
-        SegmentedGroup(header = "分析顺序") {
-            item("order") { position ->
-                SegmentedCard(position) {
-                    SettingsBlurb("决定优先处理哪一批图片，「生成审核清单」也按这个顺序。")
-                    ConnectedChoiceRow(
-                        options = listOf(true, false),
-                        selected = oldestFirst,
-                        label = { if (it) "从早到晚" else "从晚到早" },
-                        onSelect = viewModel::setAnalysisOldestFirst,
-                    )
-                }
-            }
-        }
-
-        SegmentedGroup(header = "自动归档") {
-            item("auto") { position ->
-                SegmentedSwitchItem(
-                    position = position,
-                    title = "分析时自动归档",
-                    subtitle = "识别到下列敏感信息的图片会自动归档：不会被清理，默认只在「图库 → 归档」里显示",
-                    checked = autoFavorite.enabled,
-                    onCheckedChange = {
-                        viewModel.setAutoFavoriteEnabled(it)
-                        notify(if (it) "已开启自动归档" else "已关闭自动归档")
-                    },
-                )
-            }
-            if (autoFavorite.enabled) {
-                item("id") { p -> SegmentedSwitchItem(p, "证件号", autoFavorite.idNumber, viewModel::setAutoFavoriteIdNumber, subtitle = "身份证等证件号码") }
-                item("order-no") { p -> SegmentedSwitchItem(p, "订单号", autoFavorite.orderNo, viewModel::setAutoFavoriteOrderNo, subtitle = "订单、快递单号") }
-                item("amount") { p -> SegmentedSwitchItem(p, "金额", autoFavorite.amount, viewModel::setAutoFavoriteAmount, subtitle = "转账、账单中的金额") }
-                item("phone") { p -> SegmentedSwitchItem(p, "手机号", autoFavorite.phone, viewModel::setAutoFavoritePhone, subtitle = "手机号码") }
-                item("address") { p -> SegmentedSwitchItem(p, "地址", autoFavorite.address, viewModel::setAutoFavoriteAddress, subtitle = "收货地址等") }
-                if (!autoFavorite.hasAnyRule) {
-                    item("no-rule") { position ->
-                        SegmentedCard(position, containerColor = MaterialTheme.colorScheme.errorContainer) {
-                            Text(
-                                "还没有勾选任何规则，自动归档不会生效。",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onErrorContainer,
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        SegmentedGroup(header = "重置分析") {
-            item("reset") { position ->
-                SegmentedListItem(
-                    position = position,
-                    enabled = !analysisResetting,
-                    onClick = { if (!analysisResetting) showResetDialog = true },
-                    leading = { Icon(Icons.Outlined.RestartAlt, contentDescription = null) },
-                    headline = { Text(if (analysisResetting) "正在重置…" else "重置完成标记…") },
-                    supporting = { Text("清除完成标记后，下次分析会重新处理对应图片") },
-                    trailing = if (analysisResetting) {
-                        { LoadingIndicator(modifier = Modifier.size(28.dp)) }
-                    } else {
-                        null
-                    },
-                )
-            }
-        }
-
-        // 重置在 appScope 后台跑（约 200 万行 UPDATE 需数十秒）：完成沿状态边沿提示
-        var wasResetting by remember { mutableStateOf(false) }
-        LaunchedEffect(analysisResetting) {
-            if (wasResetting && !analysisResetting) notify("分析标记已重置")
-            wasResetting = analysisResetting
-        }
-    }
-
-    if (showResetDialog) {
-        ResetAnalysisDialog(
-            onDismiss = { showResetDialog = false },
-            onLocalOnly = { showResetDialog = false; viewModel.resetLocalAnalysis() },
-            onAll = { showResetDialog = false; viewModel.resetAllAnalysis() },
-        )
     }
 }
 
@@ -538,401 +337,89 @@ fun CleanupSettingsScreen(
     sharedScope: SharedTransitionScope? = null,
     animatedScope: AnimatedVisibilityScope? = null,
 ) {
-    val config by viewModel.cleanupConfig.collectAsState()
-    val reviewLimit by viewModel.reviewLimit.collectAsState()
-    val allDuplicates by viewModel.cleanupAllDuplicates.collectAsState()
-    val maxDupGroupSize by viewModel.maxDuplicateGroupSize.collectAsState()
-    val duplicateStrictness by viewModel.duplicateStrictness.collectAsState()
-    val recommendEnabled by viewModel.recommendEnabled.collectAsState()
-    val recommendLimit by viewModel.recommendLimit.collectAsState()
-    val activePreset = CleanupPreset.match(config)
+    val retentionDays by viewModel.quarantineRetentionDays.collectAsState()
+    val maxSide by viewModel.compressMaxSide.collectAsState()
+    val keepOriginal by viewModel.compressKeepOriginal.collectAsState()
+    val quality by viewModel.compressQuality.collectAsState()
+    val compare by viewModel.compressCompare.collectAsState()
+    val demo by viewModel.compressDemoResult.collectAsState()
 
     SettingsDetailScaffold(SettingsCategory.CLEANUP, onBack, sharedScope, animatedScope) { notify ->
-        SegmentedGroup(header = "快捷预设") {
-            item("preset") { position ->
+        SegmentedGroup(header = "回收站") {
+            item("retention") { position ->
                 SegmentedCard(position) {
+                    Text("保留天数", style = MaterialTheme.typography.titleSmall)
                     ConnectedChoiceRow(
-                        options = CleanupPreset.entries.toList(),
-                        selected = activePreset,
-                        label = { it.displayName },
-                        onSelect = viewModel::applyCleanupPreset,
-                    )
-                    SettingsBlurb(if (activePreset == null) "当前为自定义规则" else "预设会一次套用一组开关与门限，可在下方逐项微调")
-                }
-            }
-        }
-
-        SegmentedGroup(header = "每次审核数量") {
-            item("limit") { position ->
-                SegmentedCard(position) {
-                    SettingsBlurb("每次「生成审核清单」最多纳入多少项（一个重复组算 1 项），按「分析」里的顺序选取。")
-                    InstantSaveTextField(
-                        value = reviewLimit.toString(),
-                        label = "数量（${SettingsRepository.MIN_REVIEW_LIMIT}–${SettingsRepository.MAX_REVIEW_LIMIT}）",
-                        keyboardType = KeyboardType.Number,
-                        onSave = { input ->
-                            input.filter { it.isDigit() }.toIntOrNull()?.let { value ->
-                                val clamped = value.coerceIn(SettingsRepository.MIN_REVIEW_LIMIT, SettingsRepository.MAX_REVIEW_LIMIT)
-                                viewModel.setReviewLimit(clamped)
-                                notify("已保存审核数量 $clamped")
-                            }
+                        options = RETENTION_OPTIONS,
+                        selected = retentionDays.takeIf { it in RETENTION_OPTIONS },
+                        label = { "$it 天" },
+                        onSelect = { days ->
+                            viewModel.setQuarantineRetentionDays(days)
+                            notify("回收站保留 $days 天")
                         },
                     )
-                    TextButton(onClick = {
-                        viewModel.setReviewLimit(SettingsRepository.DEFAULT_REVIEW_LIMIT)
-                        notify("已恢复默认 ${SettingsRepository.DEFAULT_REVIEW_LIMIT}")
-                    }) { Text("恢复默认（${SettingsRepository.DEFAULT_REVIEW_LIMIT}）") }
-                }
-            }
-            item("all-dup") { position ->
-                SegmentedSwitchItem(
-                    position = position,
-                    title = "一次审核全部重复图片",
-                    subtitle = "重复图片不受上面的数量限制，适合一次清完大量重复；其他维度仍按数量",
-                    checked = allDuplicates,
-                    onCheckedChange = {
-                        viewModel.setCleanupAllDuplicates(it)
-                        notify(if (it) "已开启：审核纳入全部重复图片" else "已关闭")
-                    },
-                )
-            }
-        }
-
-        SegmentedGroup(header = "推荐删除（实验）") {
-            item("recommend") { position ->
-                SegmentedSwitchItem(
-                    position = position,
-                    title = "推荐删除",
-                    subtitle = "从你的清理和保留操作中学习偏好，把可能想删的普通图片也加入审核（显示为「推荐」）。需要先积累一些操作才会生效。",
-                    checked = recommendEnabled,
-                    onCheckedChange = {
-                        viewModel.setRecommendEnabled(it)
-                        notify(if (it) "已开启推荐删除" else "已关闭")
-                    },
-                )
-            }
-            if (recommendEnabled) {
-                item("recommend-limit") { position ->
-                    SegmentedCard(position) {
-                        InstantSaveTextField(
-                            value = recommendLimit.toString(),
-                            label = "每次推荐数量（${SettingsRepository.MIN_RECOMMEND_LIMIT}–${SettingsRepository.MAX_RECOMMEND_LIMIT}）",
-                            keyboardType = KeyboardType.Number,
-                            onSave = { input ->
-                                input.filter { it.isDigit() }.toIntOrNull()?.let {
-                                    val v = it.coerceIn(SettingsRepository.MIN_RECOMMEND_LIMIT, SettingsRepository.MAX_RECOMMEND_LIMIT)
-                                    viewModel.setRecommendLimit(v)
-                                    notify("已保存推荐数量 $v")
-                                }
-                            },
-                        )
-                        TextButton(onClick = {
-                            viewModel.resetDeleteModel()
-                            notify("已重置推荐删除的学习记录")
-                        }) { Text("重置学习记录") }
-                    }
+                    SettingsBlurb("回收站里的图片和压缩前的原图到期自动删除，只对之后移入的生效。")
                 }
             }
         }
-
-        SegmentedGroup(header = "清理维度") {
-            item("dup") { p ->
-                SegmentedSwitchItem(p, "重复图片", config.duplicateEnabled, viewModel::setDuplicateEnabled, subtitle = "每组保留最好的一张，其余建议清理")
-            }
-            if (config.duplicateEnabled) {
-                item("dup-detail") { position ->
-                    SegmentedCard(position) {
-                        Text("匹配严格度", style = MaterialTheme.typography.titleSmall)
-                        ConnectedChoiceRow(
-                            options = DuplicateStrictness.entries.toList(),
-                            selected = duplicateStrictness,
-                            label = {
-                                when (it) {
-                                    DuplicateStrictness.LOOSE -> "宽松"
-                                    DuplicateStrictness.STANDARD -> "标准"
-                                    DuplicateStrictness.STRICT -> "严格"
-                                }
-                            },
-                            onSelect = viewModel::setDuplicateStrictness,
-                        )
-                        SettingsBlurb(
-                            when (duplicateStrictness) {
-                                DuplicateStrictness.LOOSE -> "找得更多，但可能把相似图误判为重复（修改后需重新查重）"
-                                DuplicateStrictness.STANDARD -> "推荐：兼顾查全与准确（修改后需重新查重）"
-                                DuplicateStrictness.STRICT -> "宁可漏掉也尽量不误判，适合截图较多的图库（修改后需重新查重）"
-                            },
-                        )
-                        ThresholdSlider(
-                            value = maxDupGroupSize.toFloat(),
-                            valueRange = SettingsRepository.MIN_MAX_DUP_GROUP_SIZE.toFloat()..SettingsRepository.MAX_MAX_DUP_GROUP_SIZE.toFloat(),
-                            onChange = { viewModel.setMaxDuplicateGroupSize(it.toInt()) },
-                            format = { "视觉重复组最多 ${it.toInt()} 张，超出视为误聚并丢弃（修改后需重新查重）" },
-                        )
-                        TextButton(onClick = {
-                            viewModel.resetDuplicateModel()
-                            notify("已重置重复检测的学习记录")
-                        }) { Text("重置查重学习记录") }
-                    }
+        SegmentedGroup(header = "原图压缩") {
+            item("quality") { position ->
+                SegmentedCard(position) {
+                    Text("压缩质量", style = MaterialTheme.typography.titleSmall)
+                    ConnectedChoiceRow(
+                        options = SettingsRepository.COMPRESS_QUALITY_OPTIONS,
+                        selected = quality.takeIf { it in SettingsRepository.COMPRESS_QUALITY_OPTIONS },
+                        label = { "$it%" },
+                        onSelect = { value ->
+                            viewModel.setCompressQuality(value)
+                            notify("压缩质量 $value%")
+                        },
+                    )
+                    SettingsBlurb("越低越省空间，也越模糊。推荐 80%；60% 以下放大能看出色块。")
+                    CompressQualityDemo(demo?.takeIf { it.quality == quality })
                 }
             }
-            item("emoji") { p ->
-                SegmentedSwitchItem(p, "表情包", config.emojiEnabled, viewModel::setEmojiEnabled, subtitle = "接近正方形的小图和动图")
+            item("compare") { position ->
+                SegmentedSwitchItem(
+                    position = position,
+                    title = "压缩后先对比",
+                    subtitle = if (compare) "先看前后对比和省下的空间，确认后才替换"
+                    else "压缩后直接替换原图",
+                    checked = compare,
+                    onCheckedChange = viewModel::setCompressCompare,
+                )
             }
-            if (config.emojiEnabled) {
-                item("emoji-detail") { position ->
-                    SegmentedCard(position) {
-                        ThresholdSlider(
-                            value = config.emojiSquareRatio,
-                            valueRange = CleanupConfig.MIN_EMOJI_SQUARE_RATIO..CleanupConfig.MAX_EMOJI_SQUARE_RATIO,
-                            onChange = { viewModel.setEmojiSquareRatio(it) },
-                            format = { "长宽比 ≥ ${String.format("%.2f", it)}（越大越接近正方形）" },
-                        )
-                        ThresholdSlider(
-                            value = config.emojiMaxSide.toFloat(),
-                            valueRange = CleanupConfig.MIN_EMOJI_MAX_SIDE.toFloat()..CleanupConfig.MAX_EMOJI_MAX_SIDE.toFloat(),
-                            onChange = { viewModel.setEmojiMaxSide(it.toInt()) },
-                            format = { "最长边 ≤ ${it.toInt()} px" },
-                        )
-                        ThresholdSlider(
-                            value = config.emojiMinSide.toFloat(),
-                            valueRange = CleanupConfig.MIN_EMOJI_MIN_SIDE.toFloat()..CleanupConfig.MAX_EMOJI_MIN_SIDE.toFloat(),
-                            onChange = { viewModel.setEmojiMinSide(it.toInt()) },
-                            format = { "最短边 ≥ ${it.toInt()} px" },
-                        )
-                    }
+            item("max-side") { position ->
+                SegmentedCard(position) {
+                    Text("压缩后的长边", style = MaterialTheme.typography.titleSmall)
+                    ConnectedChoiceRow(
+                        options = MAX_SIDE_OPTIONS,
+                        selected = maxSide.takeIf { it in MAX_SIDE_OPTIONS },
+                        label = { if (it == 0) "不缩小" else "$it" },
+                        onSelect = { side ->
+                            viewModel.setCompressMaxSide(side)
+                            notify(if (side == 0) "只重新编码，不缩小分辨率" else "长边缩到 $side 像素")
+                        },
+                    )
+                    SettingsBlurb("2560 足够看清手机照片；「不缩小」省得少些。不对比时，省不到一成的图不替换。")
                 }
             }
-            item("lowres") { p ->
-                SegmentedSwitchItem(p, "低分辨率", config.lowResolutionEnabled, viewModel::setLowResolutionEnabled, subtitle = "总像素低于门限的图片")
-            }
-            if (config.lowResolutionEnabled) {
-                item("lowres-detail") { position ->
-                    SegmentedCard(position) {
-                        ThresholdSlider(
-                            value = config.lowResolutionMaxPixels.toFloat(),
-                            valueRange = CleanupConfig.MIN_LOW_RES_MAX_PIXELS.toFloat()..CleanupConfig.MAX_LOW_RES_MAX_PIXELS.toFloat(),
-                            onChange = { viewModel.setLowResolutionMaxPixels(it.toLong()) },
-                            format = { "${String.format("%.1f", it / 1_000_000f)} MP 以下" },
-                        )
-                    }
-                }
-            }
-            item("blur") { p ->
-                SegmentedSwitchItem(p, "模糊", config.blurEnabled, viewModel::setBlurEnabled, subtitle = "清晰度低于门限的图片")
-            }
-            if (config.blurEnabled) {
-                item("blur-detail") { position ->
-                    SegmentedCard(position) {
-                        ThresholdSlider(
-                            value = config.blurMaxScore,
-                            valueRange = CleanupConfig.MIN_BLUR_MAX_SCORE..CleanupConfig.MAX_BLUR_MAX_SCORE,
-                            onChange = { viewModel.setBlurMaxScore(it) },
-                            format = { "清晰度 ${it.toInt()} 以下" },
-                        )
-                    }
-                }
-            }
-            item("tiny") { p ->
-                SegmentedSwitchItem(p, "极小文件", config.tinyFileEnabled, viewModel::setTinyFileEnabled, subtitle = "文件大小低于门限的图片")
-            }
-            if (config.tinyFileEnabled) {
-                item("tiny-detail") { position ->
-                    SegmentedCard(position) {
-                        ThresholdSlider(
-                            value = config.tinyFileMaxBytes.toFloat(),
-                            valueRange = CleanupConfig.MIN_TINY_FILE_MAX_BYTES.toFloat()..CleanupConfig.MAX_TINY_FILE_MAX_BYTES.toFloat(),
-                            onChange = { viewModel.setTinyFileMaxBytes(it.toLong()) },
-                            format = { "${(it / 1024).toInt()} KB 以下" },
-                        )
-                    }
-                }
-            }
-            item("blank") { p ->
-                SegmentedSwitchItem(p, "空白 / 纯色", config.blankEnabled, viewModel::setBlankEnabled, subtitle = "几乎纯色、没有内容的图片")
-            }
-            item("corrupt") { p ->
-                SegmentedSwitchItem(p, "损坏", config.corruptEnabled, viewModel::setCorruptEnabled, subtitle = "无法解码的图片")
+            item("keep") { position ->
+                SegmentedSwitchItem(
+                    position = position,
+                    title = "压缩时保留原图",
+                    subtitle = if (keepOriginal) "原图暂存回收站，到期前可以还原"
+                    else "压缩后立即释放空间，无法还原",
+                    checked = keepOriginal,
+                    onCheckedChange = viewModel::setCompressKeepOriginal,
+                )
             }
         }
     }
 }
 
-@Composable
-fun AiSettingsScreen(
-    onBack: () -> Unit,
-    viewModel: SettingsViewModel = koinViewModel(),
-    sharedScope: SharedTransitionScope? = null,
-    animatedScope: AnimatedVisibilityScope? = null,
-) {
-    val state by viewModel.uiState.collectAsState()
-    val safety = remember(state.aiEndpoint) { AiPrivacyGuard.classify(state.aiEndpoint) }
-    val disableThinking by viewModel.aiDisableThinking.collectAsState()
-    val concurrency by viewModel.aiConcurrency.collectAsState()
-    val maxTokens by viewModel.aiMaxTokens.collectAsState()
-    var showPrivacyDialog by remember { mutableStateOf(false) }
-    // 已启用状态下把地址改成公网：同样必须走隐私确认，否则「先启用再改地址」可绕过警告
-    var showEndpointPrivacyDialog by remember { mutableStateOf(false) }
-    var keyVisible by remember { mutableStateOf(false) }
-
-    SettingsDetailScaffold(SettingsCategory.AI, onBack, sharedScope, animatedScope) { notify ->
-        SegmentedGroup(header = "启用") {
-            item("enable") { position ->
-                SegmentedSwitchItem(
-                    position = position,
-                    title = "启用 AI 分析",
-                    subtitle = when (safety) {
-                        AiPrivacyGuard.Safety.LOCALHOST -> "本机地址，数据不离开设备"
-                        AiPrivacyGuard.Safety.LOCAL_NETWORK -> "局域网地址，数据不离开局域网"
-                        AiPrivacyGuard.Safety.PUBLIC_INTERNET -> "公网地址：图片会上传到该服务，请注意隐私"
-                        AiPrivacyGuard.Safety.INVALID -> "尚未填写服务地址"
-                    },
-                    subtitleColor = when (safety) {
-                        AiPrivacyGuard.Safety.PUBLIC_INTERNET -> MaterialTheme.colorScheme.error
-                        AiPrivacyGuard.Safety.INVALID -> MaterialTheme.colorScheme.onSurfaceVariant
-                        else -> MaterialTheme.colorScheme.primary
-                    },
-                    checked = state.aiEnabled,
-                    onCheckedChange = { newValue ->
-                        if (newValue && safety == AiPrivacyGuard.Safety.PUBLIC_INTERNET) {
-                            showPrivacyDialog = true
-                        } else {
-                            viewModel.setAiEnabled(newValue)
-                        }
-                    },
-                )
-            }
-        }
-
-        SegmentedGroup(header = "服务") {
-            item("endpoint") { position ->
-                SegmentedCard(position) {
-                    InstantSaveTextField(
-                        value = state.aiEndpoint,
-                        label = "服务地址（OpenAI 兼容）",
-                        placeholder = "https://api.openai.com 或 http://192.168.1.100:11434",
-                        supporting = "填根地址或带 /v1 都可以。本地服务（LM Studio、Ollama 等）可以不填密钥。",
-                        onSave = {
-                            viewModel.setAiEndpoint(it)
-                            notify("已保存服务地址")
-                            if (state.aiEnabled && AiPrivacyGuard.classify(it.trim()) == AiPrivacyGuard.Safety.PUBLIC_INTERNET) {
-                                showEndpointPrivacyDialog = true
-                            }
-                        },
-                    )
-                }
-            }
-            item("key") { position ->
-                SegmentedCard(position) {
-                    InstantSaveTextField(
-                        value = state.aiApiKey,
-                        label = "API 密钥（本地服务可留空）",
-                        visualTransformation = if (keyVisible) VisualTransformation.None else PasswordVisualTransformation(),
-                        trailingIcon = {
-                            IconButton(onClick = { keyVisible = !keyVisible }, shapes = IconButtonDefaults.shapes()) {
-                                Icon(
-                                    if (keyVisible) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility,
-                                    contentDescription = if (keyVisible) "隐藏" else "显示",
-                                )
-                            }
-                        },
-                        onSave = { viewModel.setAiApiKey(it); notify("已保存 API 密钥") },
-                    )
-                }
-            }
-            item("model") { position ->
-                SegmentedCard(position) {
-                    InstantSaveTextField(
-                        value = state.aiModel,
-                        label = "对话模型",
-                        supporting = "给图片打标签需要支持视觉输入的多模态模型，纯文本模型会失败。",
-                        onSave = { viewModel.setAiModel(it); notify("已保存对话模型") },
-                    )
-                }
-            }
-            item("embedding") { position ->
-                SegmentedCard(position) {
-                    InstantSaveTextField(
-                        value = state.aiEmbeddingModel,
-                        label = "向量模型（Embedding）",
-                        onSave = { viewModel.setAiEmbeddingModel(it); notify("已保存向量模型") },
-                    )
-                }
-            }
-        }
-
-        SegmentedGroup(header = "推理与性能") {
-            item("thinking") { position ->
-                SegmentedSwitchItem(
-                    position = position,
-                    title = "过滤模型思考过程",
-                    subtitle = "请求时关闭思考，并去掉回复中的 <think> 内容；使用思考模型时请保持开启",
-                    checked = disableThinking,
-                    onCheckedChange = { viewModel.setAiDisableThinking(it); notify(if (it) "已开启思考过滤" else "已关闭思考过滤") },
-                )
-            }
-            item("tokens") { position ->
-                SegmentedCard(position) {
-                    InstantSaveTextField(
-                        value = maxTokens.toString(),
-                        label = "最大 token（${SettingsRepository.MIN_AI_MAX_TOKENS}–${SettingsRepository.MAX_AI_MAX_TOKENS}）",
-                        supporting = "单次回复的 token 上限。思考模型会先消耗大量 token，过小会导致正文为空、打标签失败，建议 ≥ 1536。",
-                        keyboardType = KeyboardType.Number,
-                        onSave = { input ->
-                            input.filter { it.isDigit() }.toIntOrNull()?.let { value ->
-                                val clamped = value.coerceIn(SettingsRepository.MIN_AI_MAX_TOKENS, SettingsRepository.MAX_AI_MAX_TOKENS)
-                                viewModel.setAiMaxTokens(clamped)
-                                notify("已保存最大 token $clamped")
-                            }
-                        },
-                    )
-                }
-            }
-            item("concurrency") { position ->
-                SegmentedCard(position) {
-                    var sliderValue by remember(concurrency) { mutableStateOf(concurrency.toFloat()) }
-                    Text("同时请求数：${sliderValue.toInt()}", style = MaterialTheme.typography.titleSmall)
-                    SettingsBlurb("AI 标签和向量阶段同时处理多少张图片。本地推理服务建议 1–4。")
-                    Slider(
-                        value = sliderValue,
-                        onValueChange = { sliderValue = it },
-                        valueRange = SettingsRepository.MIN_AI_CONCURRENCY.toFloat()..SettingsRepository.MAX_AI_CONCURRENCY.toFloat(),
-                        steps = (SettingsRepository.MAX_AI_CONCURRENCY - SettingsRepository.MIN_AI_CONCURRENCY - 1).coerceAtLeast(0),
-                        onValueChangeFinished = {
-                            viewModel.setAiConcurrency(sliderValue.toInt())
-                            notify("同时请求数已设为 ${sliderValue.toInt()}")
-                        },
-                    )
-                }
-            }
-        }
-    }
-
-    if (showPrivacyDialog) {
-        PrivacyWarningDialog(
-            onConfirm = {
-                showPrivacyDialog = false
-                // 确认标记持久化：上传链路据此放行公网上传
-                viewModel.acknowledgePublicAiEndpoint()
-                viewModel.setAiEnabled(true)
-            },
-            onDismiss = { showPrivacyDialog = false },
-        )
-    }
-
-    if (showEndpointPrivacyDialog) {
-        // 拒绝（含点外部关闭）按安全侧处理：关闭 AI 分析，公网地址保留但不再被使用
-        PrivacyWarningDialog(
-            onConfirm = {
-                showEndpointPrivacyDialog = false
-                viewModel.acknowledgePublicAiEndpoint()
-            },
-            onDismiss = {
-                showEndpointPrivacyDialog = false
-                viewModel.setAiEnabled(false)
-            },
-        )
-    }
-}
+private val RETENTION_OPTIONS = listOf(7, 15, 30, 60)
+private val MAX_SIDE_OPTIONS = listOf(2560, 3840, 0)
 
 @Composable
 fun PersonalizationSettingsScreen(
@@ -953,7 +440,7 @@ fun PersonalizationSettingsScreen(
                 SegmentedSwitchItem(
                     position = position,
                     title = "动态取色",
-                    subtitle = "Android 12 及以上跟随壁纸取色；关闭后使用 QAlbum 品牌色",
+                    subtitle = "跟随壁纸配色（Android 12+），关闭则用默认配色",
                     checked = state.dynamicColorEnabled,
                     onCheckedChange = viewModel::setDynamicColor,
                 )
@@ -964,7 +451,7 @@ fun PersonalizationSettingsScreen(
                 SegmentedSwitchItem(
                     position = position,
                     title = "合并同一张图的多个版本",
-                    subtitle = "QQ 为同一张图保存的原图、预览图和缩略图合成一张：显示最大的那张，左下角标出版本数，大小合计，删除时一起处理。看图时可在底部切换版本，图库与聊天来源页都生效",
+                    subtitle = "原图、预览图、缩略图合成一张显示，大小合计、一起删除，看图时可切换版本",
                     checked = stackVariants,
                     onCheckedChange = viewModel::setGalleryStackVariants,
                 )
@@ -973,7 +460,7 @@ fun PersonalizationSettingsScreen(
                 SegmentedSwitchItem(
                     position = position,
                     title = "快速滚动条",
-                    subtitle = "滚动时右侧出现把手，按住上下拖动快速定位：慢拖逐天细调，快划大步跨越，旁边显示日期",
+                    subtitle = "滚动时右侧出现把手，拖动快速定位",
                     checked = fastScroll,
                     onCheckedChange = viewModel::setFastScrollEnabled,
                 )
@@ -982,8 +469,7 @@ fun PersonalizationSettingsScreen(
                 SegmentedSwitchItem(
                     position = position,
                     title = "归档的图片也在图库中显示",
-                    subtitle = "关闭时归档的图片只在「图库 → 归档」里出现，图库、聊天来源、标签与搜索都看不到；打开后像收藏一样照常显示。" +
-                        "无论开关，归档的图片（连同同一张图的其他版本）都不会被任何清理删除",
+                    subtitle = "关闭时只在「图库 → 归档」里显示；无论开关，归档的图都不会被清理",
                     checked = archiveVisible,
                     onCheckedChange = viewModel::setArchiveVisible,
                 )
@@ -994,7 +480,7 @@ fun PersonalizationSettingsScreen(
                 SegmentedSwitchItem(
                     position = position,
                     title = "缩略图与大图连贯过渡",
-                    subtitle = "从图库打开图片时，缩略图直接放大成全屏（实验性）",
+                    subtitle = "打开图片时缩略图放大成全屏（实验性）",
                     checked = sharedTransition,
                     onCheckedChange = viewModel::setDetailSharedTransition,
                 )
@@ -1003,7 +489,7 @@ fun PersonalizationSettingsScreen(
         SegmentedGroup(header = "导出相册目录") {
             item("hint") { position ->
                 SegmentedCard(position) {
-                    SettingsBlurb("保存图片时可以选择目录，实际存放在 Pictures/QAlbum/<目录名>。保存弹窗里也能临时新建。")
+                    SettingsBlurb("保存图片时可选目录（Pictures/QAlbum/<目录名>），弹窗里也能新建。")
                 }
             }
             exportSubdirs.forEach { dir ->
@@ -1065,7 +551,7 @@ fun AccessSettingsScreen(
         SegmentedGroup(header = "访问方式") {
             item("mode") { position ->
                 SegmentedCard(position) {
-                    SettingsBlurb("QAlbum 通过 Shizuku 或 Root 读取 QQ 的聊天图片目录；「聊天来源」功能需要 Root。")
+                    SettingsBlurb("通过 Shizuku 或 Root 读取 QQ 图片目录；「聊天来源」需要 Root。")
                     ConnectedChoiceRow(
                         options = listOf(AccessMode.SHIZUKU, AccessMode.ROOT),
                         selected = state.accessMode,
@@ -1120,7 +606,7 @@ fun AccessSettingsScreen(
                         Text(
                             when (accessStatus) {
                                 AccessStatus.Ready -> "可以访问图片目录"
-                                AccessStatus.NotReady -> "无法访问：请检查授权与访问方式"
+                                AccessStatus.NotReady -> "无法访问，请检查授权"
                                 AccessStatus.Unknown -> "尚未测试，点按开始"
                             },
                         )
@@ -1256,63 +742,6 @@ private fun InstantSaveTextField(
     )
 }
 
-/** 分析阶段数量输入：留空 / 0 = 不限；其余为正整数上限 */
-@Composable
-private fun PhaseLimitField(label: String, limit: Int, onSave: (Int) -> Unit) {
-    InstantSaveTextField(
-        value = if (limit <= 0) "" else limit.toString(),
-        label = label,
-        placeholder = "不限",
-        keyboardType = KeyboardType.Number,
-        onSave = { input -> onSave(input.filter { it.isDigit() }.toIntOrNull() ?: 0) },
-    )
-}
-
-@Composable
-private fun OcrModelRow(
-    status: OcrModelStatus,
-    downloadState: OcrModelDownloadState,
-    onDownload: () -> Unit,
-    onDelete: () -> Unit,
-    onRefresh: () -> Unit,
-) {
-    val downloading = downloadState is OcrModelDownloadState.Downloading
-    val title = when (status) {
-        OcrModelStatus.NotInstalled -> "OCR 模型未安装"
-        is OcrModelStatus.Ready -> "OCR 模型已安装"
-        is OcrModelStatus.Failed -> "OCR 模型异常"
-    }
-    val subtitle = when {
-        downloading -> (downloadState as OcrModelDownloadState.Downloading).message
-        downloadState is OcrModelDownloadState.Failed -> downloadState.reason
-        status is OcrModelStatus.Ready -> "${status.manifest.displayName} ${status.manifest.version}"
-        status is OcrModelStatus.Failed -> status.reason
-        else -> "从 Paddle 官方模型源下载 PP-OCR ONNX 模型；未安装时会跳过文字识别。"
-    }
-    val failed = status is OcrModelStatus.Failed || downloadState is OcrModelDownloadState.Failed
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 4.dp)) {
-        Text(title, style = MaterialTheme.typography.titleSmall)
-        Text(
-            subtitle,
-            style = MaterialTheme.typography.bodyMedium,
-            color = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        if (downloading) {
-            WavyProgress(fraction = (downloadState as OcrModelDownloadState.Downloading).progress)
-        }
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (status is OcrModelStatus.Ready) {
-                OutlinedButton(onClick = onDelete, enabled = !downloading, shapes = ButtonDefaults.shapes()) { Text("删除模型") }
-            } else {
-                Button(onClick = onDownload, enabled = !downloading, shapes = ButtonDefaults.shapes()) {
-                    Text(if (downloading) "下载中…" else "下载模型")
-                }
-            }
-            TextButton(onClick = onRefresh, enabled = !downloading) { Text("刷新状态") }
-        }
-    }
-}
-
 @Composable
 private fun ShizukuStatusItem(
     position: SegmentPosition,
@@ -1355,66 +784,5 @@ private fun ShizukuStatusItem(
                 ) { Text(label) }
             }
         },
-    )
-}
-
-@Composable
-private fun ThresholdSlider(
-    value: Float,
-    valueRange: ClosedFloatingPointRange<Float>,
-    onChange: (Float) -> Unit,
-    format: (Float) -> String,
-) {
-    var sliderValue by remember(value) { mutableStateOf(value) }
-    Column(modifier = Modifier.fillMaxWidth()) {
-        Text(format(sliderValue), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
-        Slider(
-            value = sliderValue,
-            onValueChange = { sliderValue = it },
-            valueRange = valueRange,
-            onValueChangeFinished = { onChange(sliderValue) },
-        )
-    }
-}
-
-// ──────────────────────────────────────────────────────────────────
-// 对话框
-// ──────────────────────────────────────────────────────────────────
-
-@Composable
-private fun ResetAnalysisDialog(
-    onDismiss: () -> Unit,
-    onLocalOnly: () -> Unit,
-    onAll: () -> Unit,
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        icon = { Icon(Icons.Outlined.RestartAlt, contentDescription = null) },
-        title = { Text("重置分析完成标记") },
-        text = {
-            Text(
-                "选择重置范围：\n\n· 仅本地分析：重新计算哈希、画质、重复与评分（免费，在本机完成）。\n" +
-                    "· 全部：连同 OCR、AI 标签和向量一起清空重跑；AI 与向量会再次调用服务，可能产生费用。",
-            )
-        },
-        confirmButton = { TextButton(onClick = onLocalOnly) { Text("仅本地分析") } },
-        dismissButton = {
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(onClick = onDismiss) { Text("取消") }
-                TextButton(onClick = onAll) { Text("全部", color = MaterialTheme.colorScheme.error) }
-            }
-        },
-    )
-}
-
-@Composable
-private fun PrivacyWarningDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        icon = { Icon(Icons.Outlined.PrivacyTip, contentDescription = null) },
-        title = { Text("隐私提示") },
-        text = { Text(AiPrivacyGuard.PRIVACY_WARNING.trim()) },
-        confirmButton = { TextButton(onClick = onConfirm) { Text(stringResource(R.string.action_ok)) } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.action_cancel)) } },
     )
 }

@@ -1,6 +1,5 @@
 package com.xjw.qalbum.ui.cleanup
 
-import android.content.Intent
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
@@ -10,13 +9,16 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -24,95 +26,118 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.ScrollState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.Label
-import androidx.compose.material.icons.outlined.AutoAwesome
+import androidx.compose.material.icons.outlined.CalendarMonth
 import androidx.compose.material.icons.outlined.CleaningServices
+import androidx.compose.material.icons.outlined.Compress
 import androidx.compose.material.icons.outlined.Forum
+import androidx.compose.material.icons.outlined.GifBox
+import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Inventory2
-import androidx.compose.material.icons.outlined.RateReview
+import androidx.compose.material.icons.outlined.PhotoSizeSelectLarge
 import androidx.compose.material.icons.outlined.PhotoSizeSelectSmall
+import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.LargeFlexibleTopAppBar
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.TopAppBarState
+import androidx.compose.material3.rememberTopAppBarState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
-import com.xjw.qalbum.ThumbnailTrashActivity
-import com.xjw.qalbum.domain.model.CleanupConfig
-import com.xjw.qalbum.domain.model.CleanupPreset
-import com.xjw.qalbum.service.analysis.AnalysisProgress
-import com.xjw.qalbum.service.analysis.AnalysisState
-import com.xjw.qalbum.service.cleanup.CleanupBatch
+import com.xjw.qalbum.service.cleanup.rules.CleanupRule
+import com.xjw.qalbum.service.cleanup.rules.CleanupRunner
+import com.xjw.qalbum.service.cleanup.rules.RuleAction
 import com.xjw.qalbum.ui.anim.StaggeredEntrance
 import com.xjw.qalbum.ui.anim.sharedAxisXEnter
 import com.xjw.qalbum.ui.anim.sharedAxisXExit
 import com.xjw.qalbum.ui.anim.sharedAxisXPopEnter
 import com.xjw.qalbum.ui.anim.sharedAxisXPopExit
 import com.xjw.qalbum.ui.common.formatBytes
-import com.xjw.qalbum.ui.common.formatCount
 import com.xjw.qalbum.ui.common.formatCountExact
 import com.xjw.qalbum.ui.common.formatDateTime
-import com.xjw.qalbum.ui.components.SegmentPosition
 import com.xjw.qalbum.ui.components.SegmentedGroup
 import com.xjw.qalbum.ui.components.SegmentedNavigationItem
 import com.xjw.qalbum.ui.components.ShapeIcon
 import com.xjw.qalbum.ui.components.WavyProgress
-import com.xjw.qalbum.ui.components.ConnectedChoiceRow
 import kotlinx.coroutines.delay
 import org.koin.androidx.compose.koinViewModel
 
-private enum class CleanupPage { Main, Review, Group, RecycleBin }
+/** 清理页里的子页：主页、某条规则的预览、按时间清理、回收站（[parent] 是返回时回到哪一页） */
+private data class CleanupPage(val kind: String, val ruleId: String? = null, val parent: String = MAIN) {
+    val depth: Int get() = when {
+        kind == MAIN -> 0
+        kind == RULE && parent == TIME -> 2
+        else -> 1
+    }
+
+    companion object {
+        const val MAIN = "main"
+        const val RULE = "rule"
+        const val TIME = "time"
+        const val BIN = "bin"
+
+        val Saver = Saver<CleanupPage, String>(
+            save = { listOf(it.kind, it.parent, it.ruleId.orEmpty()).joinToString("\u0001") },
+            restore = { raw ->
+                val parts = raw.split('\u0001')
+                CleanupPage(parts[0], parts.getOrNull(2)?.ifBlank { null }, parts.getOrElse(1) { MAIN })
+            },
+        )
+    }
+}
 
 /**
- * 清理页根：在「主页 / 审核网格 / 重复组详情 / 回收站」之间用 [page] 内部切换（非导航路由），
- * 共享同一个 [CleanupViewModel]。[page] 用 rememberSaveable：旋转 / 深色切换等配置变更重建
- * Activity 时留在当前子页；底部导航 saveState/restoreState，切 Tab 再回来同样恢复。
- * 进入非主页时通过 [onReviewModeChange] 通知外层隐藏底部导航栏做全屏专注。
+ * 清理页根：在「主页 / 规则预览 / 按时间清理 / 回收站」之间内部切换，共享同一个 [CleanupViewModel]。
+ * 进入子页时通过 [onSubPageChange] 通知外层隐藏底部导航栏。
  */
 @Composable
 fun CleanupScreen(
     contentPadding: PaddingValues,
-    onOpenTags: () -> Unit,
     onOpenSources: () -> Unit,
-    onReviewModeChange: (Boolean) -> Unit,
+    onSubPageChange: (Boolean) -> Unit,
     viewModel: CleanupViewModel = koinViewModel(),
 ) {
     val context = LocalContext.current
-    var page by rememberSaveable { mutableStateOf(CleanupPage.Main) }
-    var groupId by rememberSaveable { mutableLongStateOf(0L) }
-    // 进程重建后恢复上次未关闭的审核会话（批次已落库，勾选可用「按推荐勾选」重建）
-    LaunchedEffect(Unit) { viewModel.ensureReviewSessionRestored() }
-    // 批量任务跑在 appScope（比页面长寿），结果经共享 message 流回到任意存活页面
+    var page by rememberSaveable(stateSaver = CleanupPage.Saver) { mutableStateOf(CleanupPage(CleanupPage.MAIN)) }
+    val slideSpec = MaterialTheme.motionScheme.defaultSpatialSpec<IntOffset>()
+    val fadeSpec = MaterialTheme.motionScheme.defaultEffectsSpec<Float>()
+    // 主页与按时间页的滚动位置放在切页之外：从规则预览返回时停在原处
+    val mainScroll = rememberScrollState()
+    val mainBar = rememberTopAppBarState()
+    val timeList = rememberLazyListState()
+    val timeBar = rememberTopAppBarState()
+
+    // 回收站操作的结果经共享状态回到任意存活页面（规则执行与压缩的结果在界面根部提示，见 CompressionHost）
     LaunchedEffect(Unit) {
         viewModel.message.collect { msg ->
             if (msg != null) {
@@ -121,110 +146,89 @@ fun CleanupScreen(
             }
         }
     }
-    // 审核网格的滚动 / 筛选 / 排序 / 列数提升到这里：进重复组详情再返回时不被 AnimatedContent 销毁。
-    // 筛选 / 排序以批次 id 为 key：同批次内保持，换新批次才回到默认。
-    val reviewGridState = rememberLazyGridState()
-    val reviewBatchId = viewModel.reviewBatch.collectAsState().value?.batch?.id
-    var reviewCategory by rememberSaveable(reviewBatchId) { mutableStateOf<String?>(null) }
-    var reviewSort by rememberSaveable(reviewBatchId) { mutableStateOf(ReviewSort.RECOMMENDED) }
-    var reviewColumns by rememberSaveable { mutableIntStateOf(3) }
-    val slideSpec = MaterialTheme.motionScheme.defaultSpatialSpec<IntOffset>()
-    val fadeSpec = MaterialTheme.motionScheme.defaultEffectsSpec<Float>()
-
-    LaunchedEffect(page) { onReviewModeChange(page != CleanupPage.Main) }
-    DisposableEffect(Unit) { onDispose { onReviewModeChange(false) } }
-    BackHandler(enabled = page != CleanupPage.Main) {
-        page = if (page == CleanupPage.Group) CleanupPage.Review else CleanupPage.Main
+    LaunchedEffect(page.kind) { onSubPageChange(page.kind != CleanupPage.MAIN) }
+    DisposableEffect(Unit) { onDispose { onSubPageChange(false) } }
+    val back = {
+        page = when {
+            page.kind == CleanupPage.RULE && page.parent == CleanupPage.TIME -> CleanupPage(CleanupPage.TIME)
+            else -> CleanupPage(CleanupPage.MAIN)
+        }
     }
+    BackHandler(enabled = page.kind != CleanupPage.MAIN) { back() }
 
     AnimatedContent(
         targetState = page,
         modifier = Modifier.fillMaxSize(),
         transitionSpec = {
-            if (targetState == CleanupPage.Main || (initialState == CleanupPage.Group && targetState == CleanupPage.Review)) {
+            if (targetState.depth < initialState.depth) {
                 sharedAxisXPopEnter(slideSpec, fadeSpec) togetherWith sharedAxisXPopExit(slideSpec, fadeSpec)
             } else {
                 sharedAxisXEnter(slideSpec, fadeSpec) togetherWith sharedAxisXExit(slideSpec, fadeSpec)
             }
         },
+        contentKey = { it.kind + it.ruleId },
         label = "cleanupPage",
     ) { p ->
-        when (p) {
-            CleanupPage.Main -> CleanupMainScreen(
-                contentPadding = contentPadding,
+        when (p.kind) {
+            CleanupPage.RULE -> RulePreviewScreen(ruleId = p.ruleId ?: CleanupRule.Thumbnails.id, onBack = back)
+            CleanupPage.TIME -> TimeCleanupScreen(
                 viewModel = viewModel,
-                onOpenReview = { page = CleanupPage.Review },
-                onOpenRecycleBin = { page = CleanupPage.RecycleBin },
-                onOpenTags = onOpenTags,
-                onOpenSources = onOpenSources,
+                listState = timeList,
+                barState = timeBar,
+                onBack = back,
+                onOpenRange = { range -> page = CleanupPage(CleanupPage.RULE, range.id, parent = CleanupPage.TIME) },
             )
-            CleanupPage.Review -> CleanupReviewScreen(
-                contentPadding = PaddingValues(0.dp),
-                viewModel = viewModel,
-                gridState = reviewGridState,
-                category = reviewCategory,
-                sort = reviewSort,
-                columns = reviewColumns,
-                onCategoryChange = { reviewCategory = it },
-                onSortChange = { reviewSort = it },
-                onColumnsChange = { reviewColumns = it },
-                onBack = { page = CleanupPage.Main },
-                onOpenGroup = { gid -> groupId = gid; page = CleanupPage.Group },
-            )
-            CleanupPage.Group -> CleanupReviewGroupScreen(
-                groupId = groupId,
-                viewModel = viewModel,
-                onBack = { page = CleanupPage.Review },
-            )
-            CleanupPage.RecycleBin -> CleanupRecycleBinScreen(
+            CleanupPage.BIN -> CleanupRecycleBinScreen(
                 contentPadding = WindowInsets.navigationBars.asPaddingValues(),
                 viewModel = viewModel,
-                onBack = { page = CleanupPage.Main },
+                onBack = back,
+            )
+            else -> CleanupMainScreen(
+                contentPadding = contentPadding,
+                viewModel = viewModel,
+                scrollState = mainScroll,
+                barState = mainBar,
+                onOpenRule = { rule -> page = CleanupPage(CleanupPage.RULE, rule.id) },
+                onOpenTime = { page = CleanupPage(CleanupPage.TIME) },
+                onOpenRecycleBin = { page = CleanupPage(CleanupPage.BIN) },
+                onOpenSources = onOpenSources,
             )
         }
     }
 
-    // 清理进度模态提升到根部：清理进行中无论处于哪个子页（含重建后落回主页）都保持输入屏蔽
+    // 清空回收站等操作的进度模态提升到根部：无论处于哪个子页都保持输入屏蔽
     val purgeProgress by viewModel.purgeProgress.collectAsState()
     purgeProgress?.let { PurgeProgressDialog(it) }
 }
 
-/**
- * 清理主页：分析卡 + 清理策略 + 审核入口（有批次时）+ 回收站 / QQ 缩略图 / 按来源清理 / 标签入口。
- */
+/** 清理主页：存储概览 + 清理建议（规则）+ 按时间 / 按聊天 / 回收站 */
 @Composable
-fun CleanupMainScreen(
+private fun CleanupMainScreen(
     contentPadding: PaddingValues,
     viewModel: CleanupViewModel,
-    onOpenReview: () -> Unit,
+    scrollState: ScrollState,
+    barState: TopAppBarState,
+    onOpenRule: (CleanupRule) -> Unit,
+    onOpenTime: () -> Unit,
     onOpenRecycleBin: () -> Unit,
-    onOpenTags: () -> Unit,
     onOpenSources: () -> Unit,
 ) {
-    val context = LocalContext.current
-    val analysisState by viewModel.analysisState.collectAsState()
-    val analysisProgress by viewModel.analysisProgress.collectAsState()
-    val analysisOverview by viewModel.analysisOverview.collectAsState()
-    val fullyAnalyzed by viewModel.fullyAnalyzedCount.collectAsState()
-    val cleanupConfig by viewModel.cleanupConfig.collectAsState()
-    val busy by viewModel.busy.collectAsState()
-    val lastBatch by viewModel.lastBatch.collectAsState()
-    val selectedReviewDeleteIds by viewModel.selectedReviewDeleteIds.collectAsState()
+    val storage by viewModel.storage.collectAsState()
+    val archived by viewModel.archivedCount.collectAsState()
+    val rules by viewModel.rules.collectAsState()
+    val running by viewModel.running.collectAsState()
     val quarantineStats by viewModel.quarantineStats.collectAsState()
-    val thumbnailTrashSummary by viewModel.thumbnailTrashSummary.collectAsState()
-    val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
+    val backupStats by viewModel.backupStats.collectAsState()
+    val rootMode by viewModel.rootMode.collectAsState()
+    val quality by viewModel.compressQuality.collectAsState()
+    val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior(barState)
 
     Scaffold(
         modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
             LargeFlexibleTopAppBar(
                 title = { Text("清理") },
-                subtitle = { Text("先审核、再移入回收站，误删可恢复") },
-                actions = {
-                    IconButton(onClick = onOpenTags, shapes = IconButtonDefaults.shapes()) {
-                        Icon(Icons.AutoMirrored.Outlined.Label, contentDescription = "标签")
-                    }
-                },
+                subtitle = { Text("先归档要留的，再批量清理") },
                 scrollBehavior = scrollBehavior,
             )
         },
@@ -234,77 +238,63 @@ fun CleanupMainScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(top = topPadding.calculateTopPadding())
-                .verticalScroll(rememberScrollState())
+                .verticalScroll(scrollState)
                 .padding(horizontal = 16.dp)
                 .padding(top = 8.dp, bottom = contentPadding.calculateBottomPadding() + 16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            StaggeredEntrance(0) {
-                AnalysisCard(
-                    state = analysisState,
-                    progress = analysisProgress,
-                    total = analysisOverview.totalImages,
-                    analyzed = fullyAnalyzed,
-                    hashedAny = analysisOverview.hashDone > 0,
-                    onStart = viewModel::startAnalysis,
-                    onCancel = viewModel::cancelAnalysis,
-                )
-            }
-            StaggeredEntrance(1) {
-                StrategyCard(
-                    config = cleanupConfig,
-                    busy = busy,
-                    onSelectPreset = viewModel::applyPreset,
-                    onGenerate = { viewModel.generateBatch(onReady = onOpenReview) },
-                    onRecluster = {
-                        // 重聚类在 pipeline 自有 scope 后台跑（页面销毁不中断），进行中状态由分析卡展示
-                        viewModel.reclusterDuplicates {
-                            Toast.makeText(context, "已开始后台重新查重", Toast.LENGTH_SHORT).show()
-                        }
-                    },
-                )
-            }
+            StaggeredEntrance(0) { StorageCard(storage, archived) }
             AnimatedVisibility(
-                visible = lastBatch != null,
+                visible = running != null,
                 enter = expandVertically(MaterialTheme.motionScheme.defaultSpatialSpec()) + fadeIn(),
                 exit = shrinkVertically(MaterialTheme.motionScheme.defaultSpatialSpec()) + fadeOut(),
             ) {
-                lastBatch?.let { batch ->
-                    ReviewSummaryCard(
-                        batch = batch,
-                        selectedCount = selectedReviewDeleteIds.size,
-                        busy = busy,
-                        onOpen = onOpenReview,
-                        onClose = viewModel::closeReview,
-                    )
+                running?.let { RunningCard(it, onCancel = viewModel::cancelRunning) }
+            }
+            StaggeredEntrance(1) {
+                SegmentedGroup(header = "清理建议") {
+                    rules.forEach { card ->
+                        item(card.rule.id) { position ->
+                            SegmentedNavigationItem(
+                                position = position,
+                                icon = ruleIcon(card.rule),
+                                title = card.rule.title,
+                                subtitle = ruleSubtitle(card, quality),
+                                onClick = { onOpenRule(card.rule) },
+                            )
+                        }
+                    }
                 }
             }
             StaggeredEntrance(2) {
                 SegmentedGroup(header = "更多") {
-                    item("recycle") { position ->
+                    item("time") { position ->
                         SegmentedNavigationItem(
                             position = position,
-                            icon = Icons.Outlined.Inventory2,
-                            title = "回收站",
-                            subtitle = "${quarantineStats.count} 项 · ${formatBytes(quarantineStats.bytes)}，到期自动永久删除",
-                            onClick = onOpenRecycleBin,
+                            icon = Icons.Outlined.CalendarMonth,
+                            title = "按时间清理",
+                            subtitle = "按月查看占用，整段清理",
+                            onClick = onOpenTime,
                         )
                     }
                     item("sources") { position ->
                         SegmentedNavigationItem(
                             position = position,
                             icon = Icons.Outlined.Forum,
-                            title = "按聊天来源清理",
-                            subtitle = "按群聊、成员查看占用空间并批量清理",
+                            title = "按聊天清理",
+                            subtitle = if (rootMode) "按群聊、私聊和发送人清理"
+                            else "按群聊、私聊和发送人清理（需要 Root）",
                             onClick = onOpenSources,
                         )
                     }
-                    item("thumbs") { position ->
-                        ThumbnailEntryItem(
+                    item("bin") { position ->
+                        val backups = if (backupStats.count > 0) "；压缩前的原图 ${formatCountExact(backupStats.count)} 张" else ""
+                        SegmentedNavigationItem(
                             position = position,
-                            count = thumbnailTrashSummary.count,
-                            bytes = thumbnailTrashSummary.bytes,
-                            onOpen = { context.startActivity(Intent(context, ThumbnailTrashActivity::class.java)) },
+                            icon = Icons.Outlined.Inventory2,
+                            title = "回收站",
+                            subtitle = "${formatCountExact(quarantineStats.count)} 项 · ${formatBytes(quarantineStats.bytes)}，到期自动删除$backups",
+                            onClick = onOpenRecycleBin,
                         )
                     }
                 }
@@ -313,231 +303,133 @@ fun CleanupMainScreen(
     }
 }
 
-/** 分析卡片主按钮的语义状态（抽出便于单测） */
-internal enum class AnalysisAction { START, CONTINUE, ALL_DONE, CANCEL, NO_IMAGES }
-
-/**
- * 主按钮判定：运行中→取消；无图→禁用；已分析达到总数→已全部分析；分析过→继续；否则→开始。
- */
-internal fun analysisAction(
-    state: AnalysisState,
-    total: Int,
-    analyzed: Int,
-    hashedAny: Boolean,
-): AnalysisAction = when {
-    state == AnalysisState.Running -> AnalysisAction.CANCEL
-    total == 0 -> AnalysisAction.NO_IMAGES
-    analyzed >= total -> AnalysisAction.ALL_DONE
-    hashedAny -> AnalysisAction.CONTINUE
-    else -> AnalysisAction.START
+/** 规则列表的副标题：参数 · 张数 · 大小（压缩按当前质量显示预计能省多少） */
+internal fun ruleSubtitle(card: RuleCard, quality: Int): String {
+    val option = card.rule.subtitle(card.option)
+    val stats = card.stats ?: return listOf(option, "统计中…").filter { it.isNotBlank() }.joinToString(" · ")
+    val detail = when {
+        stats.count == 0 -> "没有可处理的图片"
+        card.rule.action == RuleAction.COMPRESS ->
+            "${formatCountExact(stats.count)} 张 · ${formatBytes(stats.bytes)}，约省 ${formatBytes((stats.bytes * compressSaving(quality)).toLong())}"
+        else -> "${formatCountExact(stats.count)} 张 · ${formatBytes(stats.bytes)}"
+    }
+    return listOf(option, detail).filter { it.isNotBlank() }.joinToString(" · ")
 }
 
+/** 手机照片原图（长边缩到 2560）按质量压缩大致能省的比例，只用于提示 */
+internal fun compressSaving(quality: Int): Double = when {
+    quality >= 90 -> 0.55
+    quality >= 80 -> 0.68
+    quality >= 70 -> 0.74
+    quality >= 60 -> 0.78
+    else -> 0.82
+}
+
+internal fun ruleIcon(rule: CleanupRule): ImageVector = when (rule) {
+    CleanupRule.Thumbnails -> Icons.Outlined.PhotoSizeSelectSmall
+    CleanupRule.SlimOriginals -> Icons.Outlined.PhotoSizeSelectLarge
+    CleanupRule.CompressOriginals -> Icons.Outlined.Compress
+    CleanupRule.Stickers -> Icons.Outlined.GifBox
+    CleanupRule.OldPictures -> Icons.Outlined.History
+    is CleanupRule.TimeRange -> Icons.Outlined.CalendarMonth
+}
+
+/** 存储概览：缓存总大小 + 原图 / 预览图 / 缩略图占比条 + 已归档数 */
 @Composable
-private fun CleanupCard(
-    title: String,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    modifier: Modifier = Modifier,
-    containerColor: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.surfaceContainer,
-    trailing: (@Composable () -> Unit)? = null,
-    content: @Composable () -> Unit,
-) {
+private fun StorageCard(storage: StorageOverview?, archived: Int) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.extraLarge,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+    ) {
+        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                ShapeIcon(Icons.Outlined.Storage, size = 40.dp)
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("QQ 图片缓存", style = MaterialTheme.typography.titleMediumEmphasized)
+                    Text(
+                        storage?.let { formatBytes(it.totalBytes) } ?: "统计中…",
+                        style = MaterialTheme.typography.headlineSmallEmphasized,
+                    )
+                }
+            }
+            val parts = storage?.let {
+                listOf(
+                    StoragePart("原图", it.originals?.bytes ?: 0, it.originals?.count ?: 0, MaterialTheme.colorScheme.primary),
+                    StoragePart("预览图", it.previews?.bytes ?: 0, it.previews?.count ?: 0, MaterialTheme.colorScheme.tertiary),
+                    StoragePart("缩略图", it.thumbs.bytes, it.thumbs.count, MaterialTheme.colorScheme.secondary),
+                    StoragePart("其他", it.others?.bytes ?: 0, it.others?.count ?: 0, MaterialTheme.colorScheme.outline),
+                ).filter { part -> part.bytes > 0 }
+            }.orEmpty()
+            if (parts.isNotEmpty()) {
+                val total = parts.sumOf { it.bytes }.coerceAtLeast(1)
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                ) {
+                    parts.forEach { part ->
+                        Box(
+                            Modifier
+                                .weight((part.bytes.toFloat() / total).coerceAtLeast(0.02f))
+                                .fillMaxHeight()
+                                .background(part.color, RoundedCornerShape(6.dp)),
+                        )
+                    }
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    parts.forEach { part ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.size(10.dp).background(part.color, CircleShape))
+                            Spacer(Modifier.width(8.dp))
+                            Text(part.label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                            Text(
+                                "${formatCountExact(part.count)} 张 · ${formatBytes(part.bytes)}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+            Text(
+                if (archived > 0) "已归档 ${formatCountExact(archived)} 张，清理不会动它们" else "要留的图先归档，清理不会动它们",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+private data class StoragePart(val label: String, val bytes: Long, val count: Int, val color: Color)
+
+/** 正在执行的规则：进度 + 停止（也可以在通知栏停止） */
+@Composable
+internal fun RunningCard(running: CleanupRunner.Running, onCancel: () -> Unit, modifier: Modifier = Modifier) {
     Card(
         modifier = modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.extraLarge,
-        colors = CardDefaults.cardColors(containerColor = containerColor),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
     ) {
-        Column(modifier = Modifier.padding(20.dp)) {
+        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                ShapeIcon(icon, size = 40.dp)
-                Spacer(Modifier.width(12.dp))
-                Text(title, style = MaterialTheme.typography.titleMediumEmphasized, modifier = Modifier.weight(1f))
-                trailing?.invoke()
-            }
-            Spacer(Modifier.height(16.dp))
-            content()
-        }
-    }
-}
-
-@Composable
-private fun AnalysisCard(
-    state: AnalysisState,
-    progress: AnalysisProgress?,
-    total: Int,
-    analyzed: Int,
-    hashedAny: Boolean,
-    onStart: () -> Unit,
-    onCancel: () -> Unit,
-) {
-    val fraction = if (total > 0) analyzed.toFloat() / total else 0f
-    val action = analysisAction(state, total, analyzed, hashedAny)
-
-    CleanupCard(
-        title = "分析图片",
-        icon = Icons.Outlined.AutoAwesome,
-        trailing = {
-            AnimatedContent(targetState = action, label = "analysisAction") { a ->
-                when (a) {
-                    AnalysisAction.CANCEL -> OutlinedButton(onClick = onCancel, shapes = ButtonDefaults.shapes()) { Text("停止") }
-                    AnalysisAction.ALL_DONE -> FilledTonalButton(onClick = {}, enabled = false, shapes = ButtonDefaults.shapes()) { Text("已完成") }
-                    AnalysisAction.NO_IMAGES -> Button(onClick = {}, enabled = false, shapes = ButtonDefaults.shapes()) { Text("开始") }
-                    AnalysisAction.CONTINUE -> Button(onClick = onStart, shapes = ButtonDefaults.shapes()) { Text("继续") }
-                    AnalysisAction.START -> Button(onClick = onStart, shapes = ButtonDefaults.shapes()) { Text("开始") }
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        if (running.action == RuleAction.COMPRESS) "正在压缩原图" else "正在清理：${running.title}",
+                        style = MaterialTheme.typography.titleMediumEmphasized,
+                    )
+                    Text(
+                        "${formatCountExact(running.done)} / ${formatCountExact(running.total)} 张 · 可离开本页",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                 }
+                OutlinedButton(onClick = onCancel, shapes = ButtonDefaults.shapes()) { Text("停止") }
             }
-        },
-    ) {
-        if (total > 0) {
-            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
-                Text(
-                    "${(fraction * 100).toInt()}%",
-                    style = MaterialTheme.typography.headlineMediumEmphasized,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-                Spacer(Modifier.width(10.dp))
-                Text(
-                    "已分析 ${formatCount(analyzed)} / ${formatCount(total)} 张",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(bottom = 4.dp),
-                )
-            }
-            Spacer(Modifier.height(8.dp))
-            WavyProgress(fraction = fraction, moving = state == AnalysisState.Running)
-        } else {
-            Text("扫描图片后即可开始分析", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-
-        AnimatedVisibility(
-            visible = state == AnalysisState.Running,
-            enter = expandVertically() + fadeIn(),
-            exit = shrinkVertically() + fadeOut(),
-        ) {
-            Column(Modifier.padding(top = 12.dp)) {
-                val phaseLabel = progress?.phase?.displayName ?: "准备中"
-                Text(
-                    when {
-                        progress == null -> "准备中…"
-                        progress.total > 0 -> "正在$phaseLabel · ${progress.processed}/${progress.total}"
-                        else -> "正在$phaseLabel…${progress.msg?.let { " $it" } ?: ""}"
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.height(6.dp))
-                WavyProgress(fraction = progress?.takeIf { it.total > 0 }?.let { it.processed.toFloat() / it.total })
-            }
-        }
-
-        if (state == AnalysisState.Failed) {
-            Text(
-                "上次分析失败：${progress?.msg ?: "未知错误"}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.error,
-                modifier = Modifier.padding(top = 8.dp),
-            )
-        }
-        if (action == AnalysisAction.ALL_DONE) {
-            Text(
-                "基础分析已全部完成。需要重新分析时，到「设置 → 分析」重置完成标记。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 8.dp),
-            )
+            WavyProgress(fraction = running.total.takeIf { it > 0 }?.let { running.done.toFloat() / it })
         }
     }
-}
-
-@Composable
-private fun StrategyCard(
-    config: CleanupConfig,
-    busy: Boolean,
-    onSelectPreset: (CleanupPreset) -> Unit,
-    onGenerate: () -> Unit,
-    onRecluster: () -> Unit,
-) {
-    val activePreset = CleanupPreset.match(config)
-    CleanupCard(title = "清理策略", icon = Icons.Outlined.CleaningServices) {
-        ConnectedChoiceRow(
-            options = CleanupPreset.entries.toList(),
-            selected = activePreset,
-            label = { it.displayName },
-            onSelect = onSelectPreset,
-        )
-        Spacer(Modifier.height(12.dp))
-        AnimatedContent(targetState = activePreset, label = "presetHint") { preset ->
-            Text(
-                text = presetHint(preset),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        Spacer(Modifier.height(16.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = onGenerate, enabled = !busy, shapes = ButtonDefaults.shapes()) {
-                Icon(Icons.Outlined.RateReview, contentDescription = null, modifier = Modifier.size(ButtonDefaults.IconSize))
-                Spacer(Modifier.width(ButtonDefaults.IconSpacing))
-                Text("生成审核清单")
-            }
-            OutlinedButton(onClick = onRecluster, enabled = !busy, shapes = ButtonDefaults.shapes()) { Text("重新查重") }
-        }
-    }
-}
-
-@Composable
-private fun ReviewSummaryCard(
-    batch: CleanupBatch,
-    selectedCount: Int,
-    busy: Boolean,
-    onOpen: () -> Unit,
-    onClose: () -> Unit,
-) {
-    CleanupCard(
-        title = "待审核清单",
-        icon = Icons.Outlined.RateReview,
-        containerColor = MaterialTheme.colorScheme.tertiaryContainer,
-    ) {
-        Text(
-            "共 ${batch.report.totalCount} 项 · ${formatBytes(batch.report.totalSize)}" +
-                if (selectedCount > 0) " · 已勾选 $selectedCount" else "",
-            style = MaterialTheme.typography.bodyLarge,
-        )
-        Spacer(Modifier.height(8.dp))
-        batch.report.byReason.entries.forEach { (reason, group) ->
-            Row(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
-                Text(reason, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
-                Text(
-                    "${group.count} 项 · ${formatBytes(group.size)}",
-                    style = MaterialTheme.typography.labelLarge,
-                )
-            }
-        }
-        Spacer(Modifier.height(16.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = onOpen, shapes = ButtonDefaults.shapes()) { Text("继续审核") }
-            // 批量清理（appScope 上跑）期间禁止关闭审核：避免关闭后过期结果与主页状态打架
-            OutlinedButton(onClick = onClose, enabled = !busy, shapes = ButtonDefaults.shapes()) { Text("关闭清单") }
-        }
-    }
-}
-
-/** QQ 缩略图（chatthumb）入口：按时间浏览与批量清理 */
-@Composable
-internal fun ThumbnailEntryItem(
-    position: SegmentPosition,
-    count: Int,
-    bytes: Long,
-    onOpen: () -> Unit,
-) {
-    SegmentedNavigationItem(
-        position = position,
-        icon = Icons.Outlined.PhotoSizeSelectSmall,
-        title = "QQ 缩略图",
-        subtitle = "${formatCountExact(count)} 项 · ${formatBytes(bytes)}，聊天预览缓存，可按时间批量清理",
-        onClick = onOpen,
-        iconContainerColor = MaterialTheme.colorScheme.secondaryContainer,
-        iconContentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-    )
 }
 
 /** 清理 / 移入回收站进度对话框：完成后由调用方置空自动消失，不可手动关闭；不到半秒就做完的操作不弹出，免得一闪而过 */
@@ -566,13 +458,6 @@ internal fun PurgeProgressDialog(progress: PurgeProgress) {
 }
 
 private const val PROGRESS_DIALOG_DELAY_MS = 500L
-
-private fun presetHint(preset: CleanupPreset?): String = when (preset) {
-    CleanupPreset.CONSERVATIVE -> "保守：只审核重复、损坏和空白图片。"
-    CleanupPreset.BALANCED -> "平衡：再加上低分辨率、模糊和表情包，覆盖大多数明显多余的图片。"
-    CleanupPreset.AGGRESSIVE -> "激进：开启全部维度并放宽门限，可能混入有价值的图片，请仔细审核。"
-    null -> "自定义：可在「设置 → 清理规则」中逐项调整开关和门限。"
-}
 
 internal fun formatQuarantineDate(ts: Long): String = formatDateTime(ts)
 

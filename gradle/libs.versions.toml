@@ -42,19 +42,9 @@ shizuku = "13.1.5"
 # libsu (Root)
 libsu = "5.2.2"
 
-# 网络
-okhttp = "4.12.0"
+# 序列化 / 协程
 kotlinxSerialization = "1.7.3"
 kotlinxCoroutines = "1.9.0"
-onnxruntime = "1.21.1"
-# OpenCV：官方 Maven 包（org.opencv，4.9.0+ 起在 Maven Central 发布）。
-# 旧的 com.quickbirdstudios:opencv:4.5.3 在 Android 14+/新 bionic 上 dlopen 失败
-# （libopencv_java4.so 引用了运行时不存在的符号 __sfp_handle_exceptions），导致 OCR 整阶段跳过。
-# 官方 4.x 库名仍是 opencv_java4、Java 包仍是 org.opencv.*，与 ppocr-sdk 完全兼容。
-opencv = "4.12.0"
-
-# Hash
-zeroAllocationHashing = "0.16"
 
 # DI
 koin = "4.0.0"
@@ -110,7 +100,6 @@ androidx-room-testing = { group = "androidx.room", name = "room-testing", versio
 # Coil
 coil-compose = { group = "io.coil-kt.coil3", name = "coil-compose", version.ref = "coil" }
 coil-gif = { group = "io.coil-kt.coil3", name = "coil-gif", version.ref = "coil" }
-coil-network-okhttp = { group = "io.coil-kt.coil3", name = "coil-network-okhttp", version.ref = "coil" }
 
 # Shizuku
 shizuku-api = { group = "dev.rikka.shizuku", name = "api", version.ref = "shizuku" }
@@ -121,17 +110,9 @@ libsu-core = { group = "com.github.topjohnwu.libsu", name = "core", version.ref 
 libsu-io = { group = "com.github.topjohnwu.libsu", name = "io", version.ref = "libsu" }
 libsu-service = { group = "com.github.topjohnwu.libsu", name = "service", version.ref = "libsu" }
 
-# 网络 / 序列化
-okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
-okhttp-logging = { group = "com.squareup.okhttp3", name = "logging-interceptor", version.ref = "okhttp" }
+# 序列化 / 协程
 kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "kotlinxSerialization" }
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "kotlinxCoroutines" }
-kotlinx-coroutines-play-services = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-play-services", version.ref = "kotlinxCoroutines" }
-onnxruntime-android = { group = "com.microsoft.onnxruntime", name = "onnxruntime-android", version.ref = "onnxruntime" }
-opencv-android = { group = "org.opencv", name = "opencv", version.ref = "opencv" }
-
-# 算法
-zero-allocation-hashing = { group = "net.openhft", name = "zero-allocation-hashing", version.ref = "zeroAllocationHashing" }
 
 # DI
 koin-android = { group = "io.insert-koin", name = "koin-android", version.ref = "koin" }

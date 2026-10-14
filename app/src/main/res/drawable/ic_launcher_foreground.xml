@@ -1,22 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- 自适应图标前景：聊天气泡里的一张照片（QQ 聊天图片） -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- 一个相册图标：相框 + Q 字符暗示 QQ -->
-    <group android:translateX="22" android:translateY="22">
-        <!-- 外框 -->
-        <path
-            android:fillColor="#FFFFFF"
-            android:pathData="M4,4 L60,4 A4,4 0 0 1 64,8 L64,56 A4,4 0 0 1 60,60 L4,60 A4,4 0 0 1 0,56 L0,8 A4,4 0 0 1 4,4 Z M4,8 L4,56 L60,56 L60,8 Z" />
-        <!-- 内部圆形：Q 字 -->
-        <path
-            android:fillColor="#FFFFFF"
-            android:pathData="M32,18 A14,14 0 1 0 32,46 A14,14 0 1 0 32,18 Z M32,22 A10,10 0 1 1 32,42 A10,10 0 1 1 32,22 Z" />
-        <!-- Q 字尾巴 -->
-        <path
-            android:fillColor="#FFFFFF"
-            android:pathData="M40,40 L48,48 L52,44 L44,36 Z" />
+    <group android:pivotX="54" android:pivotY="56" android:scaleX="1.08" android:scaleY="1.08">
+        <group android:translateY="1.2">
+            <path android:fillColor="#33000000" android:pathData="M43,30 H65 A13,13 0 0 1 78,43 V58 A13,13 0 0 1 65,71 H56.5 L42.6,81.9 C41.2,83 39.4,81.8 39.9,80.1 L42.8,71 H43 A13,13 0 0 1 30,58 V43 A13,13 0 0 1 43,30 Z" />
+        </group>
+        <path android:fillColor="#FFFFFF" android:pathData="M43,30 H65 A13,13 0 0 1 78,43 V58 A13,13 0 0 1 65,71 H56.5 L42.6,81.9 C41.2,83 39.4,81.8 39.9,80.1 L42.8,71 H43 A13,13 0 0 1 30,58 V43 A13,13 0 0 1 43,30 Z" />
+        <path android:fillColor="#FFB72B" android:pathData="M59.6,42.6 A4.6,4.6 0 1 0 68.8,42.6 A4.6,4.6 0 1 0 59.6,42.6 Z" />
+        <path android:fillColor="#8DB8F7" android:pathData="M50.5,63 L60.4,51.2 C61.3,50.1 62.9,50.1 63.8,51.2 L72.4,61.4 C73.2,62.4 72.6,63 71.4,63 Z" />
+        <path android:fillColor="#1565C0" android:pathData="M35.6,63 L45.6,47.6 C46.5,46.2 48.4,46.2 49.3,47.6 L59.4,63 Z" />
     </group>
 </vector>

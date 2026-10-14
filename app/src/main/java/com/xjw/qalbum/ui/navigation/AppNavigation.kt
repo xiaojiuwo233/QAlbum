@@ -56,11 +56,8 @@ import com.xjw.qalbum.ui.detail.ImageDetailScreen
 import com.xjw.qalbum.ui.gallery.ArchiveScreen
 import com.xjw.qalbum.ui.gallery.GalleryScreen
 import com.xjw.qalbum.ui.logs.LogScreen
-import com.xjw.qalbum.ui.search.SearchScreen
 import com.xjw.qalbum.ui.settings.AboutSettingsScreen
 import com.xjw.qalbum.ui.settings.AccessSettingsScreen
-import com.xjw.qalbum.ui.settings.AiSettingsScreen
-import com.xjw.qalbum.ui.settings.AnalysisSettingsScreen
 import com.xjw.qalbum.ui.settings.CleanupSettingsScreen
 import com.xjw.qalbum.ui.settings.PersonalizationSettingsScreen
 import com.xjw.qalbum.ui.settings.ScanSettingsScreen
@@ -69,7 +66,6 @@ import com.xjw.qalbum.ui.settings.SettingsScreen
 import com.xjw.qalbum.ui.sources.QqSourceBrowseScreen
 import com.xjw.qalbum.ui.sources.QqSourcesScreen
 import com.xjw.qalbum.ui.sources.SourceBrowseTarget
-import com.xjw.qalbum.ui.tags.TagsScreen
 import org.koin.compose.koinInject
 
 /**
@@ -79,9 +75,9 @@ import org.koin.compose.koinInject
  * - **inset**：NavHost 永远铺满，不随底栏显隐临时加/去 padding；每页用自己的顶栏避让状态栏。
  * - **转场**：
  *   - 一级 Tab 之间 → Fade Through；
- *   - 设置首页 ↔ 设置二级页、图库 ↔ 搜索 / 归档 → Container Transform（sharedBounds）；
- *   - 其它二级页（详情、QQ 来源、标签…）→ Shared Axis X；
- *   - 底栏在进入二级页、清理审核、图库多选时滑出，返回时滑入。系统手势走预测式返回。
+ *   - 设置首页 ↔ 设置二级页、图库 ↔ 归档 → Container Transform（sharedBounds）；
+ *   - 其它二级页（详情、QQ 来源…）→ Shared Axis X；
+ *   - 底栏在进入二级页、清理子页、图库多选时滑出，返回时滑入。系统手势走预测式返回。
  */
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
@@ -90,11 +86,11 @@ fun AppNavigation() {
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
     val currentDestination = NavDestination.fromRoute(currentRoute)
-    // 审核 / 重复组 / 回收站是清理页内部子页；图库多选时底部换成浮动操作栏 —— 两种情况都隐藏底栏
-    var cleanupReviewMode by remember { mutableStateOf(false) }
+    // 规则预览 / 按时间 / 回收站是清理页内部子页；图库多选时底部换成浮动操作栏 —— 两种情况都隐藏底栏
+    var cleanupSubPage by remember { mutableStateOf(false) }
     var gallerySelecting by remember { mutableStateOf(false) }
     val showBottomBar = currentRoute in bottomBarRoutes &&
-        !(currentRoute == NavDestination.Cleanup.route && cleanupReviewMode) &&
+        !(currentRoute == NavDestination.Cleanup.route && cleanupSubPage) &&
         !(currentRoute == NavDestination.Gallery.route && gallerySelecting)
     val density = LocalDensity.current
     val secondaryPadding = WindowInsets.navigationBars.asPaddingValues()
@@ -164,7 +160,6 @@ fun AppNavigation() {
                     GalleryScreen(
                         contentPadding = contentPadding,
                         onImageClick = { id -> navController.navigate("image/$id") },
-                        onOpenSearch = { navController.navigate(NavDestination.Search.route) },
                         onOpenArchive = { navController.navigate("archive") },
                         onOpenSources = { navController.navigate(QQ_SOURCES_ROUTE) },
                         onSelectionModeChange = { gallerySelecting = it },
@@ -206,28 +201,11 @@ fun AppNavigation() {
                         onBrowse = { next -> navController.navigate(next.route()) },
                     )
                 }
-                composable(NavDestination.Search.route) {
-                    SearchScreen(
-                        contentPadding = secondaryPadding,
-                        onResultClick = { id -> navController.navigate("image/$id") },
-                        onBack = { navController.popBackStack() },
-                        onOpenAiSettings = { navController.navigate(SettingsCategory.AI.route) },
-                        sharedScope = this@SharedTransitionLayout,
-                        animatedScope = this,
-                    )
-                }
                 composable(NavDestination.Cleanup.route) {
                     CleanupScreen(
                         contentPadding = contentPadding,
-                        onOpenTags = { navController.navigate("tags") },
                         onOpenSources = { navController.navigate(QQ_SOURCES_ROUTE) },
-                        onReviewModeChange = { cleanupReviewMode = it },
-                    )
-                }
-                composable("tags") {
-                    TagsScreen(
-                        contentPadding = secondaryPadding,
-                        onBack = { navController.popBackStack() },
+                        onSubPageChange = { cleanupSubPage = it },
                     )
                 }
                 composable(NavDestination.Settings.route) {
@@ -252,22 +230,8 @@ fun AppNavigation() {
                         animatedScope = this,
                     )
                 }
-                composable(SettingsCategory.ANALYSIS.route) {
-                    AnalysisSettingsScreen(
-                        onBack = { navController.popBackStack() },
-                        sharedScope = this@SharedTransitionLayout,
-                        animatedScope = this,
-                    )
-                }
                 composable(SettingsCategory.CLEANUP.route) {
                     CleanupSettingsScreen(
-                        onBack = { navController.popBackStack() },
-                        sharedScope = this@SharedTransitionLayout,
-                        animatedScope = this,
-                    )
-                }
-                composable(SettingsCategory.AI.route) {
-                    AiSettingsScreen(
                         onBack = { navController.popBackStack() },
                         sharedScope = this@SharedTransitionLayout,
                         animatedScope = this,
@@ -363,7 +327,7 @@ private val bottomBarRoutes: Set<String> = NavDestination.bottomBarEntries.map {
 private val settingsRoutes: Set<String> =
     setOf(NavDestination.Settings.route) + SettingsCategory.entries.map { it.route }
 
-/** 不在底部导航中的路由都视为"二级页"（设置子页、详情、搜索、归档、QQ 来源等） */
+/** 不在底部导航中的路由都视为"二级页"（设置子页、详情、归档、QQ 来源等） */
 private fun NavBackStackEntry.isSecondary(): Boolean =
     (destination.route?.substringBefore("/") ?: "") !in bottomBarRoutes
 
@@ -373,7 +337,7 @@ private fun AnimatedContentTransitionScope<NavBackStackEntry>.involvesSecondary(
 
 /**
  * 本次转场是否走 Container Transform（转场本体用 fade，让共享元素 morph 主导）：
- * 设置域内、图库↔搜索/归档。
+ * 设置域内、图库↔归档。
  */
 private fun AnimatedContentTransitionScope<NavBackStackEntry>.isContainerTransition(): Boolean {
     val from = initialState.destination.route ?: return false
@@ -381,7 +345,7 @@ private fun AnimatedContentTransitionScope<NavBackStackEntry>.isContainerTransit
     if (from == to) return false
     if (from in settingsRoutes && to in settingsRoutes) return true
     val gallery = NavDestination.Gallery.route
-    val galleryContainers = setOf(NavDestination.Search.route, "archive")
+    val galleryContainers = setOf("archive")
     if (from == gallery && to in galleryContainers) return true
     if (to == gallery && from in galleryContainers) return true
     return false

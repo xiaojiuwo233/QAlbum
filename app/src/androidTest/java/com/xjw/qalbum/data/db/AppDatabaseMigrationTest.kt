@@ -25,8 +25,121 @@ class AppDatabaseMigrationTest {
 
     @Test
     fun migrationEdgesCoverEveryPublishedVersion() {
-        assertEquals((1..18).toList(), allMigrations.map { it.startVersion })
-        assertEquals((2..19).toList(), allMigrations.map { it.endVersion })
+        assertEquals((1 until AppDatabase.VERSION).toList(), allMigrations.map { it.startVersion })
+        assertEquals((2..AppDatabase.VERSION).toList(), allMigrations.map { it.endVersion })
+    }
+
+    @Test
+    fun migrate21To22_addsOriginalFormatToCompressions() {
+        val name = "migration-21-22"
+        helper.createDatabase(name, 21).use { db ->
+            db.execSQL(
+                """INSERT INTO original_backups(id, image_id, path, backup_path, original_size, original_mtime, original_width, original_height,
+                    compressed_size, compressed_width, compressed_height, created_at, expires_at, state, quality)
+                VALUES(1, 7, '/chatpic/chatraw/a', NULL, 4000, 1000, 4000, 3000, 1000, 2560, 1920, 1000, 2000, 'ready', 80)""",
+            )
+        }
+        helper.runMigrationsAndValidate(name, 22, true, AppDatabase.MIGRATION_21_22).use { db ->
+            // 以前的记录没有格式（都是 JPEG）
+            assertEquals(1L, scalarLong(db, "SELECT COUNT(*) FROM original_backups WHERE original_mime IS NULL AND quality = 80"))
+        }
+    }
+
+    @Test
+    fun migrate20To21_recordsQualityOfExistingCompressions() {
+        val name = "migration-20-21"
+        helper.createDatabase(name, 20).use { db ->
+            db.execSQL(
+                """INSERT INTO original_backups(id, image_id, path, backup_path, original_size, original_mtime, original_width, original_height,
+                    compressed_size, compressed_width, compressed_height, created_at, expires_at, state)
+                VALUES(1, 7, '/chatpic/chatraw/a', '/backup/a', 4000, 1000, 4000, 3000, 1000, 2560, 1920, 1000, 2000, 'ready')""",
+            )
+        }
+        helper.runMigrationsAndValidate(name, 21, true, AppDatabase.MIGRATION_20_21).use { db ->
+            // 以前的压缩固定用 85
+            assertEquals(85L, scalarLong(db, "SELECT quality FROM original_backups WHERE id = 1"))
+            assertEquals("/backup/a", scalarString(db, "SELECT backup_path FROM original_backups WHERE id = 1"))
+        }
+    }
+
+    @Test
+    fun migrate19To20_turnsKeepIntoArchiveDropsAnalysisAndRebuildsImages() {
+        val name = "migration-19-20"
+        helper.createDatabase(name, 19).use { db ->
+            // v19 的触发器不在导出的 schema 里（由迁移 / 建库回调创建），这里补上
+            AppDatabase.createQqSourceTriggers(db)
+            db.execSQL(QqSourceStatsSql.ENSURE_CACHE_ROW)
+            QqSourceStatsSql.createTriggers(db)
+            ImageVariantSql.createTriggers(db)
+            db.execSQL("""CREATE TRIGGER invalidate_changed_image_analysis AFTER UPDATE OF size, mtime ON images
+                BEGIN DELETE FROM ocr_text WHERE image_id = NEW.id; END""")
+
+            // 家族 7：原图标了「保留」，同一张图的预览图一起转为归档
+            insertImage(db, 1, "/chatpic/chatraw/kept", "active", 0, 1, 1000)
+            insertImage(db, 2, "/chatpic/chatimg/kept", "active", 0, null, 1000)
+            db.execSQL("UPDATE images SET variant_group = 7 WHERE id IN (1, 2)")
+            insertImage(db, 3, "/chatpic/chatimg/plain", "active", 0, null, 1000)
+            // 已在回收站里的「保留」不转
+            insertImage(db, 4, "qalbum-internal://quarantined/4", "quarantined", 0, 1, 1000)
+            // 删掉的行占用过的 id 不能在换表后被重新分配
+            insertImage(db, 50, "/chatpic/chatimg/gone", "active", 0, null, 1000)
+            db.execSQL("DELETE FROM images WHERE id = 50")
+
+            db.execSQL("INSERT INTO qq_source_accounts VALUES('a','账号',1,1)")
+            db.execSQL("INSERT INTO qq_origins VALUES('o','a','g','群名',2,'s','昵称','群名片',1000,'md5')")
+            db.execSQL("INSERT INTO image_qq_origins VALUES(2,'o')")
+            db.execSQL("""INSERT INTO quarantine(id,image_id,original_path,quarantine_path,thumbnail_path,reason,ocr_summary,size,quarantined_at,expires_at,state,group_id,file_count,source_stamp)
+                VALUES(1,4,'/chatpic/chatimg/old','/quarantine/4',NULL,'test',NULL,100,1000,999999,'ready',NULL,1,NULL)""")
+            db.execSQL("INSERT INTO tags(id,name,type,color,auto_protect,auto_delete) VALUES(1,'t','user',NULL,0,0)")
+            db.execSQL("INSERT INTO image_tags VALUES(1,1,1.0,'user')")
+            db.execSQL("INSERT INTO ocr_text VALUES(1,'text',0.9,0,0,0,0,0,1000)")
+            db.execSQL("INSERT INTO ocr_fts(rowid,text) VALUES(1,'text')")
+            db.execSQL("INSERT INTO ai_analysis VALUES(1,'d','t','m',1000)")
+            db.execSQL("INSERT INTO image_embeddings VALUES(1,'m',1,X'0000803F',1000)")
+            db.execSQL("INSERT INTO dedup_exclusions VALUES(1,1)")
+            db.execSQL("INSERT INTO cleanup_batches VALUES(1,'s',1,100,'reviewing',1,NULL)")
+            db.execSQL("INSERT INTO cleanup_candidates VALUES(1,1,1,'r','low',0.1,NULL)")
+        }
+        helper.runMigrationsAndValidate(name, 20, true, AppDatabase.MIGRATION_19_20).use { db ->
+            assertEquals(listOf(1L, 1L, 0L, 0L), (1..4).map { scalarLong(db, "SELECT is_protected FROM images WHERE id = $it") })
+            assertEquals(4L, scalarLong(db, "SELECT COUNT(*) FROM images WHERE optimized = 0"))
+            assertEquals("/chatpic/chatimg/plain", scalarString(db, "SELECT path FROM images WHERE id = 3"))
+            assertEquals(2L, scalarLong(db, "SELECT COUNT(*) FROM images WHERE variant_group = 7"))
+            assertEquals(1L, scalarLong(db, "SELECT COUNT(*) FROM image_qq_origins WHERE image_id = 2 AND origin_id = 'o'"))
+            assertEquals(4L, scalarLong(db, "SELECT image_id FROM quarantine WHERE id = 1"))
+
+            listOf("ocr_text", "tags", "image_tags", "ai_analysis", "image_embeddings",
+                "dedup_exclusions", "cleanup_batches", "cleanup_candidates").forEach { assertFalse(it, tableExists(db, it)) }
+            assertEquals(0L, scalarLong(db, "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'ocr_fts%'"))
+            assertEquals(0L, scalarLong(db, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'invalidate_changed_image_analysis'"))
+            listOf("link_qq_image_origin_0", "link_qq_image_origin_1", "qq_stats_image_update", "qq_stats_image_insert",
+                "qq_stats_image_path", "qq_stats_image_delete", "image_variants_insert", "image_variants_update",
+                "image_variants_delete", "image_plain_bytes_insert", "image_plain_bytes_update", "dirty_qq_links_delete",
+            ).forEach { trigger ->
+                assertEquals(trigger, 1L, scalarLong(db, "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='$trigger'"))
+            }
+            db.query("PRAGMA foreign_key_check").use { assertEquals(0, it.count) }
+
+            // 换表后触发器照常工作：新图关联来源、补自身大小，id 接着旧序号
+            db.execSQL("INSERT INTO qq_origin_paths VALUES('/chatpic/chatimg/new','o')")
+            db.execSQL(
+                """INSERT INTO images(path, filename, parent_dir, source_type, cache_key, size, mtime, first_seen, last_seen,
+                    mime, width, height, is_animated, status, is_protected)
+                VALUES('/chatpic/chatimg/new', 'Cache_new', '/chatpic', 'chatimg', 'new', 300, 1000, 1000, 1000,
+                    'image/jpeg', 0, 0, 0, 'active', 0)""",
+            )
+            assertEquals(51L, scalarLong(db, "SELECT id FROM images WHERE path = '/chatpic/chatimg/new'"))
+            assertEquals(300L, scalarLong(db, "SELECT variant_bytes FROM images WHERE id = 51"))
+            assertEquals(1L, scalarLong(db, "SELECT COUNT(*) FROM image_qq_origins WHERE image_id = 51"))
+            // 家族重算：原图变大后仍是代表图，合计两个版本
+            db.execSQL("UPDATE images SET size = 500 WHERE id = 1")
+            assertEquals(600L, scalarLong(db, "SELECT variant_bytes FROM images WHERE id = 1"))
+            assertEquals(1L, scalarLong(db, "SELECT variant_hidden FROM images WHERE id = 2"))
+            // 外键仍指向新表：删图级联删掉来源关联
+            db.execSQL("PRAGMA foreign_keys=ON")
+            db.execSQL("DELETE FROM images WHERE id = 2")
+            assertEquals(0L, scalarLong(db, "SELECT COUNT(*) FROM image_qq_origins WHERE image_id = 2"))
+        }
     }
 
     @Test
@@ -348,26 +461,7 @@ class AppDatabaseMigrationTest {
         scalarLong(db, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '$name'") > 0
 
     companion object {
-        private val allMigrations = listOf(
-            AppDatabase.MIGRATION_1_2,
-            AppDatabase.MIGRATION_2_3,
-            AppDatabase.MIGRATION_3_4,
-            AppDatabase.MIGRATION_4_5,
-            AppDatabase.MIGRATION_5_6,
-            AppDatabase.MIGRATION_6_7,
-            AppDatabase.MIGRATION_7_8,
-            AppDatabase.MIGRATION_8_9,
-            AppDatabase.MIGRATION_9_10,
-            AppDatabase.MIGRATION_10_11,
-            AppDatabase.MIGRATION_11_12,
-            AppDatabase.MIGRATION_12_13,
-            AppDatabase.MIGRATION_13_14,
-            AppDatabase.MIGRATION_14_15,
-            AppDatabase.MIGRATION_15_16,
-            AppDatabase.MIGRATION_16_17,
-            AppDatabase.MIGRATION_17_18,
-            AppDatabase.MIGRATION_18_19,
-        )
+        private val allMigrations = AppDatabase.allMigrations()
 
         private const val TEST_DB_V1 = "migration-1-11"
         private const val TEST_DB = "migration-9-11"

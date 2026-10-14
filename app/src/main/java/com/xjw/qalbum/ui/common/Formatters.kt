@@ -68,11 +68,10 @@ fun sourceLabel(sourceType: String): String = when (sourceType) {
     else -> sourceType.ifBlank { "其他" }
 }
 
-/** 预览副标题：1080×1920 · 1.2 MB · 清晰度 85 */
+/** 预览副标题：1080×1920 · 1.2 MB */
 fun imageMeta(image: ImageEntity): String {
     val dimensions = if (image.width > 0 && image.height > 0) "${image.width}×${image.height}" else "未知尺寸"
-    val clarity = image.blurScore?.let { " · 清晰度 ${String.format(Locale.ROOT, "%.0f", it)}" } ?: ""
-    return "$dimensions · ${formatBytes(image.size)}$clarity"
+    return "$dimensions · ${formatBytes(image.size)}"
 }
 
 /** 删除结果文案：因归档 / 共用 / 文件变化而跳过的要说出来 */

@@ -5,12 +5,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.CleaningServices
 import androidx.compose.material.icons.outlined.PhotoLibrary
-import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.CleaningServices
 import androidx.compose.material.icons.rounded.PhotoLibrary
-import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.ui.graphics.vector.ImageVector
 import com.xjw.qalbum.R
@@ -33,13 +31,6 @@ enum class NavDestination(
         labelRes = R.string.nav_gallery,
         outlinedIcon = Icons.Outlined.PhotoLibrary,
         filledIcon = Icons.Rounded.PhotoLibrary,
-    ),
-    Search(
-        route = "search",
-        labelRes = R.string.nav_search,
-        outlinedIcon = Icons.Outlined.Search,
-        filledIcon = Icons.Rounded.Search,
-        showInBottomBar = false,
     ),
     Cleanup(
         route = "cleanup",

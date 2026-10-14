@@ -33,7 +33,9 @@ class ImageVariantTest {
 
     private fun open(name: String): SupportSQLiteDatabase {
         helper.createDatabase(name, 17).close()
-        return helper.runMigrationsAndValidate(name, 19, true, AppDatabase.MIGRATION_17_18, AppDatabase.MIGRATION_18_19)
+        return helper.runMigrationsAndValidate(
+            name, 20, true, AppDatabase.MIGRATION_17_18, AppDatabase.MIGRATION_18_19, AppDatabase.MIGRATION_19_20,
+        )
     }
 
     @Test
@@ -74,7 +76,7 @@ class ImageVariantTest {
     }
 
     @Test
-    fun backfillRecomputeAndDuplicateCleanup() {
+    fun backfillAndRecompute() {
         open("variants-backfill").use { db ->
             val (img, raw, thumb, _) = familyPaths("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
             val (otherImg) = familyPaths("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
@@ -86,11 +88,8 @@ class ImageVariantTest {
             insert(db, 4, otherImg, "chatimg", "active", 400, key = false)
             insert(db, 5, thirdImg, "chatimg", "active", 100, key = false)
             insert(db, 6, thirdRaw, "chatraw", "active", 900, key = false)
-            // 旧版查重：组 8 = 预览图 + 原图 + 另一张真正相似的图；组 7 只是同一张图的预览图与原图
-            db.execSQL("UPDATE images SET duplicate_group_id = 8 WHERE id IN (1, 2, 4)")
-            db.execSQL("UPDATE images SET duplicate_group_id = 7 WHERE id IN (5, 6)")
 
-            // 回填：撤掉家族索引与触发器 → 写家族键 → 恢复 → 分段重算 → 解散
+            // 回填：撤掉家族索引与触发器 → 写家族键 → 恢复 → 分段重算
             val familySchema = "SELECT COUNT(*) FROM sqlite_master WHERE name = 'index_images_variant_group' OR name LIKE 'image_variants_%'"
             ImageVariantSql.suspendForBackfill(db)
             assertEquals(0L, scalar(db, familySchema))
@@ -113,12 +112,6 @@ class ImageVariantTest {
             db.execSQL(ImageVariantSql.recomputeRange, arrayOf<Any>(0, Long.MAX_VALUE))
             assertRow(db, 2, hidden = 0, count = 3, bytes = 2_320)
 
-            ImageVariantSql.dissolveFamilyDuplicates.forEach(db::execSQL)
-            // 隐藏的预览图退出重复组；组 8 仍有原图与另一张图两张可见图，保留；组 7 只剩一张可见图，解散
-            assertEquals(0L, scalar(db, "SELECT COUNT(*) FROM images WHERE id = 1 AND duplicate_group_id IS NOT NULL"))
-            assertEquals(2L, scalar(db, "SELECT COUNT(*) FROM images WHERE duplicate_group_id = 8"))
-            assertEquals(0L, scalar(db, "SELECT COUNT(*) FROM images WHERE duplicate_group_id = 7"))
-
             // 图库计数：合并后同一张图只算一次（缩略图本就不计）
             assertEquals(4L, scalar(db, "SELECT COUNT(*) FROM images WHERE status = 'active' AND source_type <> 'chatthumb'"))
             assertEquals(3L, scalar(db, "SELECT COUNT(*) FROM images WHERE status = 'active' AND source_type <> 'chatthumb' AND variant_hidden = 0"))
@@ -128,11 +121,10 @@ class ImageVariantTest {
     private fun insert(db: SupportSQLiteDatabase, id: Long, path: String, sourceType: String, status: String, size: Long, key: Boolean = true) {
         val group = if (key) QqCachePaths.familyKey(path)?.toString() ?: "NULL" else "NULL"
         db.execSQL(
-            """INSERT INTO images(id, path, filename, parent_dir, source_type, cache_key, variant_group, is_variant_primary,
-                size, mtime, first_seen, last_seen, mime, width, height, is_animated, is_corrupt, is_blank,
-                hash_done, ocr_done, ai_done, embedding_done, info_score, delete_score, is_duplicate_best, status, is_protected)
-            VALUES($id, '$path', '${path.substringAfterLast('/')}', '${path.substringBeforeLast('/')}', '$sourceType', 'k$id', $group, 0,
-                $size, 1000, 1000, 1000, 'image/jpeg', 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, '$status', 0)""",
+            """INSERT INTO images(id, path, filename, parent_dir, source_type, cache_key, variant_group,
+                size, mtime, first_seen, last_seen, mime, width, height, is_animated, status, is_protected)
+            VALUES($id, '$path', '${path.substringAfterLast('/')}', '${path.substringBeforeLast('/')}', '$sourceType', 'k$id', $group,
+                $size, 1000, 1000, 1000, 'image/jpeg', 1, 1, 0, '$status', 0)""",
         )
     }
 

@@ -10,6 +10,7 @@ import androidx.room.Transaction
 import androidx.room.Upsert
 import androidx.sqlite.db.SimpleSQLiteQuery
 import androidx.sqlite.db.SupportSQLiteQuery
+import com.xjw.qalbum.data.db.SizeBucketSql
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.db.entity.QqImageContextEntity
 import com.xjw.qalbum.data.db.entity.QqOriginEntity
@@ -364,16 +365,7 @@ object QqScopeSql {
     fun sizeBuckets(ids: QqScopeIds, content: QqContent, stacked: Boolean): SupportSQLiteQuery {
         val (w, args) = browse(ids, content, stacked)
         val size = sizeColumn(content, stacked)
-        return query(
-            """SELECT CASE
-                WHEN $size >= 10485760 THEN 100000
-                WHEN $size >= 1048576 THEN 10000 + ($size / 1048576)
-                WHEN $size >= 102400 THEN 1000 + ($size / 102400)
-                WHEN $size >= 10240 THEN 100 + ($size / 10240)
-                ELSE 0 END AS bucketKey, COUNT(*) AS count
-            FROM images i WHERE $w GROUP BY bucketKey""",
-            args,
-        )
+        return query("SELECT ${SizeBucketSql.key(size)} AS bucketKey, COUNT(*) AS count FROM images i WHERE $w GROUP BY bucketKey", args)
     }
 
     /** 网格里的全部图片（全选） */
@@ -404,9 +396,9 @@ object QqScopeSql {
         return "EXISTS (SELECT 1 FROM qq_image_contexts o WHERE o.image_id = i.id AND (${terms.joinToString(" OR ")}))" to args
     }
 
-    private const val PROTECTED = "(i.is_protected = 1 OR COALESCE(i.user_keep, 0) = 1)"
+    private const val PROTECTED = "i.is_protected = 1"
 
-    /** 按范围清理前的统计：共用与受保护（归档 / 保留）的图片分别计数 */
+    /** 按范围清理前的统计：共用与归档（受保护）的图片分别计数 */
     fun counts(ids: QqScopeIds, set: Set<QqContent>, includeShared: Boolean): SupportSQLiteQuery {
         val (w, whereArgs) = where(ids, set)
         val (sharedSql, sharedArgs) = shared(ids)

@@ -37,6 +37,14 @@ class FileOpsUserService : IFileOps.Stub() {
         FileOpsImpl.moveFilesChecked(sources, targets, stamps)
     override fun deleteFilesChecked(paths: Array<String>, stamps: Array<String>): BooleanArray =
         FileOpsImpl.deleteFilesChecked(paths, stamps)
+    override fun readImageInfo(paths: Array<String>): IntArray = FileOpsImpl.readImageInfo(paths)
+    override fun replaceFileChecked(target: String, content: ParcelFileDescriptor, backup: String, stamp: String, mtimeMs: Long): Int =
+        FileOpsImpl.replaceFileChecked(target, content, backup, stamp, mtimeMs)
+    override fun restoreFileChecked(backup: String, target: String, stamp: String, mtimeMs: Long): Int =
+        FileOpsImpl.restoreFileChecked(backup, target, stamp, mtimeMs)
+    override fun writeFileChecked(target: String, content: ParcelFileDescriptor, mtimeMs: Long): Int =
+        FileOpsImpl.writeFileChecked(target, content, mtimeMs)
+    override fun repairOwnership(paths: Array<String>): IntArray = FileOpsImpl.repairOwnership(paths)
 
     override fun qqAccountCatalog(userId: Int): String = error("QQ 图片来源需要 Root 权限")
     override fun qqDatabaseState(userId: Int, account: String): String = error("QQ 图片来源需要 Root 权限")

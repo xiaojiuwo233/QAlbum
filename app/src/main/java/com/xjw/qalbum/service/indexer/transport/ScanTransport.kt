@@ -35,6 +35,15 @@ interface ScanTransport {
      */
     suspend fun readHeaders(paths: List<String>, n: Int): List<ByteArray?>
 
+    /**
+     * 批量读图片宽高（只解析文件头、不解码）。返回与 [paths] 等长的列表，读不到的为 null。
+     * 只有 AIDL 特权服务支持；shell 降级通道返回全 null（宽高记为 0，不影响扫描与清理）。
+     */
+    suspend fun readImageSizes(paths: List<String>): List<Pair<Int, Int>?> = paths.map { null }
+
+    /** 是否支持 [readImageSizes]（只有 AIDL 特权服务支持） */
+    val readsImageSizes: Boolean get() = false
+
     /** 释放底层资源（解绑 AIDL 服务等），幂等 */
     fun close()
 }

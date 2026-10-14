@@ -19,8 +19,7 @@ import timber.log.Timber
  *
  * 1. 按 id 分页回填家族键（几千行一个短事务）；首次回填暂时撤掉索引与触发器，已有旧键时只补 .jpg；
  * 2. 按 id 段重算家族的代表图、版本数与合并显示时的大小，不属于家族的图大小补成自身大小
- *    （只写有变化的行，此时触发器已在维护后续变化）；
- * 3. 解散旧版查重把同一张图的不同版本当成的「重复组」。
+ *    （只写有变化的行，此时触发器已在维护后续变化）。
  *
  * 写入直接在底层连接上开事务：Room 的事务每次提交都会通知所有观察 images 的查询（图库分页、
  * 日期分组计数等）整体重查，回填的上百个小事务会让界面反复刷新、也拖慢回填本身。全部写完后统一通知一次。
@@ -48,17 +47,15 @@ class PictureVariantIndexer(
                 val keyed = if (indexed < KEYS_VERSION) writeKeys(dao, sql, jpegOnly = indexed >= 1) else null
                 val keysDone = System.currentTimeMillis()
                 recompute(dao, sql)
-                val recomputed = System.currentTimeMillis()
-                sql.quietTransaction { ImageVariantSql.dissolveFamilyDuplicates.forEach(sql::execSQL) }
                 db.withTransaction {
                     db.qqSourceDao().markDirty()
                     db.qqSourceDao().reconcileLinks()
                 }
                 val done = System.currentTimeMillis()
                 Timber.i(
-                    "Picture families indexed (v%d) in %d ms: keys %s, recompute %d ms, duplicates %d ms",
+                    "Picture families indexed (v%d) in %d ms: keys %s, recompute %d ms",
                     VERSION, done - started, keyed?.let { "$it files / ${keysDone - started} ms" } ?: "unchanged",
-                    recomputed - keysDone, done - recomputed,
+                    done - keysDone,
                 )
             } finally {
                 sql.quietTransaction { sql.pragma("wal_autocheckpoint = $checkpoint") }

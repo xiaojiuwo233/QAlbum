@@ -5,12 +5,12 @@ import androidx.lifecycle.viewModelScope
 import android.net.Uri
 import android.os.Build
 import com.xjw.qalbum.data.db.entity.ImageEntity
-import com.xjw.qalbum.data.db.entity.OcrTextEntity
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.data.repository.ImageRepository
 import com.xjw.qalbum.domain.model.GallerySort
 import com.xjw.qalbum.service.cleanup.ArchiveManager
 import com.xjw.qalbum.service.cleanup.ImageFileManager
+import com.xjw.qalbum.service.cleanup.OriginalCompressor
 import com.xjw.qalbum.service.cleanup.QuarantineManager
 import com.xjw.qalbum.service.cleanup.PictureDeleteOptions
 import kotlinx.coroutines.Job
@@ -36,6 +36,7 @@ class ImageDetailViewModel(
     private val quarantineManager: QuarantineManager,
     private val archive: ArchiveManager,
     private val settings: SettingsRepository,
+    compressor: OriginalCompressor,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow<ImageDetailState>(ImageDetailState.Loading)
@@ -66,6 +67,20 @@ class ImageDetailViewModel(
     private var headExhausted = false
     private var tailExhausted = false
 
+    init {
+        // 压缩或还原替换了文件：当前显示的图（及其版本条）换成新的大小与压缩状态
+        viewModelScope.launch {
+            compressor.changes.collect { ids ->
+                val ready = _state.value as? ImageDetailState.Ready ?: return@collect
+                if (ids.none { id -> id == ready.current.id || ready.variants.any { it.id == id } }) return@collect
+                val current = imageRepository.getById(ready.current.id) ?: return@collect
+                val variants = ready.variants.map { variant -> if (variant.id in ids) imageRepository.getById(variant.id) ?: variant else variant }
+                val latest = _state.value as? ImageDetailState.Ready ?: return@collect
+                if (latest.current.id == current.id) _state.value = latest.copy(current = current, variants = variants)
+            }
+        }
+    }
+
     fun load(imageId: Long, archiveOnly: Boolean = false) {
         val key = imageId to archiveOnly
         if (loadedKey == key) return
@@ -79,7 +94,6 @@ class ImageDetailViewModel(
                 _state.value = ImageDetailState.NotFound
                 return@launch
             }
-            val ocr = imageRepository.getOcr(imageId)
             stacked = !archiveOnly && settings.galleryStackVariants.first()
             if (archiveOnly) {
                 val ids = imageRepository.archiveTimelineIds(archive.pageStatuses.first())
@@ -92,7 +106,6 @@ class ImageDetailViewModel(
                     ids = ids,
                     currentIndex = index,
                     current = image,
-                    ocr = ocr,
                 )
                 return@launch
             }
@@ -103,7 +116,6 @@ class ImageDetailViewModel(
                 ids = listOf(imageId),
                 currentIndex = 0,
                 current = image,
-                ocr = ocr,
                 variants = familyOf(image),
             )
             val window = imageRepository.timelineWindowAround(image, sort, stacked)
@@ -128,13 +140,12 @@ class ImageDetailViewModel(
         selectJob?.cancel()
         selectJob = viewModelScope.launch {
             val image = imageRepository.getById(id) ?: return@launch
-            val ocr = imageRepository.getOcr(id)
             val variants = familyOf(image)
             // 挂起期间窗口可能被扩窗平移或删除改写：以最新 state 为基准、按 id 重定位下标
             val latest = _state.value as? ImageDetailState.Ready ?: return@launch
             val latestIndex = if (latest.ids.getOrNull(index) == id) index else latest.ids.indexOf(id)
             if (latestIndex < 0) return@launch
-            _state.value = latest.copy(currentIndex = latestIndex, current = image, ocr = ocr, variants = variants)
+            _state.value = latest.copy(currentIndex = latestIndex, current = image, variants = variants)
             maybeExtendWindow()
         }
     }
@@ -154,12 +165,7 @@ class ImageDetailViewModel(
         val ready = _state.value as? ImageDetailState.Ready ?: return
         val target = ready.variants.firstOrNull { it.id == id } ?: return
         if (target.id == ready.current.id) return
-        viewModelScope.launch {
-            val ocr = imageRepository.getOcr(target.id)
-            val latest = _state.value as? ImageDetailState.Ready ?: return@launch
-            if (latest.variants.none { it.id == target.id }) return@launch
-            _state.value = latest.copy(current = target, ocr = ocr)
-        }
+        _state.value = ready.copy(current = target)
     }
 
     /**
@@ -211,7 +217,7 @@ class ImageDetailViewModel(
                 // Q 以下 WRITE_EXTERNAL_STORAGE 是运行时权限：未授予时 insert 会被 catch 成
                 // 静默失败，这里先行拦截给出可读原因（与清理页 saveImage 同口径）
                 if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q && !imageFileManager.canExportPreQ()) {
-                    _toast.value = "保存失败：需要存储权限，请在系统设置中授予后重试"
+                    _toast.value = "保存失败：请在系统设置中授予存储权限"
                     return@launch
                 }
                 val ok = imageFileManager.exportToGallery(image.id, subdir)
@@ -310,7 +316,6 @@ class ImageDetailViewModel(
                 _state.value = ready.copy(
                     ids = ids,
                     current = if (onPage) representative else ready.current,
-                    ocr = if (onPage) imageRepository.getOcr(representative.id) else ready.ocr,
                     variants = if (onPage) remaining.takeIf { it.size >= 2 }.orEmpty() else ready.variants,
                 )
                 return
@@ -344,22 +349,19 @@ class ImageDetailViewModel(
             ready.currentIndex > removedIndex -> ready.currentIndex - 1
             else -> ready.currentIndex
         }
-        val (image, ocr) = if (ready.currentIndex == removedIndex) {
-            val next = imageRepository.getById(newIds[newIndex])
-            if (next == null) {
+        val image = if (ready.currentIndex == removedIndex) {
+            imageRepository.getById(newIds[newIndex]) ?: run {
                 onExhausted()
                 return
             }
-            next to imageRepository.getOcr(next.id)
         } else {
-            ready.current to ready.ocr
+            ready.current
         }
         val variants = if (ready.currentIndex == removedIndex) familyOf(image) else ready.variants
         _state.value = ready.copy(
             ids = newIds,
             currentIndex = newIndex,
             current = image,
-            ocr = ocr,
             variants = variants,
             totalCount = (ready.totalCount - 1).coerceAtLeast(1),
         )
@@ -444,7 +446,6 @@ sealed class ImageDetailState {
         val ids: List<Long>,
         val currentIndex: Int,
         val current: ImageEntity,
-        val ocr: OcrTextEntity? = null,
         val totalCount: Int = ids.size,
         val rankOffset: Int = 0,
         /** 当前页这张图的全部版本（合并显示时 ≥2 个才有）；[current] 是其中正在显示的那个 */

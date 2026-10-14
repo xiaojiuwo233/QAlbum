@@ -13,8 +13,7 @@ import kotlinx.coroutines.flow.Flow
 /**
  * 图片表 DAO
  *
- * Phase 1 重点：扫描 / 时间线分页 / 仪表盘统计
- * Phase 2 起会补充：xxhash/phash 查询、重复组聚类、模糊度统计等
+ * 扫描、时间线分页、家族、归档、清理规则与统计。只记录文件信息，不做内容分析。
  */
 @Dao
 interface ImageDao {
@@ -28,12 +27,12 @@ interface ImageDao {
     /** [archived]：归档页删除时归档的图也可删（见 PictureDeleteOptions.includeArchived） */
     @Query("""SELECT * FROM images WHERE id IN (:ids)
         AND (status IN ('active','thumbnail_trash') OR (:archived AND status='archived'))
-        AND (is_protected=0 OR :archived) AND (user_keep IS NULL OR user_keep=0)""")
+        AND (is_protected=0 OR :archived)""")
     suspend fun getLinkedCleanupEligible(ids: List<Long>, archived: Boolean = false): List<ImageEntity>
 
     @Query("""UPDATE images SET status='quarantine_pending' WHERE id IN (:ids)
         AND (status IN ('active','thumbnail_trash') OR (:archived AND status='archived'))
-        AND (is_protected=0 OR :archived) AND (user_keep IS NULL OR user_keep=0)""")
+        AND (is_protected=0 OR :archived)""")
     suspend fun markLinkedQuarantinePending(ids: List<Long>, archived: Boolean = false): Int
 
     // ---- 写入 ----
@@ -80,11 +79,10 @@ interface ImageDao {
     """)
     suspend fun markDeletedFromStatus(ids: List<Long>, deletedAt: Long, fromStatus: String): Int
 
-    /** 文件移动前的原子 claim：同时重验归档/用户保留，真实 path 暂时保留以阻止扫描重复插入。 */
+    /** 文件移动前的原子 claim：同时重验归档，真实 path 暂时保留以阻止扫描重复插入。 */
     @Query("""
         UPDATE images SET status = 'quarantine_pending'
-        WHERE id IN (:ids) AND status = 'active'
-          AND is_protected = 0 AND (user_keep IS NULL OR user_keep = 0)
+        WHERE id IN (:ids) AND status = 'active' AND is_protected = 0
     """)
     suspend fun markQuarantinePending(ids: List<Long>): Int
 
@@ -129,10 +127,6 @@ interface ImageDao {
 
     @Query("UPDATE images SET last_seen = :ts WHERE id = :id")
     suspend fun touchLastSeen(id: Long, ts: Long)
-
-    /** keyset 分页取 status='deleted' 行 id：存量派生数据（OCR/标签/向量/排斥）的一次性清理用。 */
-    @Query("SELECT id FROM images WHERE status = 'deleted' AND id > :afterId ORDER BY id LIMIT :limit")
-    suspend fun deletedIdsPaged(afterId: Long, limit: Int): List<Long>
 
     // ---- 扫描（目录剪枝管线）----
 
@@ -180,6 +174,9 @@ interface ImageDao {
     suspend fun fixMimeType(id: Long, mime: String, isAnimated: Boolean)
 
     /**
+     * 宽高取本次读到的文件头，读不到（0）且内容没变时保留原值；文件被 QQ 重写（如重新下载原图）后
+     * 压缩状态 optimized 清零。
+     *
      * WHERE 的 status 守卫是硬约束：status='deleted' 是「已清理」统计的纯净数据源、quarantined 行
      * 的原路径文件归回收站流程自管——同路径上重新出现的新文件（如 QQ 重新下载同名缓存）绝不能
      * 让扫描改写这两类行的 size/mtime，否则统计被污染且该文件永远不可见。
@@ -203,21 +200,9 @@ interface ImageDao {
                 WHEN status = 'missing' THEN 'active'
                 ELSE status
             END,
-            hash_done = CASE WHEN size != :size OR mtime != :mtime THEN 0 ELSE hash_done END,
-            xxhash = CASE WHEN size != :size OR mtime != :mtime THEN NULL ELSE xxhash END,
-            phash = CASE WHEN size != :size OR mtime != :mtime THEN NULL ELSE phash END,
-            block_hash = CASE WHEN size != :size OR mtime != :mtime THEN NULL ELSE block_hash END,
-            feature_grid = CASE WHEN size != :size OR mtime != :mtime THEN NULL ELSE feature_grid END,
-            blur_score = CASE WHEN size != :size OR mtime != :mtime THEN NULL ELSE blur_score END,
-            width = CASE WHEN size != :size OR mtime != :mtime THEN 0 ELSE width END,
-            height = CASE WHEN size != :size OR mtime != :mtime THEN 0 ELSE height END,
-            is_blank = CASE WHEN size != :size OR mtime != :mtime THEN 0 ELSE is_blank END,
-            is_corrupt = CASE WHEN size != :size OR mtime != :mtime THEN 0 ELSE is_corrupt END,
-            ocr_done = CASE WHEN size != :size OR mtime != :mtime THEN 0 ELSE ocr_done END,
-            ai_done = CASE WHEN size != :size OR mtime != :mtime THEN 0 ELSE ai_done END,
-            embedding_done = CASE WHEN size != :size OR mtime != :mtime THEN 0 ELSE embedding_done END,
-            duplicate_group_id = CASE WHEN size != :size OR mtime != :mtime THEN NULL ELSE duplicate_group_id END,
-            is_duplicate_best = CASE WHEN size != :size OR mtime != :mtime THEN 0 ELSE is_duplicate_best END
+            width = CASE WHEN :width > 0 OR size != :size OR mtime != :mtime THEN :width ELSE width END,
+            height = CASE WHEN :width > 0 OR size != :size OR mtime != :mtime THEN :height ELSE height END,
+            optimized = CASE WHEN size != :size OR mtime != :mtime THEN 0 ELSE optimized END
         WHERE path = :path AND status IN ('active', 'missing', 'thumbnail_trash', 'archived')
     """)
     suspend fun updateFromScanByPath(
@@ -231,6 +216,8 @@ interface ImageDao {
         lastSeen: Long,
         mime: String,
         isAnimated: Boolean,
+        width: Int,
+        height: Int,
     )
 
     /**
@@ -241,7 +228,7 @@ interface ImageDao {
     suspend fun insertAll(images: List<ImageEntity>)
 
     /**
-     * 批量更新已存在记录的扫描字段（size/mtime 变化时由 [updateFromScanByPath] 自动重置分析状态）。
+     * 批量更新已存在记录的扫描字段（size/mtime 变化时由 [updateFromScanByPath] 清掉压缩状态）。
      * 整批包在一个事务里，避免逐条 update 各自 fsync。
      */
     @Transaction
@@ -258,9 +245,53 @@ interface ImageDao {
                 lastSeen = image.lastSeen,
                 mime = image.mime,
                 isAnimated = image.isAnimated,
+                width = image.width,
+                height = image.height,
             )
         }
     }
+
+    // ---- 宽高补读与原图压缩 ----
+
+    /** 还没读到宽高的行（宽高为 0）；补读失败的记 -1，不再反复尝试 */
+    @Query("""
+        SELECT id, path FROM images
+        WHERE width = 0 AND status IN ('active', 'thumbnail_trash', 'archived') AND id > :afterId
+        ORDER BY id LIMIT :limit
+    """)
+    suspend fun rowsMissingSize(afterId: Long, limit: Int): List<PathRow>
+
+    @Query("SELECT COUNT(*) FROM images WHERE width = 0 AND status IN ('active', 'thumbnail_trash', 'archived')")
+    suspend fun countMissingSize(): Int
+
+    @Query("UPDATE images SET width = :width, height = :height WHERE id = :id AND width = 0")
+    suspend fun saveSize(id: Long, width: Int, height: Int)
+
+    @Transaction
+    suspend fun saveSizes(rows: List<SizeWrite>) {
+        rows.forEach { saveSize(it.id, it.width, it.height) }
+    }
+
+    data class PathRow(val id: Long, val path: String)
+
+    data class SizeWrite(val id: Long, val width: Int, val height: Int)
+
+    /** 压缩 / 还原成功后写回大小、宽高与格式（PNG 压缩后是 JPEG）；文件在此期间被扫描或 QQ 改过时不匹配，返回 0 */
+    @Query("""
+        UPDATE images SET size = :size, width = :width, height = :height, optimized = :optimized, mime = :mime
+        WHERE id = :id AND size = :expectedSize AND mtime = :expectedMtime
+    """)
+    suspend fun applyOptimization(
+        id: Long, size: Long, width: Int, height: Int, optimized: Int, mime: String, expectedSize: Long, expectedMtime: Long,
+    ): Int
+
+    /** 压缩过或从压缩还原过的图片（启动时修正 0.2.1 留下的文件属主） */
+    @Query("SELECT id, path FROM images WHERE optimized IN (1, 2) AND id > :afterId ORDER BY id LIMIT :limit")
+    suspend fun optimizedPaths(afterId: Long, limit: Int): List<PathRow>
+
+    /** 压缩不划算或无法处理：记下，规则不再列出 */
+    @Query("UPDATE images SET optimized = :state WHERE id = :id AND optimized = 0")
+    suspend fun markOptimized(id: Long, state: Int)
 
     // ---- 单条 / 路径查询 ----
 
@@ -270,29 +301,6 @@ interface ImageDao {
     @Query("SELECT * FROM images WHERE path = :path LIMIT 1")
     suspend fun getByPath(path: String): ImageEntity?
 
-    /** 仅重置本地分析（hash/质量/重复/评分）标记与结果；OCR/AI/向量 不动 */
-    @Query("""
-        UPDATE images SET
-            hash_done = 0, xxhash = NULL, phash = NULL, block_hash = NULL, feature_grid = NULL,
-            blur_score = NULL, width = 0, height = 0, is_blank = 0, is_corrupt = 0,
-            duplicate_group_id = NULL, is_duplicate_best = 0,
-            delete_score = 0, info_score = 0
-        WHERE source_type <> 'chatthumb' AND status IN ('active', 'missing')
-    """)
-    suspend fun resetLocalAnalysis()
-
-    /** 重置全部分析标记（含 OCR/AI/向量）；调用方需同时清空 ocr_text / ocr_fts / image_embeddings 表 */
-    @Query("""
-        UPDATE images SET
-            hash_done = 0, xxhash = NULL, phash = NULL, block_hash = NULL, feature_grid = NULL,
-            blur_score = NULL, width = 0, height = 0, is_blank = 0, is_corrupt = 0,
-            duplicate_group_id = NULL, is_duplicate_best = 0,
-            delete_score = 0, info_score = 0,
-            ocr_done = 0, ai_done = 0, embedding_done = 0
-        WHERE source_type <> 'chatthumb' AND status IN ('active', 'missing')
-    """)
-    suspend fun resetAllAnalysis()
-
     @Query("""
         SELECT COUNT(*) AS count, IFNULL(SUM(size), 0) AS bytes
         FROM images
@@ -301,32 +309,10 @@ interface ImageDao {
     fun observeThumbnailTrashSummary(): Flow<ThumbnailTrashSummary>
 
     @Query("""
-        SELECT * FROM images
-        WHERE source_type = 'chatthumb' AND status = 'thumbnail_trash'
-        ORDER BY mtime DESC, id DESC
-    """)
-    fun pagingThumbnailTrash(): PagingSource<Int, ImageEntity>
-
-    @Query("""
         SELECT COUNT(*) FROM images
         WHERE source_type = 'chatthumb' AND status = 'thumbnail_trash'
     """)
     suspend fun countThumbnailTrash(): Int
-
-    /** QQ 缩略图按日期分组的数量（缩略图页的日期标题） */
-    @Query("""
-        SELECT date_bucket AS bucketKey, COUNT(*) AS count FROM images
-        WHERE source_type = 'chatthumb' AND status = 'thumbnail_trash'
-        GROUP BY date_bucket
-    """)
-    fun observeThumbnailBuckets(): Flow<List<BucketCountRow>>
-
-    /** 修改时间早于 [before] 的 QQ 缩略图（缩略图页「全选 / 选择 N 天前」） */
-    @Query("""
-        SELECT id FROM images
-        WHERE source_type = 'chatthumb' AND status = 'thumbnail_trash' AND mtime < :before
-    """)
-    suspend fun thumbnailIdsBefore(before: Long): List<Long>
 
     /**
      * 缩略图回收站分页拉取（keyset 分页，id 升序游标）：一键清理时逐页取，每页 ≤ [limit] 行，
@@ -565,19 +551,6 @@ interface ImageDao {
     suspend fun stackedIdsBySize(low: Long, high: Long): List<Long>
 
     @Query("""
-        SELECT i.id FROM images i INNER JOIN image_tags it ON it.image_id = i.id
-        WHERE it.tag_id = :tagId AND i.status = 'active' AND i.source_type <> 'chatthumb'
-          AND i.mtime >= :from AND i.mtime < :until
-    """)
-    suspend fun tagIdsBetween(tagId: Long, from: Long, until: Long): List<Long>
-
-    @Query("""
-        SELECT id FROM images
-        WHERE source_type = 'chatthumb' AND status = 'thumbnail_trash' AND mtime >= :from AND mtime < :until
-    """)
-    suspend fun thumbnailIdsBetween(from: Long, until: Long): List<Long>
-
-    @Query("""
         SELECT * FROM images
         WHERE status = 'active' AND source_type <> 'chatthumb'
         ORDER BY mtime DESC
@@ -627,383 +600,6 @@ interface ImageDao {
         val bytes: Long,
     )
 
-    @Query("""
-        SELECT
-            COUNT(*) AS totalImages,
-            IFNULL(SUM(CASE WHEN hash_done = 1 THEN 1 ELSE 0 END), 0) AS hashDone,
-            IFNULL(SUM(CASE WHEN ocr_done = 1 THEN 1 ELSE 0 END), 0) AS ocrDone,
-            IFNULL(SUM(CASE WHEN ai_done = 1 THEN 1 ELSE 0 END), 0) AS aiDone,
-            IFNULL(SUM(CASE WHEN embedding_done = 1 THEN 1 ELSE 0 END), 0) AS embeddingDone,
-            IFNULL(SUM(CASE WHEN hash_done = 0
-                            OR ((block_hash IS NULL OR feature_grid IS NULL) AND is_corrupt = 0)
-                            OR (ocr_done = 0 AND is_corrupt = 0 AND width >= 64 AND height >= 64)
-                       THEN 1 ELSE 0 END), 0) AS pendingBase
-        FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb'
-    """)
-    fun observeAnalysisProgress(): Flow<AnalysisProgressRow>
-
-    /**
-     * 分析完成度聚合。[pendingBase] = 仍需做「基础分析」(哈希/质量 或 OCR)的图片数：
-     * 与 [pendingHash] / [pendingOcr] 的筛选条件保持一致（OCR 排除损坏图与过小图）。
-     * 「已分析」= totalImages - pendingBase，用于总进度条与按钮三态。
-     */
-    data class AnalysisProgressRow(
-        val totalImages: Int,
-        val hashDone: Int,
-        val ocrDone: Int,
-        val aiDone: Int,
-        val embeddingDone: Int,
-        val pendingBase: Int,
-    )
-
-    /**
-     * 「已分析」= 已完成全部**当前需要**的分析阶段的图片数（与图库左下角完成角标同口径）。
-     * 入参为各阶段是否「需要」（由调用方按设置开关 + AI 服务可用性算好）。
-     * hash 判定必须与 [pendingHashIds] 完全一致（含 block_hash/feature_grid 回填条件），
-     * 否则 v8/v9 升级用户的存量回填永远不会被「继续分析」按钮触发。
-     * 对损坏 / 过小图宽容：这些图本就被对应阶段跳过（见 pendingOcr/AiTag/Embedding 的筛选），
-     * 视作该阶段「无需再做」，否则进度永远到不了 100%、按钮也永远点不亮「已全部分析」。
-     */
-    @Query("""
-        SELECT COUNT(*) FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb'
-          AND hash_done = 1
-          AND ((block_hash IS NOT NULL AND feature_grid IS NOT NULL) OR is_corrupt = 1)
-          AND (:ocrRequired = 0 OR ocr_done = 1 OR is_corrupt = 1 OR width < 64 OR height < 64)
-          AND (:aiRequired = 0 OR ai_done = 1 OR is_corrupt = 1)
-          AND (:embRequired = 0 OR embedding_done = 1 OR is_corrupt = 1)
-    """)
-    fun observeFullyAnalyzedCount(
-        ocrRequired: Boolean,
-        aiRequired: Boolean,
-        embRequired: Boolean,
-    ): Flow<Int>
-
-    @Query("""
-        SELECT
-            IFNULL(SUM(CASE WHEN is_corrupt = 1 THEN 1 ELSE 0 END), 0) AS corrupt,
-            IFNULL(SUM(CASE WHEN is_blank = 1 THEN 1 ELSE 0 END), 0) AS blank,
-            IFNULL(SUM(CASE WHEN is_animated = 1 THEN 1 ELSE 0 END), 0) AS animated,
-            IFNULL(SUM(CASE WHEN is_protected = 1 THEN 1 ELSE 0 END), 0) AS archivedCount,
-            COUNT(DISTINCT duplicate_group_id) AS duplicateGroups,
-            IFNULL(SUM(CASE WHEN duplicate_group_id IS NOT NULL AND is_duplicate_best = 0 THEN size ELSE 0 END), 0) AS reclaimableBytes
-        FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb'
-    """)
-    fun observeImageHealth(): Flow<ImageHealthRow>
-
-    data class ImageHealthRow(
-        val corrupt: Int,
-        val blank: Int,
-        val animated: Int,
-        /** 照常显示的归档图片数（不在图库显示归档时为 0） */
-        val archivedCount: Int,
-        val duplicateGroups: Int,
-        val reclaimableBytes: Long,
-    )
-
-    // ---- Phase 2：Hash / 质量 / 重复组 ----
-
-    /**
-     * 待 hash（含质量）阶段的图片 **id**，按分析顺序排序、取前 [limit] 个（仅 id，轻量）。
-     * 管线先取 id 列表（一次排序），再用 [getByIds] 按块装载实体处理——内存恒定、不重排、
-     * 不会因失败图反复重查（与 [timelineIds] 的「只取 id」轻量范式一致）。
-     *
-     * 各 pending 查询均拆成 ASC/DESC 两个常量排序版本：`ORDER BY (CASE …)` 表达式排序会让
-     * SQLite 无法用 mtime 索引按序扫描并在凑满 LIMIT 后提前终止，退化成 200w 行全表扫描
-     * + temp B-tree 排序（每轮 4 个阶段各付一次 10~40s）。
-     */
-    suspend fun pendingHashPage(
-        limit: Int,
-        oldestFirst: Boolean,
-        afterMtime: Long,
-        afterId: Long,
-    ): List<PendingAnalysisRow> = if (oldestFirst) {
-        pendingHashPageAsc(limit, afterMtime, afterId)
-    } else {
-        pendingHashPageDesc(limit, afterMtime, afterId)
-    }
-
-    @Query("""
-        SELECT id, mtime FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb'
-          AND (hash_done = 0 OR ((block_hash IS NULL OR feature_grid IS NULL) AND is_corrupt = 0))
-          AND (mtime > :afterMtime OR (mtime = :afterMtime AND id > :afterId))
-        ORDER BY mtime ASC, id ASC
-        LIMIT :limit
-    """)
-    suspend fun pendingHashPageAsc(limit: Int, afterMtime: Long, afterId: Long): List<PendingAnalysisRow>
-
-    @Query("""
-        SELECT id, mtime FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb'
-          AND (hash_done = 0 OR ((block_hash IS NULL OR feature_grid IS NULL) AND is_corrupt = 0))
-          AND (mtime < :afterMtime OR (mtime = :afterMtime AND id < :afterId))
-        ORDER BY mtime DESC, id DESC
-        LIMIT :limit
-    """)
-    suspend fun pendingHashPageDesc(limit: Int, afterMtime: Long, afterId: Long): List<PendingAnalysisRow>
-
-    /** 待 hash（即待「hash+质量」合并分析）的总数，用于进度条总量；含待回填 block_hash 的存量图 */
-    @Query("""
-        SELECT COUNT(*) FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb'
-          AND (hash_done = 0 OR ((block_hash IS NULL OR feature_grid IS NULL) AND is_corrupt = 0))
-    """)
-    suspend fun countPendingHash(): Int
-
-    /** 待做质量分析的图片 */
-    @Query("""
-        SELECT * FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb' AND hash_done = 1
-          AND blur_score IS NULL AND width = 0
-        ORDER BY mtime DESC
-        LIMIT :limit
-    """)
-    suspend fun pendingQuality(limit: Int = 200): List<ImageEntity>
-
-    @Query("""
-        UPDATE images
-        SET xxhash = :xxhash, phash = :phash, hash_done = 1
-        WHERE id = :id
-    """)
-    suspend fun saveHash(id: Long, xxhash: String?, phash: Long?)
-
-    @Query("""
-        UPDATE images
-        SET width = :w, height = :h,
-            blur_score = :blur, is_blank = :blank, is_corrupt = :corrupt
-        WHERE id = :id
-    """)
-    suspend fun saveQuality(id: Long, w: Int, h: Int, blur: Float?, blank: Boolean, corrupt: Boolean)
-
-    /**
-     * 合并 hash + 质量为单条 UPDATE：每图一次写（原是 saveHash + saveQuality 两次写两个事务）。
-     * WHERE 带乐观校验（size/mtime 取自装载实体时的快照）：文件在「装载 → 读字节计算 → 写回」的
-     * 块级窗口内被重写（聊天缓存重新下载是常态）、扫描已重置分析字段时，本条陈旧结果直接落空
-     * （不匹配 0 行），该图留在 pendingHashIds 待下轮重算——否则旧内容的 hash 会永久挂到新文件上，
-     * 喂给去重聚类可能把非重复图聚成重复组进而被清理误删。
-     */
-    @Query("""
-        UPDATE images
-        SET xxhash = :xxhash, phash = :phash, block_hash = :blockHash, feature_grid = :featureGrid, hash_done = 1,
-            width = :w, height = :h,
-            blur_score = :blur, is_blank = :blank, is_corrupt = :corrupt
-        WHERE id = :id AND size = :expectedSize AND mtime = :expectedMtime
-    """)
-    suspend fun saveHashQuality(
-        id: Long,
-        xxhash: String?,
-        phash: Long?,
-        blockHash: ByteArray?,
-        featureGrid: ByteArray?,
-        w: Int,
-        h: Int,
-        blur: Float?,
-        blank: Boolean,
-        corrupt: Boolean,
-        expectedSize: Long,
-        expectedMtime: Long,
-    )
-
-    /**
-     * 整块 hash+质量结果包在一个事务里写回：20w 图原本 40w 个独立事务（各自 fsync、
-     * 还在 4 个并发 worker 间争抢写锁），按块（[com.xjw.qalbum.service.analysis] 的 HASH_CHUNK）
-     * 批写后降到约千级事务。与扫描的 [updateBatchFromScan] 同范式。
-     */
-    @Transaction
-    suspend fun saveHashQualityBatch(rows: List<HashQualityWrite>) {
-        for (r in rows) {
-            saveHashQuality(
-                r.id, r.xxhash, r.phash, r.blockHash, r.featureGrid, r.width, r.height, r.blur, r.blank, r.corrupt,
-                r.expectedSize, r.expectedMtime,
-            )
-        }
-    }
-
-    /** 重复组聚类辅助：按 xxhash 分组的 ID 列表（排除 hash 为 null） */
-    @Query("""
-        SELECT xxhash AS hash, GROUP_CONCAT(id) AS ids
-        FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb' AND variant_hidden = 0 AND xxhash IS NOT NULL
-        GROUP BY xxhash, size
-        HAVING COUNT(*) > 1
-    """)
-    suspend fun xxhashGroups(): List<XxhashGroupRow>
-
-    data class XxhashGroupRow(
-        val hash: String,
-        val ids: String,
-    )
-
-    @Query("SELECT IFNULL(MAX(duplicate_group_id), 0) FROM images")
-    suspend fun maxDuplicateGroupId(): Long
-
-    @Query("""
-        UPDATE images
-        SET duplicate_group_id = :groupId, is_duplicate_best = :isBest
-        WHERE id = :id
-    """)
-    suspend fun assignDuplicate(id: Long, groupId: Long, isBest: Boolean)
-
-    @Query("""
-        UPDATE images
-        SET duplicate_group_id = NULL, is_duplicate_best = 0
-        WHERE duplicate_group_id IS NOT NULL OR is_duplicate_best = 1
-    """)
-    suspend fun clearDuplicateAssignments()
-
-    /** 已有 pHash 的图片 */
-    @Query("""
-        SELECT id, phash FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb' AND phash IS NOT NULL
-    """)
-    suspend fun primaryPhashes(): List<PhashRow>
-
-    data class PhashRow(
-        val id: Long,
-        val phash: Long?,
-    )
-
-    /**
-     * 重复聚类投影的 keyset 分页变体（id 升序游标）：聚类器逐页拉、按 phash 前缀桶分片进内存，
-     * 峰值内存 = 单页 + 活跃桶，替代全量装载。精确重复（同 xxhash）另有 SQL 侧 [xxhashGroups]
-     * 只装载冲突组，无需经过本投影。
-     */
-    @Query("""
-        SELECT id, xxhash, phash, block_hash AS blockHash, feature_grid AS featureGrid, width, height, size, is_blank AS isBlank, is_animated AS isAnimated FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb' AND variant_hidden = 0
-          AND (xxhash IS NOT NULL OR phash IS NOT NULL)
-          AND id > :afterId
-        ORDER BY id
-        LIMIT :limit
-    """)
-    suspend fun dedupProjectionPaged(afterId: Long, limit: Int): List<DedupRow>
-
-    /** 批量写回重复分配（一个事务，避免逐图 update 各起一次写锁） */
-    @Transaction
-    suspend fun assignDuplicates(items: List<DuplicateAssignment>) {
-        items.forEach { assignDuplicate(it.id, it.groupId, it.isBest) }
-    }
-
-    /**
-     * 原子替换全部重复分配：清空旧分配 + 写入新分配在**同一事务**，
-     * 避免查重写回窗口内其他读者看到「已清空未重写」的半旧半新状态。
-     */
-    @Transaction
-    suspend fun replaceDuplicateAssignments(items: List<DuplicateAssignment>) {
-        clearDuplicateAssignments()
-        assignDuplicates(items)
-    }
-
-    /**
-     * 所有 active 重复图（属于某重复组）；「审核全部重复」一次性纳入用，窄投影、无 LIMIT。
-     * 拆 ASC/DESC 常量排序（同 [pendingHashIds]），避免 CASE 表达式排序失去 mtime 索引。
-     */
-    suspend fun allDuplicateRows(oldestFirst: Boolean): List<DuplicateGroupRow> =
-        if (oldestFirst) allDuplicateRowsAsc() else allDuplicateRowsDesc()
-
-    @Query("""
-        SELECT id, duplicate_group_id AS duplicateGroupId, size
-        FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb' AND variant_hidden = 0
-          AND is_protected = 0 AND (user_keep IS NULL OR user_keep = 0)
-          AND duplicate_group_id IS NOT NULL
-        ORDER BY mtime ASC, id ASC
-    """)
-    suspend fun allDuplicateRowsAsc(): List<DuplicateGroupRow>
-
-    @Query("""
-        SELECT id, duplicate_group_id AS duplicateGroupId, size
-        FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb' AND variant_hidden = 0
-          AND is_protected = 0 AND (user_keep IS NULL OR user_keep = 0)
-          AND duplicate_group_id IS NOT NULL
-        ORDER BY mtime DESC, id DESC
-    """)
-    suspend fun allDuplicateRowsDesc(): List<DuplicateGroupRow>
-
-    @Query("UPDATE images SET delete_score = :score WHERE id = :id")
-    suspend fun updateDeleteScore(id: Long, score: Float)
-
-    @Query("UPDATE images SET info_score = :score WHERE id = :id")
-    suspend fun updateInfoScore(id: Long, score: Float)
-
-    /** 合并 info+delete 评分为单条 UPDATE（原是两次独立写）。 */
-    @Query("UPDATE images SET info_score = :info, delete_score = :del WHERE id = :id")
-    suspend fun updateScores(id: Long, info: Float, del: Float)
-
-    /** 整页评分一个事务写回：全库 20w 评分原本 40w 个独立事务，按页批写后降到约 400 个。 */
-    @Transaction
-    suspend fun saveScoresBatch(rows: List<ScoreWrite>) {
-        for (r in rows) updateScores(r.id, r.info, r.del)
-    }
-
-    /** 删除分数高于阈值的候选 */
-    @Query("""
-        SELECT * FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb' AND delete_score >= :threshold
-          AND is_protected = 0 AND (user_keep IS NULL OR user_keep = 0)
-        ORDER BY delete_score DESC
-        LIMIT :limit
-    """)
-    suspend fun getByDeleteScoreAbove(threshold: Float, limit: Int = 500): List<ImageEntity>
-
-    /** 重复组列表（仅返回组 id 与图片数量） */
-    @Query("""
-        SELECT duplicate_group_id AS groupId, COUNT(*) AS count, IFNULL(SUM(size), 0) AS bytes
-        FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb' AND duplicate_group_id IS NOT NULL
-        GROUP BY duplicate_group_id
-        ORDER BY count DESC
-    """)
-    suspend fun duplicateGroupSummary(): List<DuplicateGroupSummary>
-
-    data class DuplicateGroupSummary(
-        val groupId: Long,
-        val count: Int,
-        val bytes: Long,
-    )
-
-    @Query("""
-        SELECT * FROM images
-        WHERE duplicate_group_id = :groupId AND source_type <> 'chatthumb' AND variant_hidden = 0
-        ORDER BY is_duplicate_best DESC, size DESC
-    """)
-    suspend fun getByDuplicateGroup(groupId: Long): List<ImageEntity>
-
-    /**
-     * 批量取多组的 active 成员（审核「全部重复」装载用）：一次 IN 查询替代逐组 N+1，
-     * 调用方需按变量上限分块。组内顺序与 [getByDuplicateGroup] 一致（保留图优先）。
-     */
-    @Query("""
-        SELECT * FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb' AND variant_hidden = 0
-          AND duplicate_group_id IN (:groupIds)
-        ORDER BY is_duplicate_best DESC, size DESC
-    """)
-    suspend fun getActiveByDuplicateGroupIds(groupIds: List<Long>): List<ImageEntity>
-
-    /**
-     * [groupIds] 中仍有至少两张可见图的重复组。同一张图只露出最大的版本：组里的版本后来被更大的版本取代
-     * （例如之后才下载了原图）时，下次查重前这个组可能只剩一张可见图。调用方需分块传入。
-     */
-    @Query("""
-        SELECT duplicate_group_id FROM images
-        WHERE duplicate_group_id IN (:groupIds) AND status = 'active' AND source_type <> 'chatthumb' AND variant_hidden = 0
-        GROUP BY duplicate_group_id HAVING COUNT(*) >= 2
-    """)
-    suspend fun duplicateGroupsWithPairsAmong(groupIds: List<Long>): List<Long>
-
-    /** 全部仍有至少两张可见图的重复组（「审核全部重复」） */
-    @Query("""
-        SELECT duplicate_group_id FROM images
-        WHERE duplicate_group_id IS NOT NULL AND status = 'active' AND source_type <> 'chatthumb' AND variant_hidden = 0
-        GROUP BY duplicate_group_id HAVING COUNT(*) >= 2
-    """)
-    suspend fun duplicateGroupsWithPairs(): List<Long>
-
     // ---- 图片家族（同一张 QQ 图片的原图 / 预览图 / 缩略图，见 QqCachePaths.familyKey）----
 
     /** 家族的现存版本：原图、预览图、其他、缩略图依次，同类大的在前 */
@@ -1014,14 +610,14 @@ interface ImageDao {
     """)
     suspend fun familyMembers(group: Long): List<ImageEntity>
 
-    /** 删除确认用：所选图片的路径、大小、家族与是否受保护（归档 / 保留） */
+    /** 删除确认用：所选图片的路径、大小、家族与是否已归档 */
     @Query("""
-        SELECT id, path, size, variant_group AS variantGroup, is_protected AS isArchived, COALESCE(user_keep, 0) = 1 AS isKept
+        SELECT id, path, size, variant_group AS variantGroup, is_protected AS isArchived
         FROM images WHERE id IN (:ids)
     """)
     suspend fun deleteFactRows(ids: List<Long>): List<DeleteFactRow>
 
-    data class DeleteFactRow(val id: Long, val path: String, val size: Long, val variantGroup: Long?, val isArchived: Boolean, val isKept: Boolean)
+    data class DeleteFactRow(val id: Long, val path: String, val size: Long, val variantGroup: Long?, val isArchived: Boolean)
 
     /** 这些家族的现存版本（大小用于「连同其他版本」的合计）；[archived] 时也算归档隐藏的版本 */
     @Query("""SELECT id, variant_group AS variantGroup, size FROM images WHERE variant_group IN (:groups)
@@ -1042,39 +638,6 @@ interface ImageDao {
 
     @Query("SELECT COALESCE(MAX(id), 0) FROM images")
     suspend fun maxId(): Long
-
-    /** 取若干图的视觉特征（反馈学习用） */
-    @Query("SELECT id, block_hash AS blockHash, feature_grid AS featureGrid FROM images WHERE id IN (:ids)")
-    suspend fun featuresByIds(ids: List<Long>): List<ImageFeatureRow>
-
-    /** 「推荐删除」候选池：活跃非保护、有特征网格的图，按 delete_score 降序粗筛限量（不全库打分，守 20w 约束）。 */
-    @Query("""
-        SELECT id, feature_grid AS featureGrid, blur_score AS blurScore, width, height, size,
-               source_type AS sourceType, is_animated AS isAnimated, mtime,
-               (duplicate_group_id IS NOT NULL) AS inDuplicateGroup
-        FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb' AND variant_hidden = 0
-          AND is_protected = 0 AND (user_keep IS NULL OR user_keep = 0)
-          AND feature_grid IS NOT NULL
-        ORDER BY delete_score DESC
-        LIMIT :limit
-    """)
-    suspend fun recommendCandidatePool(limit: Int): List<RecommendCandidateRow>
-
-    /** 某重复组的全部成员 id（人工拆分用） */
-    @Query("SELECT id FROM images WHERE duplicate_group_id = :groupId")
-    suspend fun imageIdsInDuplicateGroup(groupId: Long): List<Long>
-
-    /** 清除某重复组的分配（人工拆分时调用，不影响其他组） */
-    @Query("UPDATE images SET duplicate_group_id = NULL, is_duplicate_best = 0 WHERE duplicate_group_id = :groupId")
-    suspend fun clearDuplicateGroup(groupId: Long)
-
-    @Query("UPDATE images SET user_keep = :keep WHERE id = :id")
-    suspend fun setUserKeep(id: Long, keep: Boolean?)
-
-    /** 批量设置/清除用户保留（IN 更新）：调用方按 SQLite 变量上限分块并包进外层事务 */
-    @Query("UPDATE images SET user_keep = :keep WHERE id IN (:ids)")
-    suspend fun setUserKeepByIds(ids: List<Long>, keep: Boolean?)
 
     // ---- 归档（is_protected，见 ImageEntity 与 ArchiveManager）----
     // 总是按整个家族（同一张图的原图 / 预览图 / 缩略图）设置；只动现存的行，回收站里的不碰。
@@ -1186,139 +749,6 @@ interface ImageDao {
     """)
     suspend fun archiveTimelineIds(statuses: List<String>): List<Long>
 
-    /** 已完成 hash 的图片，分页拉出来用于评分 / 全库再聚合 */
-    @Query("""
-        SELECT * FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb' AND hash_done = 1
-          AND id > :afterId
-        ORDER BY id
-        LIMIT :limit
-    """)
-    suspend fun pagePrimaryHashed(afterId: Long, limit: Int = 500): List<ImageEntity>
-
-    // ---- Phase 3：OCR ----
-
-    /** 待 OCR 的图片 **id**（排除损坏 / 过小图），按分析顺序取前 [limit] 个；ASC/DESC 拆分同 [pendingHashIds] */
-    suspend fun pendingOcrPage(
-        limit: Int,
-        oldestFirst: Boolean,
-        afterMtime: Long,
-        afterId: Long,
-    ): List<PendingAnalysisRow> = if (oldestFirst) {
-        pendingOcrPageAsc(limit, afterMtime, afterId)
-    } else {
-        pendingOcrPageDesc(limit, afterMtime, afterId)
-    }
-
-    @Query("""
-        SELECT id, mtime FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb' AND ocr_done = 0
-          AND is_corrupt = 0
-          AND width >= 64 AND height >= 64
-          AND (mtime > :afterMtime OR (mtime = :afterMtime AND id > :afterId))
-        ORDER BY mtime ASC, id ASC
-        LIMIT :limit
-    """)
-    suspend fun pendingOcrPageAsc(limit: Int, afterMtime: Long, afterId: Long): List<PendingAnalysisRow>
-
-    @Query("""
-        SELECT id, mtime FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb' AND ocr_done = 0
-          AND is_corrupt = 0
-          AND width >= 64 AND height >= 64
-          AND (mtime < :afterMtime OR (mtime = :afterMtime AND id < :afterId))
-        ORDER BY mtime DESC, id DESC
-        LIMIT :limit
-    """)
-    suspend fun pendingOcrPageDesc(limit: Int, afterMtime: Long, afterId: Long): List<PendingAnalysisRow>
-
-    /** 待 AI 打标签的图片 **id**：已 hash、未 ai_done、未损坏，按分析顺序取前 [limit] 个 */
-    suspend fun pendingAiTagPage(
-        limit: Int,
-        oldestFirst: Boolean,
-        afterMtime: Long,
-        afterId: Long,
-    ): List<PendingAnalysisRow> = if (oldestFirst) {
-        pendingAiTagPageAsc(limit, afterMtime, afterId)
-    } else {
-        pendingAiTagPageDesc(limit, afterMtime, afterId)
-    }
-
-    @Query("""
-        SELECT id, mtime FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb'
-          AND hash_done = 1 AND is_corrupt = 0
-          AND (ai_done = 0 OR NOT EXISTS (SELECT 1 FROM ai_analysis a WHERE a.image_id = images.id))
-          AND (mtime > :afterMtime OR (mtime = :afterMtime AND id > :afterId))
-        ORDER BY mtime ASC, id ASC
-        LIMIT :limit
-    """)
-    suspend fun pendingAiTagPageAsc(limit: Int, afterMtime: Long, afterId: Long): List<PendingAnalysisRow>
-
-    @Query("""
-        SELECT id, mtime FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb'
-          AND hash_done = 1 AND is_corrupt = 0
-          AND (ai_done = 0 OR NOT EXISTS (SELECT 1 FROM ai_analysis a WHERE a.image_id = images.id))
-          AND (mtime < :afterMtime OR (mtime = :afterMtime AND id < :afterId))
-        ORDER BY mtime DESC, id DESC
-        LIMIT :limit
-    """)
-    suspend fun pendingAiTagPageDesc(limit: Int, afterMtime: Long, afterId: Long): List<PendingAnalysisRow>
-
-    /** 待生成向量的图片 **id**：已 hash、未 embedding_done、未损坏，按分析顺序取前 [limit] 个 */
-    suspend fun pendingEmbeddingPage(
-        limit: Int,
-        oldestFirst: Boolean,
-        afterMtime: Long,
-        afterId: Long,
-        model: String = "",
-    ): List<PendingAnalysisRow> = if (oldestFirst) {
-        pendingEmbeddingPageAsc(limit, afterMtime, afterId, model)
-    } else {
-        pendingEmbeddingPageDesc(limit, afterMtime, afterId, model)
-    }
-
-    @Query("""
-        SELECT id, mtime FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb'
-          AND hash_done = 1 AND is_corrupt = 0
-          AND (embedding_done = 0 OR EXISTS (
-              SELECT 1 FROM image_embeddings e WHERE e.image_id = images.id AND e.model <> :model
-          ))
-          AND (mtime > :afterMtime OR (mtime = :afterMtime AND id > :afterId))
-        ORDER BY mtime ASC, id ASC
-        LIMIT :limit
-    """)
-    suspend fun pendingEmbeddingPageAsc(limit: Int, afterMtime: Long, afterId: Long, model: String): List<PendingAnalysisRow>
-
-    @Query("""
-        SELECT id, mtime FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb'
-          AND hash_done = 1 AND is_corrupt = 0
-          AND (embedding_done = 0 OR EXISTS (
-              SELECT 1 FROM image_embeddings e WHERE e.image_id = images.id AND e.model <> :model
-          ))
-          AND (mtime < :afterMtime OR (mtime = :afterMtime AND id < :afterId))
-        ORDER BY mtime DESC, id DESC
-        LIMIT :limit
-    """)
-    suspend fun pendingEmbeddingPageDesc(limit: Int, afterMtime: Long, afterId: Long, model: String): List<PendingAnalysisRow>
-
-    // ocr_done 标记已并入 OcrDao.saveOcrResultsBatch（带乐观校验 + 按块事务提交），
-    // 不再提供无守卫的单条 markOcrDone：OCR 期间文件被重写时会把陈旧内容标成已完成。
-
-    /**
-     * 定向标记 AI 打标完成（带 size/mtime 乐观守卫）：文件在打标窗口内被重写则守卫不命中、
-     * 不落陈旧完成标记；只置 ai_done，不整行回写 chunk 装载时的陈旧快照。
-     */
-    @Query("UPDATE images SET ai_done = 1, embedding_done = 0 WHERE id = :id AND status = 'active' AND size = :size AND mtime = :mtime")
-    suspend fun markAiTagDone(id: Long, size: Long, mtime: Long): Int
-
-    /** 定向标记 embedding 完成：只置 embedding_done，不整行回写陈旧快照 */
-    @Query("UPDATE images SET embedding_done = 1 WHERE id = :id AND status = 'active' AND size = :size AND mtime = :mtime")
-    suspend fun markEmbeddingDone(id: Long, size: Long, mtime: Long): Int
-
     @Query("""
         SELECT * FROM images
         WHERE status = 'active' AND source_type <> 'chatthumb' AND id IN (:ids)
@@ -1329,278 +759,10 @@ interface ImageDao {
     @Query("""
         SELECT * FROM images
         WHERE status = 'active' AND source_type <> 'chatthumb' AND id IN (:ids)
-          AND is_protected = 0 AND (user_keep IS NULL OR user_keep = 0)
+          AND is_protected = 0
     """)
     suspend fun getCleanupEligibleByIds(ids: List<Long>): List<ImageEntity>
-
-    // ---- 清理候选池（方案 A：按维度规则筛选）----
-
-    /**
-     * 清理候选池：已排除归档 / 用户保留的图，只取规则判定所需的最小字段，
-     * 避免把整行装载进内存。具体命中哪个维度由
-     * [com.xjw.qalbum.service.cleanup.CleanupRules] 在内存判定。
-     *
-     * 按分析顺序（mtime 升/降序）排序，让「生成审核清理」遵守与分析一致的早到晚/晚到早顺序，
-     * 从而每次只纳入对应方向的前 N 张候选。
-     *
-     * 拆 ASC/DESC 常量排序：`ORDER BY (CASE …)` 表达式排序会让 SQLite 放弃 mtime 索引，
-     * 每次生成审核都付 200w 行全表扫描 + 数十万命中行 temp B-tree 排序（数秒到十几秒）；
-     * 常量排序可按索引序扫描并在凑满 LIMIT 后提前终止。
-     */
-    suspend fun cleanupCandidatePool(
-        corruptEnabled: Boolean,
-        blankEnabled: Boolean,
-        duplicateEnabled: Boolean,
-        lowResEnabled: Boolean,
-        lowResMaxPixels: Long,
-        blurEnabled: Boolean,
-        blurMaxScore: Float,
-        tinyEnabled: Boolean,
-        tinyMaxBytes: Long,
-        emojiEnabled: Boolean,
-        emojiSquareRatio: Float,
-        emojiMaxSide: Int,
-        emojiMinSide: Int,
-        oldestFirst: Boolean,
-        poolLimit: Int,
-    ): List<CleanupSignalRow> = if (oldestFirst) {
-        cleanupCandidatePoolAsc(
-            corruptEnabled, blankEnabled, duplicateEnabled, lowResEnabled, lowResMaxPixels,
-            blurEnabled, blurMaxScore, tinyEnabled, tinyMaxBytes,
-            emojiEnabled, emojiSquareRatio, emojiMaxSide, emojiMinSide, poolLimit,
-        )
-    } else {
-        cleanupCandidatePoolDesc(
-            corruptEnabled, blankEnabled, duplicateEnabled, lowResEnabled, lowResMaxPixels,
-            blurEnabled, blurMaxScore, tinyEnabled, tinyMaxBytes,
-            emojiEnabled, emojiSquareRatio, emojiMaxSide, emojiMinSide, poolLimit,
-        )
-    }
-
-    @Query("""
-        SELECT id,
-               width,
-               height,
-               blur_score AS blurScore,
-               size,
-               mtime,
-               is_blank AS isBlank,
-               is_corrupt AS isCorrupt,
-               duplicate_group_id AS duplicateGroupId,
-               is_duplicate_best AS isDuplicateBest,
-               delete_score AS deleteScore
-        FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb' AND variant_hidden = 0
-          AND is_protected = 0 AND (user_keep IS NULL OR user_keep = 0)
-          AND (
-                (:corruptEnabled AND is_corrupt = 1)
-             OR (:blankEnabled AND is_blank = 1)
-             OR (:duplicateEnabled AND duplicate_group_id IS NOT NULL)
-             OR (:lowResEnabled AND width > 0 AND height > 0 AND width * height < :lowResMaxPixels)
-             OR (:blurEnabled AND blur_score IS NOT NULL AND blur_score < :blurMaxScore)
-             OR (:tinyEnabled AND size >= 1 AND size < :tinyMaxBytes)
-             OR (:emojiEnabled AND width > 0 AND height > 0
-                              AND CAST(MIN(width, height) AS REAL) / MAX(width, height) >= :emojiSquareRatio
-                              AND MAX(width, height) <= :emojiMaxSide
-                              AND MIN(width, height) >= :emojiMinSide)
-          )
-        ORDER BY mtime ASC, id ASC
-        LIMIT :poolLimit
-    """)
-    suspend fun cleanupCandidatePoolAsc(
-        corruptEnabled: Boolean,
-        blankEnabled: Boolean,
-        duplicateEnabled: Boolean,
-        lowResEnabled: Boolean,
-        lowResMaxPixels: Long,
-        blurEnabled: Boolean,
-        blurMaxScore: Float,
-        tinyEnabled: Boolean,
-        tinyMaxBytes: Long,
-        emojiEnabled: Boolean,
-        emojiSquareRatio: Float,
-        emojiMaxSide: Int,
-        emojiMinSide: Int,
-        poolLimit: Int,
-    ): List<CleanupSignalRow>
-
-    @Query("""
-        SELECT id,
-               width,
-               height,
-               blur_score AS blurScore,
-               size,
-               mtime,
-               is_blank AS isBlank,
-               is_corrupt AS isCorrupt,
-               duplicate_group_id AS duplicateGroupId,
-               is_duplicate_best AS isDuplicateBest,
-               delete_score AS deleteScore
-        FROM images
-        WHERE status = 'active' AND source_type <> 'chatthumb' AND variant_hidden = 0
-          AND is_protected = 0 AND (user_keep IS NULL OR user_keep = 0)
-          AND (
-                (:corruptEnabled AND is_corrupt = 1)
-             OR (:blankEnabled AND is_blank = 1)
-             OR (:duplicateEnabled AND duplicate_group_id IS NOT NULL)
-             OR (:lowResEnabled AND width > 0 AND height > 0 AND width * height < :lowResMaxPixels)
-             OR (:blurEnabled AND blur_score IS NOT NULL AND blur_score < :blurMaxScore)
-             OR (:tinyEnabled AND size >= 1 AND size < :tinyMaxBytes)
-             OR (:emojiEnabled AND width > 0 AND height > 0
-                              AND CAST(MIN(width, height) AS REAL) / MAX(width, height) >= :emojiSquareRatio
-                              AND MAX(width, height) <= :emojiMaxSide
-                              AND MIN(width, height) >= :emojiMinSide)
-          )
-        ORDER BY mtime DESC, id DESC
-        LIMIT :poolLimit
-    """)
-    suspend fun cleanupCandidatePoolDesc(
-        corruptEnabled: Boolean,
-        blankEnabled: Boolean,
-        duplicateEnabled: Boolean,
-        lowResEnabled: Boolean,
-        lowResMaxPixels: Long,
-        blurEnabled: Boolean,
-        blurMaxScore: Float,
-        tinyEnabled: Boolean,
-        tinyMaxBytes: Long,
-        emojiEnabled: Boolean,
-        emojiSquareRatio: Float,
-        emojiMaxSide: Int,
-        emojiMinSide: Int,
-        poolLimit: Int,
-    ): List<CleanupSignalRow>
-
-    // ---- 按标签筛选（标签管理页）----
-
-    /** 某标签下的活跃图片，分页（走 image_tags.tag_id 索引 + images 主键连接） */
-    @Query("""
-        SELECT i.* FROM images i
-        INNER JOIN image_tags it ON it.image_id = i.id
-        WHERE it.tag_id = :tagId AND i.status = 'active' AND i.source_type <> 'chatthumb'
-        ORDER BY i.mtime DESC, i.id DESC
-    """)
-    fun pagingImagesByTag(tagId: Long): PagingSource<Int, ImageEntity>
-
-    /** 某标签下活跃图片数（标签列表计数 / 删除前总量） */
-    @Query("""
-        SELECT COUNT(*) FROM images i
-        INNER JOIN image_tags it ON it.image_id = i.id
-        WHERE it.tag_id = :tagId AND i.status = 'active' AND i.source_type <> 'chatthumb'
-    """)
-    suspend fun countActiveImagesByTag(tagId: Long): Int
-
-    /**
-     * 某标签下活跃图片的「日期分桶计数」（year*1000 + dayOfYear → 张数），供标签详情页时间线表头显示「（N）」。
-     * 日期口径与 [observeTimelineDateBucketCounts] 完全一致，保证与图库分组对齐。
-     */
-    @Query("""
-        SELECT i.date_bucket AS bucketKey, COUNT(*) AS count
-        FROM images i
-        INNER JOIN image_tags it ON it.image_id = i.id
-        WHERE it.tag_id = :tagId AND i.status = 'active' AND i.source_type <> 'chatthumb'
-        GROUP BY i.date_bucket
-    """)
-    fun observeTagDateBucketCounts(tagId: Long): Flow<List<BucketCountRow>>
-
-    /**
-     * 某标签下活跃图片的 id，keyset 分块（id 升序，传上一块末尾 id 作 [afterId]）。
-     * 「删除该标签下全部图片」时按块取出逐块处理，绝不一次性把整组 id 装载进内存。
-     */
-    @Query("""
-        SELECT i.id FROM images i
-        INNER JOIN image_tags it ON it.image_id = i.id
-        WHERE it.tag_id = :tagId AND i.status = 'active' AND i.source_type <> 'chatthumb'
-          AND i.id > :afterId
-        ORDER BY i.id
-        LIMIT :limit
-    """)
-    suspend fun imageIdsByTagChunk(tagId: Long, afterId: Long, limit: Int): List<Long>
 }
-
-/** 一张图的 info/delete 评分，供 [ImageDao.saveScoresBatch] 整页事务写回 */
-data class ScoreWrite(
-    val id: Long,
-    val info: Float,
-    val del: Float,
-)
-
-/**
- * 一张图的 hash+质量分析结果，供 [ImageDao.saveHashQualityBatch] 整块事务写回。
- * [expectedSize]/[expectedMtime] 取自读文件前装载的实体快照，写回时作乐观校验（见 saveHashQuality）。
- */
-data class HashQualityWrite(
-    val id: Long,
-    val xxhash: String?,
-    val phash: Long?,
-    val blockHash: ByteArray?,
-    val featureGrid: ByteArray?,
-    val width: Int,
-    val height: Int,
-    val blur: Float?,
-    val blank: Boolean,
-    val corrupt: Boolean,
-    val expectedSize: Long,
-    val expectedMtime: Long,
-)
-
-/** 分析待办 keyset 页的稳定排序键；失败项也推进游标，避免首屏饥饿。 */
-data class PendingAnalysisRow(
-    val id: Long,
-    val mtime: Long,
-)
-
-/** 清理判定所需的最小图片信号投影（由 [ImageDao.cleanupCandidatePool] 用列别名填充） */
-data class CleanupSignalRow(
-    val id: Long,
-    val width: Int,
-    val height: Int,
-    val blurScore: Float?,
-    val size: Long,
-    val mtime: Long,
-    val isBlank: Boolean,
-    val isCorrupt: Boolean,
-    val duplicateGroupId: Long?,
-    val isDuplicateBest: Boolean,
-    val deleteScore: Float,
-)
-
-/** 重复聚类所需的最小投影（由 [ImageDao.dedupProjection] 填充） */
-data class DedupRow(
-    val id: Long,
-    val xxhash: String?,
-    val phash: Long?,
-    val blockHash: ByteArray?,
-    val featureGrid: ByteArray?,
-    val width: Int,
-    val height: Int,
-    val size: Long,
-    val isBlank: Boolean,
-    val isAnimated: Boolean,
-)
-
-/** 一条重复分配结果（由 [DuplicateClusterer] 产出，[ImageDao.assignDuplicates] 批量写回） */
-data class DuplicateAssignment(val id: Long, val groupId: Long, val isBest: Boolean)
-
-/** 重复图最小投影（「审核全部重复」按组聚合用） */
-data class DuplicateGroupRow(val id: Long, val duplicateGroupId: Long, val size: Long)
-
-/** 一张图的视觉特征投影（反馈学习用） */
-data class ImageFeatureRow(val id: Long, val blockHash: ByteArray?, val featureGrid: ByteArray?)
-
-/** 「推荐删除」候选的特征投影 */
-data class RecommendCandidateRow(
-    val id: Long,
-    val featureGrid: ByteArray?,
-    val blurScore: Float?,
-    val width: Int,
-    val height: Int,
-    val size: Long,
-    val sourceType: String,
-    val isAnimated: Boolean,
-    val mtime: Long,
-    val inDuplicateGroup: Boolean,
-)
 
 /** 归档按家族更新时每块的 id 数（:ids 在语句里出现两次，须在 SQLite 变量上限的一半以内） */
 private const val ARCHIVE_CHUNK = 400

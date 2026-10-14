@@ -5,7 +5,6 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
-import androidx.datastore.preferences.core.doublePreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.intPreferencesKey
@@ -13,19 +12,13 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.xjw.qalbum.domain.model.AccessMode
-import com.xjw.qalbum.domain.model.AnalysisConfig
-import com.xjw.qalbum.domain.model.AutoFavoriteConfig
-import com.xjw.qalbum.domain.model.CleanupConfig
-import com.xjw.qalbum.domain.model.DuplicateStrictness
 import com.xjw.qalbum.domain.model.GallerySort
 import com.xjw.qalbum.domain.model.SourceFacetOrder
 import com.xjw.qalbum.domain.model.SourceSort
-import com.xjw.qalbum.service.ai.AiPrivacyGuard
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.serialization.decodeFromString
@@ -96,133 +89,6 @@ class SettingsRepository(
         ds.edit { it[Keys.CHATPIC_PATH] = normalized }
     }
 
-    // ---- AI 配置 ----
-
-    /** 请求使用同一次 DataStore 快照，避免并发改设置时混用地址、模型与密钥。 */
-    val aiConnection: Flow<AiConnectionConfig> = prefsData.map {
-        AiConnectionConfig(
-            enabled = it[Keys.AI_ENABLED] ?: false,
-            endpoint = it[Keys.AI_ENDPOINT] ?: "",
-            apiKey = it[Keys.AI_API_KEY] ?: "",
-            model = it[Keys.AI_MODEL] ?: "gpt-4o-mini",
-            embeddingModel = it[Keys.AI_EMBEDDING_MODEL] ?: "text-embedding-3-small",
-            disableThinking = it[Keys.AI_DISABLE_THINKING] ?: true,
-            maxTokens = (it[Keys.AI_MAX_TOKENS] ?: DEFAULT_AI_MAX_TOKENS).coerceIn(MIN_AI_MAX_TOKENS, MAX_AI_MAX_TOKENS),
-        )
-    }
-
-    val aiEnabled: Flow<Boolean> = prefsData.map { it[Keys.AI_ENABLED] ?: false }
-
-    suspend fun setAiEnabled(enabled: Boolean) {
-        ds.edit { it[Keys.AI_ENABLED] = enabled }
-    }
-
-    val aiEndpoint: Flow<String> = prefsData.map { it[Keys.AI_ENDPOINT] ?: "" }
-
-    suspend fun setAiEndpoint(endpoint: String) {
-        // 空串合法（未配置 = AI 不可用），只做去空白规范化；末尾斜杠由 resolveUrl 统一处理
-        val trimmed = endpoint.trim()
-        ds.edit {
-            val previous = (it[Keys.AI_ENDPOINT] ?: "").trim()
-            it[Keys.AI_ENDPOINT] = trimmed
-            // 确认绑定到具体 endpoint；任意地址变化（含公网 A→公网 B）必须原子清除旧授权。
-            if (previous != trimmed) {
-                it.remove(Keys.AI_PUBLIC_ENDPOINT_ACK_ENDPOINT)
-                it.remove(Keys.AI_PUBLIC_ENDPOINT_ACK)
-            }
-        }
-    }
-
-    /**
-     * 用户是否已在隐私弹窗确认过「向公网 AI 服务上传图片」。
-     * 上传链路（OpenAiCompatClient 带图请求）以此为最终闸门：UI 确认弹窗被绕过时兜底拒发。
-     */
-    val aiPublicEndpointAcknowledged: Flow<Boolean> =
-        prefsData.map { prefs ->
-            val current = (prefs[Keys.AI_ENDPOINT] ?: "").trim()
-            AiPrivacyGuard.classify(current) == AiPrivacyGuard.Safety.PUBLIC_INTERNET &&
-                prefs[Keys.AI_PUBLIC_ENDPOINT_ACK_ENDPOINT] == current
-        }
-
-    /**
-     * 上传前对请求已捕获的地址做同快照校验，避免 A 请求与并发保存/确认 B 地址交错时借用 B 的授权。
-     */
-    suspend fun isAiPublicEndpointAcknowledged(endpoint: String): Boolean {
-        val requested = endpoint.trim()
-        val prefs = prefsData.first()
-        val current = (prefs[Keys.AI_ENDPOINT] ?: "").trim()
-        return requested == current &&
-            AiPrivacyGuard.classify(requested) == AiPrivacyGuard.Safety.PUBLIC_INTERNET &&
-            prefs[Keys.AI_PUBLIC_ENDPOINT_ACK_ENDPOINT] == requested
-    }
-
-    /**
-     * 历史 status='deleted' 行的派生数据（OCR/FTS/标签/向量/排斥）是否已一次性清理完成。
-     * 永久删除路径现已内联级联清理，此标记只管旧版本删除留下的存量残留（QuarantinePurgeWorker 执行）。
-     */
-    val legacyDerivedDataPurged: Flow<Boolean> =
-        prefsData.map { it[Keys.LEGACY_DERIVED_DATA_PURGED] ?: false }
-
-    suspend fun setLegacyDerivedDataPurged() {
-        ds.edit { it[Keys.LEGACY_DERIVED_DATA_PURGED] = true }
-    }
-
-    suspend fun setAiPublicEndpointAcknowledged(acked: Boolean) {
-        ds.edit { prefs ->
-            val current = (prefs[Keys.AI_ENDPOINT] ?: "").trim()
-            if (acked && AiPrivacyGuard.classify(current) == AiPrivacyGuard.Safety.PUBLIC_INTERNET) {
-                prefs[Keys.AI_PUBLIC_ENDPOINT_ACK_ENDPOINT] = current
-            } else {
-                prefs.remove(Keys.AI_PUBLIC_ENDPOINT_ACK_ENDPOINT)
-            }
-            // 旧版布尔值不绑定地址，不能迁移为授权；删除后强制为当前地址重新确认一次。
-            prefs.remove(Keys.AI_PUBLIC_ENDPOINT_ACK)
-        }
-    }
-
-    val aiApiKey: Flow<String> = prefsData.map { it[Keys.AI_API_KEY] ?: "" }
-
-    suspend fun setAiApiKey(key: String) {
-        ds.edit { it[Keys.AI_API_KEY] = key }
-    }
-
-    val aiModel: Flow<String> = prefsData.map { it[Keys.AI_MODEL] ?: "gpt-4o-mini" }
-
-    suspend fun setAiModel(model: String) {
-        ds.edit { it[Keys.AI_MODEL] = model }
-    }
-
-    val aiEmbeddingModel: Flow<String> = prefsData.map { it[Keys.AI_EMBEDDING_MODEL] ?: "text-embedding-3-small" }
-
-    suspend fun setAiEmbeddingModel(model: String) {
-        ds.edit { it[Keys.AI_EMBEDDING_MODEL] = model }
-    }
-
-    /** 是否过滤/关闭模型思考（thinking）：开启后请求会要求服务端禁用思考，并剥离响应中的思考内容 */
-    val aiDisableThinking: Flow<Boolean> = prefsData.map { it[Keys.AI_DISABLE_THINKING] ?: true }
-
-    suspend fun setAiDisableThinking(enabled: Boolean) {
-        ds.edit { it[Keys.AI_DISABLE_THINKING] = enabled }
-    }
-
-    /** AI 标签 / 向量阶段的并发请求数（同时向接口发起多少张图的请求） */
-    val aiConcurrency: Flow<Int> = prefsData.map {
-        (it[Keys.AI_CONCURRENCY] ?: DEFAULT_AI_CONCURRENCY).coerceIn(MIN_AI_CONCURRENCY, MAX_AI_CONCURRENCY)
-    }
-
-    suspend fun setAiConcurrency(value: Int) {
-        ds.edit { it[Keys.AI_CONCURRENCY] = value.coerceIn(MIN_AI_CONCURRENCY, MAX_AI_CONCURRENCY) }
-    }
-
-    /** Chat 调用的 max_tokens 上限；思考模型需较大额度，否则思考占满后正文（content）为空 */
-    val aiMaxTokens: Flow<Int> = prefsData.map {
-        (it[Keys.AI_MAX_TOKENS] ?: DEFAULT_AI_MAX_TOKENS).coerceIn(MIN_AI_MAX_TOKENS, MAX_AI_MAX_TOKENS)
-    }
-
-    suspend fun setAiMaxTokens(value: Int) {
-        ds.edit { it[Keys.AI_MAX_TOKENS] = value.coerceIn(MIN_AI_MAX_TOKENS, MAX_AI_MAX_TOKENS) }
-    }
-
     // ---- 回收站保留时长 ----
 
     val quarantineRetentionDays: Flow<Int> = prefsData.map { it[Keys.QUARANTINE_DAYS] ?: 30 }
@@ -231,153 +97,52 @@ class SettingsRepository(
         ds.edit { it[Keys.QUARANTINE_DAYS] = days }
     }
 
-    // ---- 分析（hash/质量/OCR/AI/向量）每项开关 + 数量 + 排序方向 ----
+    // ---- 清理规则与原图压缩 ----
 
-    /**
-     * 每个分析阶段的开关与数量上限（hash 数量 / OCR、AI、向量 各自开关+数量）。
-     * 缺省或解析失败回退到 [AnalysisConfig.DEFAULT]。
-     */
-    val analysisConfig: Flow<AnalysisConfig> = prefsData.map { prefs ->
-        prefs[Keys.ANALYSIS_CONFIG]?.let { raw ->
-            runCatching { cleanupJson.decodeFromString<AnalysisConfig>(raw) }.getOrNull()
-        } ?: AnalysisConfig.DEFAULT
+    /** 某条清理规则上次选的参数（天数 / 年数 / 大小档位）；没选过为 null，用规则自己的默认值 */
+    fun cleanupRuleParam(ruleId: String): Flow<Int?> = prefsData.map { it[ruleParamKey(ruleId)] }
+
+    suspend fun setCleanupRuleParam(ruleId: String, value: Int) {
+        ds.edit { it[ruleParamKey(ruleId)] = value }
     }
 
-    suspend fun setAnalysisConfig(config: AnalysisConfig) {
-        ds.edit { it[Keys.ANALYSIS_CONFIG] = cleanupJson.encodeToString(config) }
+    private fun ruleParamKey(ruleId: String) = intPreferencesKey("cleanup_rule_$ruleId")
+
+    /** 原图压缩后的长边上限（像素）；0 = 不缩小分辨率，只重新编码 */
+    val compressMaxSide: Flow<Int> = prefsData.map { it[Keys.COMPRESS_MAX_SIDE] ?: DEFAULT_COMPRESS_MAX_SIDE }
+
+    suspend fun setCompressMaxSide(side: Int) {
+        ds.edit { it[Keys.COMPRESS_MAX_SIDE] = side.coerceAtLeast(0) }
     }
 
-    /** 分析顺序：true=从早到晚（mtime 升序），false=从晚到早（降序） */
-    val analysisOldestFirst: Flow<Boolean> = prefsData.map { it[Keys.ANALYSIS_OLDEST_FIRST] ?: true }
+    /** 压缩时把原图留在回收站（到期自动删除）；关闭则压缩后立即释放空间 */
+    val compressKeepOriginal: Flow<Boolean> = prefsData.map { it[Keys.COMPRESS_KEEP_ORIGINAL] ?: true }
 
-    suspend fun setAnalysisOldestFirst(oldestFirst: Boolean) {
-        ds.edit { it[Keys.ANALYSIS_OLDEST_FIRST] = oldestFirst }
+    suspend fun setCompressKeepOriginal(keep: Boolean) {
+        ds.edit { it[Keys.COMPRESS_KEEP_ORIGINAL] = keep }
     }
 
-    /** 每次「生成审核清理」最多纳入多少张候选图（遵守分析顺序，从早/晚开始取） */
-    val reviewLimit: Flow<Int> = prefsData.map {
-        (it[Keys.REVIEW_LIMIT] ?: DEFAULT_REVIEW_LIMIT).coerceIn(MIN_REVIEW_LIMIT, MAX_REVIEW_LIMIT)
+    /** 压缩质量（JPEG 质量，百分比）：越小越模糊、省得越多 */
+    val compressQuality: Flow<Int> = prefsData.map { prefs ->
+        prefs[Keys.COMPRESS_QUALITY]?.takeIf { it in MIN_COMPRESS_QUALITY..MAX_COMPRESS_QUALITY } ?: DEFAULT_COMPRESS_QUALITY
     }
 
-    suspend fun setReviewLimit(limit: Int) {
-        ds.edit { it[Keys.REVIEW_LIMIT] = limit.coerceIn(MIN_REVIEW_LIMIT, MAX_REVIEW_LIMIT) }
+    suspend fun setCompressQuality(quality: Int) {
+        ds.edit { it[Keys.COMPRESS_QUALITY] = quality.coerceIn(MIN_COMPRESS_QUALITY, MAX_COMPRESS_QUALITY) }
     }
 
-    /**
-     * 当前未关闭的审核会话对应的批次 id；null = 无进行中的审核会话。
-     * 进程被低内存回收后重建时按此 id 恢复审核页（批次项已落库，见 CleanupViewModel.ensureReviewSessionRestored）。
-     */
-    val activeReviewBatchId: Flow<Long?> = prefsData.map { it[Keys.ACTIVE_REVIEW_BATCH_ID] }
+    /** 0.2.1 压缩 / 还原留下的文件属主已修正（只需做一次） */
+    val ownershipRepaired: Flow<Boolean> = prefsData.map { it[Keys.OWNERSHIP_REPAIRED] ?: false }
 
-    /** 记录/清除当前审核批次 id；fire-and-forget 走 appScope 落盘（closeReview 为非挂起调用点，且页面销毁不丢写） */
-    fun setActiveReviewBatchId(batchId: Long?) {
-        appScope.launch {
-            ds.edit { prefs ->
-                if (batchId == null) prefs.remove(Keys.ACTIVE_REVIEW_BATCH_ID)
-                else prefs[Keys.ACTIVE_REVIEW_BATCH_ID] = batchId
-            }
-        }
+    suspend fun setOwnershipRepaired() {
+        ds.edit { it[Keys.OWNERSHIP_REPAIRED] = true }
     }
 
-    /** 审核时是否把所有重复图一次性纳入（不受「每次审核数量」限制），避免重复图分多批清不完 */
-    val cleanupAllDuplicates: Flow<Boolean> = prefsData.map { it[Keys.CLEANUP_ALL_DUPLICATES] ?: false }
+    /** 压缩后先对比：压缩结果先放在缓存里给用户对比，点「应用」才替换原图；关闭则直接替换 */
+    val compressCompare: Flow<Boolean> = prefsData.map { it[Keys.COMPRESS_COMPARE] ?: true }
 
-    suspend fun setCleanupAllDuplicates(enabled: Boolean) {
-        ds.edit { it[Keys.CLEANUP_ALL_DUPLICATES] = enabled }
-    }
-
-    /** 视觉重复组成员数上限：超过此数的视觉相似组视为误聚整组丢弃（精确 xxHash 重复不受限）。改后需重新查重。 */
-    val maxDuplicateGroupSize: Flow<Int> = prefsData.map {
-        (it[Keys.MAX_DUP_GROUP_SIZE] ?: DEFAULT_MAX_DUP_GROUP_SIZE).coerceIn(MIN_MAX_DUP_GROUP_SIZE, MAX_MAX_DUP_GROUP_SIZE)
-    }
-
-    suspend fun setMaxDuplicateGroupSize(value: Int) {
-        ds.edit { it[Keys.MAX_DUP_GROUP_SIZE] = value.coerceIn(MIN_MAX_DUP_GROUP_SIZE, MAX_MAX_DUP_GROUP_SIZE) }
-    }
-
-    /** 重复检测严格度（视觉阈值档位）。缺省回退 [DuplicateStrictness.DEFAULT]；改后需重新查重才生效。 */
-    val duplicateStrictness: Flow<DuplicateStrictness> = prefsData.map {
-        DuplicateStrictness.fromName(it[Keys.DUPLICATE_STRICTNESS])
-    }
-
-    suspend fun setDuplicateStrictness(value: DuplicateStrictness) {
-        ds.edit { it[Keys.DUPLICATE_STRICTNESS] = value.name }
-    }
-
-    val duplicateAlgorithmVersion: Flow<Int> = prefsData.map { it[Keys.DUPLICATE_ALGORITHM_VERSION] ?: 0 }
-
-    suspend fun setDuplicateAlgorithmVersion(version: Int) {
-        ds.edit { it[Keys.DUPLICATE_ALGORITHM_VERSION] = version }
-    }
-
-    /**
-     * 视觉相似度学习模型的 4 个参数 [wBlock, wLuma, wEdge, threshold]；未学习返回 null
-     * （调用方回退到严格度档位的基础模型）。只存原始 double，不依赖 service 层的模型类型。
-     */
-    val similarityWeights: Flow<DoubleArray?> = prefsData.map { p ->
-        val wb = p[Keys.SIM_W_BLOCK]
-        val wl = p[Keys.SIM_W_LUMA]
-        val we = p[Keys.SIM_W_EDGE]
-        val th = p[Keys.SIM_THRESHOLD]
-        if (wb != null && wl != null && we != null && th != null) doubleArrayOf(wb, wl, we, th) else null
-    }
-
-    suspend fun setSimilarityWeights(wBlock: Double, wLuma: Double, wEdge: Double, threshold: Double) {
-        ds.edit {
-            it[Keys.SIM_W_BLOCK] = wBlock
-            it[Keys.SIM_W_LUMA] = wLuma
-            it[Keys.SIM_W_EDGE] = wEdge
-            it[Keys.SIM_THRESHOLD] = threshold
-        }
-    }
-
-    /** 清除学习成果，回退到档位基础模型。 */
-    suspend fun resetSimilarityWeights() {
-        ds.edit {
-            it.remove(Keys.SIM_W_BLOCK)
-            it.remove(Keys.SIM_W_LUMA)
-            it.remove(Keys.SIM_W_EDGE)
-            it.remove(Keys.SIM_THRESHOLD)
-        }
-    }
-
-    // ---- 推荐删除（删除偏好学习模型）----
-
-    /** 删除偏好模型（序列化字符串）；未学习返回 null。只存原始字符串，不依赖 service 层模型类型。 */
-    val deleteModel: Flow<String?> = prefsData.map { it[Keys.DELETE_MODEL] }
-
-    suspend fun setDeleteModel(serialized: String) {
-        ds.edit { it[Keys.DELETE_MODEL] = serialized }
-    }
-
-    /** 已采集的删除/保留样本数（冷启动激活判断）。 */
-    val deleteSampleCount: Flow<Int> = prefsData.map { it[Keys.DELETE_SAMPLE_COUNT] ?: 0 }
-
-    suspend fun addDeleteSamples(n: Int) {
-        ds.edit { it[Keys.DELETE_SAMPLE_COUNT] = (it[Keys.DELETE_SAMPLE_COUNT] ?: 0) + n }
-    }
-
-    suspend fun resetDeleteModel() {
-        ds.edit {
-            it.remove(Keys.DELETE_MODEL)
-            it.remove(Keys.DELETE_SAMPLE_COUNT)
-        }
-    }
-
-    /** 是否启用「推荐删除」分类。 */
-    val recommendEnabled: Flow<Boolean> = prefsData.map { it[Keys.RECOMMEND_ENABLED] ?: false }
-
-    suspend fun setRecommendEnabled(enabled: Boolean) {
-        ds.edit { it[Keys.RECOMMEND_ENABLED] = enabled }
-    }
-
-    /** 每次「推荐删除」纳入的数量上限。 */
-    val recommendLimit: Flow<Int> = prefsData.map {
-        (it[Keys.RECOMMEND_LIMIT] ?: DEFAULT_RECOMMEND_LIMIT).coerceIn(MIN_RECOMMEND_LIMIT, MAX_RECOMMEND_LIMIT)
-    }
-
-    suspend fun setRecommendLimit(value: Int) {
-        ds.edit { it[Keys.RECOMMEND_LIMIT] = value.coerceIn(MIN_RECOMMEND_LIMIT, MAX_RECOMMEND_LIMIT) }
+    suspend fun setCompressCompare(enabled: Boolean) {
+        ds.edit { it[Keys.COMPRESS_COMPARE] = enabled }
     }
 
     // ---- 图库页偏好（列数 / 排序 / 大图标记阈值） ----
@@ -404,6 +169,13 @@ class SettingsRepository(
 
     suspend fun setQqSourceSort(sort: SourceSort) {
         ds.edit { it[Keys.QQ_SOURCE_SORT] = sort.name }
+    }
+
+    /** 清理规则预览页的排序（各规则共用） */
+    val cleanupRuleSort: Flow<SourceSort> = prefsData.map { SourceSort.fromName(it[Keys.CLEANUP_RULE_SORT]) }
+
+    suspend fun setCleanupRuleSort(sort: SourceSort) {
+        ds.edit { it[Keys.CLEANUP_RULE_SORT] = sort.name }
     }
 
     /** QQ 来源分类列表的排序 */
@@ -450,38 +222,20 @@ class SettingsRepository(
         ds.edit { it[Keys.VARIANT_INDEX_VERSION] = version }
     }
 
-    // ---- 清理规则配置 ----
-
-    /** 每类清理维度的开关 + 门限；缺省或解析失败回退到 [CleanupConfig.DEFAULT]（平衡档） */
-    val cleanupConfig: Flow<CleanupConfig> = prefsData.map { prefs ->
-        prefs[Keys.CLEANUP_CONFIG]?.let { raw ->
-            runCatching { cleanupJson.decodeFromString<CleanupConfig>(raw) }.getOrNull()
-        } ?: CleanupConfig.DEFAULT
-    }
-
-    suspend fun setCleanupConfig(config: CleanupConfig) {
-        ds.edit { it[Keys.CLEANUP_CONFIG] = cleanupJson.encodeToString(config) }
-    }
-
-    // ---- 自动归档配置（分析阶段按敏感信息自动归档，默认关闭；键名沿用收藏时期）----
-
-    /** 自动归档规则；缺省或解析失败回退到 [AutoFavoriteConfig.DEFAULT]（关闭） */
-    val autoFavoriteConfig: Flow<AutoFavoriteConfig> = prefsData.map { prefs ->
-        prefs[Keys.AUTO_FAVORITE_CONFIG]?.let { raw ->
-            runCatching { cleanupJson.decodeFromString<AutoFavoriteConfig>(raw) }.getOrNull()
-        } ?: AutoFavoriteConfig.DEFAULT
-    }
-
-    suspend fun setAutoFavoriteConfig(config: AutoFavoriteConfig) {
-        ds.edit { it[Keys.AUTO_FAVORITE_CONFIG] = cleanupJson.encodeToString(config) }
-    }
-
     // ---- 主题动态取色 ----
 
     val dynamicColorEnabled: Flow<Boolean> = prefsData.map { it[Keys.DYNAMIC_COLOR] ?: true }
 
     suspend fun setDynamicColorEnabled(enabled: Boolean) {
         ds.edit { it[Keys.DYNAMIC_COLOR] = enabled }
+    }
+
+    // ---- 通知权限（Android 13+）：第一次有后台任务时问一次，之后由用户在系统设置里改 ----
+
+    val notificationPermissionAsked: Flow<Boolean> = prefsData.map { it[Keys.NOTIFICATION_ASKED] ?: false }
+
+    suspend fun setNotificationPermissionAsked() {
+        ds.edit { it[Keys.NOTIFICATION_ASKED] = true }
     }
 
     // ---- 图库动画增强：true=缩略图共享元素（实验性），false=缩放进入+飞出下滑（默认稳定）----
@@ -527,21 +281,14 @@ class SettingsRepository(
         const val DEFAULT_CHATPIC_PATH =
             "/storage/emulated/0/Android/data/com.tencent.mobileqq/Tencent/MobileQQ/chatpic"
 
-        const val DEFAULT_REVIEW_LIMIT = 200
-        const val MIN_REVIEW_LIMIT = 20
-        const val MAX_REVIEW_LIMIT = 5_000
+        const val DEFAULT_COMPRESS_MAX_SIDE = 2560
 
-        const val DEFAULT_MAX_DUP_GROUP_SIZE = 20
-        const val MIN_MAX_DUP_GROUP_SIZE = 2
-        const val MAX_MAX_DUP_GROUP_SIZE = 500
+        const val DEFAULT_COMPRESS_QUALITY = 80
+        const val MIN_COMPRESS_QUALITY = 30
+        const val MAX_COMPRESS_QUALITY = 95
 
-        const val DEFAULT_AI_CONCURRENCY = 2
-        const val MIN_AI_CONCURRENCY = 1
-        const val MAX_AI_CONCURRENCY = 16
-
-        const val DEFAULT_AI_MAX_TOKENS = 2048
-        const val MIN_AI_MAX_TOKENS = 256
-        const val MAX_AI_MAX_TOKENS = 8192
+        /** 设置与压缩对比页可选的压缩质量 */
+        val COMPRESS_QUALITY_OPTIONS = listOf(90, 80, 70, 60, 50)
 
         const val DEFAULT_GALLERY_COLUMNS = 4
         const val MIN_GALLERY_COLUMNS = 2
@@ -549,13 +296,6 @@ class SettingsRepository(
 
         const val DEFAULT_LARGE_THRESHOLD_BYTES = 1L * 1024 * 1024
         const val MIN_LARGE_THRESHOLD_BYTES = 100L * 1024
-
-        const val DEFAULT_RECOMMEND_LIMIT = 50
-        const val MIN_RECOMMEND_LIMIT = 10
-        const val MAX_RECOMMEND_LIMIT = 1000
-
-        /** 冷启动：累计删除/保留样本 ≥ 此值才激活「推荐删除」（之前只默默学习、不推荐）。 */
-        const val RECOMMEND_ACTIVATION_SAMPLES = 50
 
         /** 清洗导出子目录名：去空白、剔除文件系统非法字符、限长；非法或空返回 null */
         fun sanitizeExportSubdir(name: String): String? {
@@ -569,36 +309,12 @@ class SettingsRepository(
         val CHATPIC_PATH = stringPreferencesKey("chatpic_path")
         val QQ_SOURCES_COMPLETE = booleanPreferencesKey("qq_sources_complete")
 
-        val AI_ENABLED = booleanPreferencesKey("ai_enabled")
-        val AI_ENDPOINT = stringPreferencesKey("ai_endpoint")
-        val AI_PUBLIC_ENDPOINT_ACK_ENDPOINT = stringPreferencesKey("ai_public_endpoint_ack_endpoint")
-        /** 旧版全局布尔授权，仅用于迁移时删除，不能作为当前 endpoint 的授权依据。 */
-        val AI_PUBLIC_ENDPOINT_ACK = booleanPreferencesKey("ai_public_endpoint_ack")
-        val LEGACY_DERIVED_DATA_PURGED = booleanPreferencesKey("legacy_derived_data_purged")
-        val AI_API_KEY = stringPreferencesKey("ai_api_key")
-        val AI_MODEL = stringPreferencesKey("ai_model")
-        val AI_EMBEDDING_MODEL = stringPreferencesKey("ai_embedding_model")
-        val AI_DISABLE_THINKING = booleanPreferencesKey("ai_disable_thinking")
-        val AI_CONCURRENCY = intPreferencesKey("ai_concurrency")
-        val AI_MAX_TOKENS = intPreferencesKey("ai_max_tokens")
-
         val QUARANTINE_DAYS = intPreferencesKey("quarantine_days")
-        val ANALYSIS_CONFIG = stringPreferencesKey("analysis_config")
-        val ANALYSIS_OLDEST_FIRST = booleanPreferencesKey("analysis_oldest_first")
-        val REVIEW_LIMIT = intPreferencesKey("review_limit")
-        val ACTIVE_REVIEW_BATCH_ID = longPreferencesKey("active_review_batch_id")
-        val CLEANUP_ALL_DUPLICATES = booleanPreferencesKey("cleanup_all_duplicates")
-        val MAX_DUP_GROUP_SIZE = intPreferencesKey("max_dup_group_size")
-        val DUPLICATE_STRICTNESS = stringPreferencesKey("duplicate_strictness")
-        val DUPLICATE_ALGORITHM_VERSION = intPreferencesKey("duplicate_algorithm_version")
-        val SIM_W_BLOCK = doublePreferencesKey("sim_w_block")
-        val SIM_W_LUMA = doublePreferencesKey("sim_w_luma")
-        val SIM_W_EDGE = doublePreferencesKey("sim_w_edge")
-        val SIM_THRESHOLD = doublePreferencesKey("sim_threshold")
-        val DELETE_MODEL = stringPreferencesKey("delete_model")
-        val DELETE_SAMPLE_COUNT = intPreferencesKey("delete_sample_count")
-        val RECOMMEND_ENABLED = booleanPreferencesKey("recommend_enabled")
-        val RECOMMEND_LIMIT = intPreferencesKey("recommend_limit")
+        val COMPRESS_MAX_SIDE = intPreferencesKey("compress_max_side")
+        val COMPRESS_KEEP_ORIGINAL = booleanPreferencesKey("compress_keep_original")
+        val COMPRESS_QUALITY = intPreferencesKey("compress_quality")
+        val COMPRESS_COMPARE = booleanPreferencesKey("compress_compare")
+        val OWNERSHIP_REPAIRED = booleanPreferencesKey("compress_ownership_repaired")
 
         val GALLERY_COLUMNS = intPreferencesKey("gallery_columns")
         val GALLERY_SORT = stringPreferencesKey("gallery_sort")
@@ -608,23 +324,12 @@ class SettingsRepository(
         val ARCHIVE_VISIBLE = booleanPreferencesKey("archive_visible")
         val VARIANT_INDEX_VERSION = intPreferencesKey("variant_index_version")
         val QQ_SOURCE_SORT = stringPreferencesKey("qq_source_sort")
+        val CLEANUP_RULE_SORT = stringPreferencesKey("cleanup_rule_sort")
         val QQ_SOURCE_FACET_ORDER = stringPreferencesKey("qq_source_facet_order")
 
-        val CLEANUP_CONFIG = stringPreferencesKey("cleanup_config")
-        val AUTO_FAVORITE_CONFIG = stringPreferencesKey("auto_favorite_config")
-
         val DYNAMIC_COLOR = booleanPreferencesKey("dynamic_color")
+        val NOTIFICATION_ASKED = booleanPreferencesKey("notification_permission_asked")
         val DETAIL_SHARED_TRANSITION = booleanPreferencesKey("detail_shared_transition")
         val EXPORT_SUBDIRS = stringPreferencesKey("export_subdirs")
     }
 }
-
-data class AiConnectionConfig(
-    val enabled: Boolean,
-    val endpoint: String,
-    val apiKey: String,
-    val model: String,
-    val embeddingModel: String,
-    val disableThinking: Boolean,
-    val maxTokens: Int,
-)

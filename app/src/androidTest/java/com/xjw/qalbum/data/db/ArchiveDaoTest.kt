@@ -102,7 +102,7 @@ class ArchiveDaoTest {
 
         // 扫描到归档文件变化：更新大小，仍保持归档
         dao.updateFromScanByPath(thumb, thumb.substringAfterLast('/'), thumb.substringBeforeLast('/'), "chatthumb",
-            thumb.substringAfterLast('/').removePrefix("Cache_"), 25, 1_500, 6_000, "image/jpeg", false)
+            thumb.substringAfterLast('/').removePrefix("Cache_"), 25, 1_500, 6_000, "image/jpeg", false, 0, 0)
         assertEquals("archived", status(thumbId))
 
         // 取消归档：整张图恢复

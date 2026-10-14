@@ -148,7 +148,11 @@ class RootFileAccess : FileAccessProvider {
         val quotedDst = dst.shellSingleQuote()
         val script = "[ ! -e $quotedDst ] || exit 1; " +
             "mv -n -- $quotedSrc $quotedDst 2>/dev/null; " +
-            "[ ! -e $quotedSrc ] && [ -e $quotedDst ]"
+            "[ ! -e $quotedSrc ] && [ -e $quotedDst ] || exit 1; " +
+            // 跨应用目录时 mv 退化为复制，新文件属于 shell / root：改成与所在目录同属主，改不了就放开读写，否则 QQ 读不到
+            "o=\$(stat -c %u:%g -- \"\$(dirname -- $quotedDst)\"); " +
+            "[ \"\$(stat -c %u -- $quotedDst)\" = \"\${o%%:*}\" ] || chown \"\$o\" -- $quotedDst 2>/dev/null || chmod 666 -- $quotedDst 2>/dev/null; " +
+            "exit 0"
         try {
             Shell.cmd(script).exec().isSuccess
         } catch (ce: CancellationException) {

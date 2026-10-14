@@ -97,16 +97,4 @@ object ImageVariantSql {
     /** 回填：id 段 (lo, hi] 内不属于任何家族的图，合并显示时的大小补成自身大小 */
     const val plainBytesRange: String =
         "UPDATE images SET variant_bytes = size WHERE variant_group IS NULL AND id > ? AND id <= ? AND variant_bytes IS NOT size"
-
-    /**
-     * 旧版查重把同一张图的原图 / 预览图当成「重复」。家族建好后：隐藏成员退出重复组，
-     * 剩下不足两张可见图的重复组解散。
-     */
-    val dissolveFamilyDuplicates: List<String> = listOf(
-        "UPDATE images SET duplicate_group_id = NULL, is_duplicate_best = 0 WHERE variant_hidden = 1 AND duplicate_group_id IS NOT NULL",
-        """UPDATE images SET duplicate_group_id = NULL, is_duplicate_best = 0 WHERE duplicate_group_id IN (
-            SELECT duplicate_group_id FROM images
-            WHERE duplicate_group_id IS NOT NULL AND status = 'active' AND source_type <> 'chatthumb' AND variant_hidden = 0
-            GROUP BY duplicate_group_id HAVING COUNT(*) < 2)""",
-    )
 }

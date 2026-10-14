@@ -9,6 +9,7 @@ import com.xjw.qalbum.data.db.entity.DirSnapshotEntity
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.domain.model.FileInfo
 import com.xjw.qalbum.domain.model.ScanProgress
+import com.xjw.qalbum.fileops.FileOpsImpl
 import com.xjw.qalbum.qq.QqCachePaths
 import com.xjw.qalbum.service.indexer.transport.DirStat
 import com.xjw.qalbum.service.indexer.transport.ScanTransport
@@ -105,15 +106,15 @@ class ScanPipeline(
                 val rootChildren = transport.listSubdirs(root)
                 when {
                     rootChildren.isEmpty() -> {
-                        send(ScanProgress.Failed("扫描根目录不可访问或为空：$root（已保留现有索引）"))
+                        send(ScanProgress.Failed("图片目录读不到或为空：$root（索引未改动）"))
                         return
                     }
                     rootChildren.none { it.path.substringAfterLast('/') in SOURCE_DIRS } -> {
-                        send(ScanProgress.Failed("该路径不包含 chatimg/chatraw/chatthumb/temp 子目录，请检查扫描路径设置"))
+                        send(ScanProgress.Failed("这里没有 chatimg、chatraw 等子目录，请检查扫描路径"))
                         return
                     }
                     snapshots.isNotEmpty() -> {
-                        send(ScanProgress.Failed("源目录本轮枚举为空但存在历史索引，疑似枚举异常，已中止（保留现有索引）"))
+                        send(ScanProgress.Failed("这次没读到任何图片目录，已中止扫描（索引未改动）"))
                         return
                     }
                     // else：源目录存在但尚无内容且无历史快照 —— 正常空库，继续走完 Done(0)
@@ -131,7 +132,7 @@ class ScanPipeline(
                 if (vanished >= VANISH_FUSE_MIN_DIRS && vanished * 2 > snapshots.size) {
                     send(
                         ScanProgress.Failed(
-                            "$vanished/${snapshots.size} 个已索引目录本轮不可见，疑似枚举异常，已中止（保留现有索引）",
+                            "$vanished/${snapshots.size} 个目录这次读不到，已中止扫描（索引未改动）",
                         ),
                     )
                     return
@@ -213,6 +214,8 @@ class ScanPipeline(
         // 1. 枚举批内所有文件，按父目录分组
         val filesByDir = HashMap<String, MutableList<FileInfo>>(dirBatch.size * 2)
         transport.listFiles(dirBatch.map { it.path }).collect { f ->
+            // 原图压缩 / 还原途中的临时文件不入库
+            if (f.name.endsWith(FileOpsImpl.TEMP_SUFFIX)) return@collect
             filesByDir.getOrPut(f.path.substringBeforeLast('/')) { ArrayList() }.add(f)
         }
 
@@ -302,7 +305,19 @@ class ScanPipeline(
             val type = MagicBytesDetector.detect(header, header.size) ?: continue
             out.add(buildEntity(files[i], type, now))
         }
-        return out
+        if (out.isEmpty()) return out
+        // 宽高只读文件头（特权进程内解析），读不到记 0；只是附加信息，失败不影响入库
+        val sizes = try {
+            transport.readImageSizes(out.map { it.path })
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (e: Exception) {
+            Timber.w(e, "ScanPipeline: read image sizes failed, keep 0")
+            emptyList()
+        }
+        return out.mapIndexed { i, entity ->
+            sizes.getOrNull(i)?.let { (w, h) -> entity.copy(width = w, height = h) } ?: entity
+        }
     }
 
     private data class MimeFix(val id: Long, val mime: String, val isAnimated: Boolean)
@@ -352,7 +367,7 @@ class ScanPipeline(
             firstSeen = now,
             lastSeen = now,
             mime = type.mime,
-            width = 0, // 宽高在分析阶段读取
+            width = 0, // 宽高随后由 readImageSizes 读文件头补上
             height = 0,
             isAnimated = type.isAnimated,
             // chatthumb 沿用历史状态名 thumbnail_trash：不进图库时间线，在缩略图页与来源页管理。

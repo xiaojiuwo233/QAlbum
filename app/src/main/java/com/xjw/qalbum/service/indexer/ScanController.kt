@@ -2,6 +2,7 @@ package com.xjw.qalbum.service.indexer
 
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.domain.model.ScanProgress
+import com.xjw.qalbum.service.work.BackgroundTasks
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -34,6 +35,8 @@ import timber.log.Timber
 class ScanController(
     private val settings: SettingsRepository,
     private val pipeline: ScanPipeline,
+    private val tasks: BackgroundTasks,
+    private val sizeBackfill: ImageSizeBackfill,
 ) {
     // SupervisorJob：单个扫描失败不影响 controller 后续工作
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -67,7 +70,19 @@ class ScanController(
                 val self = coroutineContext[Job]
                 try {
                     val root = settings.chatpicPath.first()
-                    pipeline.scan(root, mode).collect { p -> setProgressIfCurrent(self, p) }
+                    // 登记为后台任务：通知栏显示进度，切到后台也保持前台优先级
+                    tasks.track(if (mode == ScanMode.INCREMENTAL) "扫描图片" else "全量扫描图片") { handle ->
+                        pipeline.scan(root, mode).collect { p ->
+                            setProgressIfCurrent(self, p)
+                            when (p) {
+                                is ScanProgress.Enumerating -> handle.update("正在比对目录… 已发现 ${p.total} 个")
+                                is ScanProgress.Indexing -> handle.update("已扫描 ${p.processed} / ${p.total} 个目录", p.processed.toLong(), p.total.toLong())
+                                else -> Unit
+                            }
+                        }
+                    }
+                    // 以前入库、还没有宽高的图在后台补读一次（没有就什么也不做）
+                    sizeBackfill.startIfNeeded()
                 } catch (ce: CancellationException) {
                     // 用户主动取消属正常流程：标记为「已取消」并交还协程框架，不展示为失败
                     setProgressIfCurrent(self, ScanProgress.Cancelled)

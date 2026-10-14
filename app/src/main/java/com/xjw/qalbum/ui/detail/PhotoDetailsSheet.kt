@@ -1,11 +1,9 @@
 package com.xjw.qalbum.ui.detail
 
-import android.content.ClipData
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -17,34 +15,35 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.CornerSize
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Forum
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.platform.ClipEntry
-import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.xjw.qalbum.data.db.AppDatabase
 import com.xjw.qalbum.data.db.dao.QqOriginDetails
 import com.xjw.qalbum.data.db.dao.QqSourceDao
 import com.xjw.qalbum.data.db.entity.ImageEntity
-import com.xjw.qalbum.data.db.entity.OcrTextEntity
+import com.xjw.qalbum.data.db.entity.OriginalBackupEntity
+import com.xjw.qalbum.service.cleanup.CompressionCoordinator
+import com.xjw.qalbum.service.cleanup.OriginalCompressor
 import com.xjw.qalbum.ui.common.formatBytes
+import com.xjw.qalbum.ui.common.formatDateTime
 import com.xjw.qalbum.ui.common.formatDateTimeSeconds
 import com.xjw.qalbum.ui.common.formatTitleDate
 import com.xjw.qalbum.ui.common.sourceLabel
@@ -52,22 +51,25 @@ import com.xjw.qalbum.ui.components.SectionHeader
 import com.xjw.qalbum.ui.components.SegmentPosition
 import com.xjw.qalbum.ui.components.SegmentedCard
 import com.xjw.qalbum.ui.components.SegmentedDefaults
-import kotlinx.coroutines.launch
 import org.koin.compose.koinInject
+import kotlin.math.roundToInt
 
 /**
- * 图片详情卡：标题（时间 + 文件名）+ 文件信息 + QQ 来源 + OCR 文字。
+ * 图片详情卡：标题（时间 + 文件名）+ 文件信息 + QQ 来源。
  * 图库详情页与各处预览共用，保证「查看详情」完全一致。
  */
 @Composable
 internal fun PhotoDetailsSheet(
     image: ImageEntity,
-    ocr: OcrTextEntity?,
     onClose: () -> Unit,
 ) {
     val sources = koinInject<QqSourceDao>()
     val sourceFlow = remember(image.id, sources) { sources.observeImageOrigins(image.id) }
     val origins by sourceFlow.collectAsState(initial = emptyList())
+    val backups = koinInject<AppDatabase>().originalBackupDao()
+    val recordFlow = remember(image.id, backups) { backups.observeByImageId(image.id) }
+    val record by recordFlow.collectAsState(initial = null)
+    val compression = koinInject<CompressionCoordinator>()
     Surface(
         shape = MaterialTheme.shapes.extraLarge.copy(bottomStart = CornerSize(0.dp), bottomEnd = CornerSize(0.dp)),
         color = MaterialTheme.colorScheme.surfaceContainerLow,
@@ -112,12 +114,16 @@ internal fun PhotoDetailsSheet(
                     }
                 }
                 item(key = "meta") { MetadataBlock(image) }
+                if (image.optimized == OriginalCompressor.COMPRESSED) {
+                    item(key = "compress-header") { SectionHeader("原图压缩") }
+                    item(key = "compress") { CompressionBlock(record, onRestore = { compression.restoreOriginal(image.id) }) }
+                }
                 item(key = "source-header") { SectionHeader("QQ 来源") }
                 if (origins.isEmpty()) {
                     item(key = "source-none") {
                         SegmentedCard(SegmentPosition.Single) {
                             Text(
-                                "没有关联到本机聊天记录。可在「聊天来源」中读取后再查看。",
+                                "未关联聊天记录。读取聊天来源（需要 Root）后可看到发送人和会话。",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -130,10 +136,6 @@ internal fun PhotoDetailsSheet(
                             OriginCard(origin, SegmentPosition(index, origins.size), showAccount)
                         }
                     }
-                }
-                ocr?.takeIf { it.text.isNotBlank() }?.let { text ->
-                    item(key = "ocr-header") { SectionHeader("识别的文字") }
-                    item(key = "ocr") { OcrBlock(text) }
                 }
             }
         }
@@ -148,10 +150,44 @@ private fun MetadataBlock(image: ImageEntity) {
         InfoRow("类型", "${sourceLabel(image.sourceType)} · ${image.mime}")
         InfoRow("修改时间", formatDateTimeSeconds(image.mtime))
         InfoRow("首次扫描", formatDateTimeSeconds(image.firstSeen))
-        image.duplicateGroupId?.let { InfoRow("重复组", "#$it") }
         InfoRow("路径", image.path)
     }
 }
+
+/** 压缩记录：质量、压缩前后的大小与尺寸、压缩时间、原图备份（可以还原） */
+@Composable
+private fun CompressionBlock(record: OriginalBackupEntity?, onRestore: () -> Unit) {
+    SegmentedCard(SegmentPosition.Single, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        if (record == null) {
+            Text(
+                "已压缩，没有压缩记录。",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            return@SegmentedCard
+        }
+        val saved = record.originalSize - record.compressedSize
+        val percent = if (record.originalSize > 0) (saved * 100.0 / record.originalSize).roundToInt() else 0
+        InfoRow("压缩质量", if (record.quality > 0) "${record.quality}%" else "未记录")
+        if (record.originalMime == "image/png") InfoRow("格式", "PNG → JPEG")
+        InfoRow("压缩前", "${formatBytes(record.originalSize)}" + dims(record.originalWidth, record.originalHeight))
+        InfoRow("压缩后", "${formatBytes(record.compressedSize)}" + dims(record.compressedWidth, record.compressedHeight))
+        InfoRow("省下", "${formatBytes(saved)}（-$percent%）")
+        InfoRow("压缩时间", formatDateTime(record.createdAt))
+        InfoRow(
+            "原图",
+            if (record.backupPath != null) "保留到 ${formatDateTime(record.expiresAt)}，可以还原"
+            else "没有保留，无法还原",
+        )
+        if (record.backupPath != null) {
+            OutlinedButton(onClick = onRestore, shapes = ButtonDefaults.shapes(), modifier = Modifier.padding(top = 8.dp)) {
+                Text("还原原图")
+            }
+        }
+    }
+}
+
+private fun dims(width: Int, height: Int): String = if (width > 0 && height > 0) " · $width × $height" else ""
 
 @Composable
 private fun OriginCard(origin: QqOriginDetails, position: SegmentPosition, showAccount: Boolean) {
@@ -176,49 +212,6 @@ private fun OriginCard(origin: QqOriginDetails, position: SegmentPosition, showA
         if (showAccount) InfoRow("账号", origin.accountName)
         InfoRow("发送时间", formatDateTimeSeconds(origin.messageTime))
         if (origin.messageCount > 1) InfoRow("出现次数", "${origin.messageCount} 条消息")
-    }
-}
-
-@Composable
-private fun OcrBlock(ocr: OcrTextEntity) {
-    val clipboard = LocalClipboard.current
-    val scope = rememberCoroutineScope()
-    SegmentedCard(SegmentPosition.Single) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                "置信度 ${(ocr.confidence * 100).toInt()}%",
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.weight(1f),
-            )
-            IconButton(
-                onClick = { scope.launch { clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("OCR", ocr.text))) } },
-                shapes = IconButtonDefaults.shapes(),
-            ) { Icon(Icons.Outlined.ContentCopy, contentDescription = "复制文字") }
-        }
-        val flags = buildList {
-            if (ocr.hasIdNumber) add("证件号")
-            if (ocr.hasOrderNo) add("订单号")
-            if (ocr.hasAmount) add("金额")
-            if (ocr.hasPhone) add("手机号")
-            if (ocr.hasAddress) add("地址")
-        }
-        if (flags.isNotEmpty()) {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                flags.forEach { flag ->
-                    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.tertiaryContainer) {
-                        Text(
-                            flag,
-                            style = MaterialTheme.typography.labelMedium,
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                        )
-                    }
-                }
-            }
-        }
-        SelectionContainer {
-            Text(ocr.text.trim(), style = MaterialTheme.typography.bodyMedium)
-        }
     }
 }
 

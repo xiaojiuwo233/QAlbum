@@ -42,7 +42,7 @@ data class PictureDeleteResult(
     fun message(permanent: Boolean = false): String = buildString {
         append(if (permanent) "已永久删除" else "已移入回收站")
         append(" $pictures 张图片、$files 个文件")
-        if (skipped > 0) append("；$skipped 组因保护、共用或文件变化而跳过")
+        if (skipped > 0) append("；$skipped 组已归档、共用或文件有变化，跳过")
         if (partial > 0) append(if(permanent) "；$partial 组永久删除未完成，文件保留在回收站" else "；$partial 组未完整处理，请检查回收站")
     }
 }

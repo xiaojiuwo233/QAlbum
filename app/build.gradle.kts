@@ -46,7 +46,7 @@ if (providers.gradleProperty("requireReleaseSigning").getOrElse("false").toBoole
 // 并读取 .git/HEAD 与 reflog 作为配置输入，使每次提交后缓存失效、hash/时间戳重新计算
 // （否则命中旧缓存会导致 hash 不刷新）。git worktree/submodule 下 .git 为文件、
 // 此锚点会失效，属可接受退化；CI 全新 checkout 不受影响。
-val baseVersionName = "0.2.0"
+val baseVersionName = "0.2.3"
 
 @Suppress("UNUSED_VARIABLE")
 val gitStateKey = listOf(".git/HEAD", ".git/logs/HEAD").joinToString("|") {
@@ -122,7 +122,7 @@ android {
             signingConfig = signingConfigs.getByName(if (hasReleaseSigning) "release" else "debug")
             if (!hasReleaseSigning) versionNameSuffix = "-debugsigned"
             // 仅 release 收窄到 arm64（面向 Shizuku/Root 真机 sideload，控制包体）；
-            // debug 不过滤 ABI，保证 x86_64 模拟器可安装（onnxruntime/OpenCV AAR 自带全 ABI）
+            // debug 不过滤 ABI，保证 x86_64 模拟器可安装
             ndk { abiFilters += "arm64-v8a" }
         }
     }
@@ -224,10 +224,6 @@ dependencies {
     // --- 图片加载 ---
     implementation(libs.coil.compose)
     implementation(libs.coil.gif)
-    implementation(libs.coil.network.okhttp)
-
-    // --- OCR ---
-    implementation(project(":ppocr-sdk"))
 
     // --- Shizuku（必选权限模式）---
     implementation(libs.shizuku.api)
@@ -239,16 +235,9 @@ dependencies {
     // RootService：扫描用的 root 进程常驻文件服务（原生 IO 替代逐条 shell 命令）
     implementation(libs.libsu.service)
 
-    // --- 网络 & 序列化 ---
-    implementation(libs.okhttp)
-    implementation(libs.okhttp.logging)
+    // --- 序列化 & 协程 ---
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.android)
-    // Google Play Services Task 转 Kotlin suspend 的桥接（保留给后续集成点）
-    implementation(libs.kotlinx.coroutines.play.services)
-
-    // --- 哈希 ---
-    implementation(libs.zero.allocation.hashing)
 
     // --- DI (Koin) ---
     implementation(libs.koin.android)

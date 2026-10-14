@@ -32,6 +32,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.Archive
+import androidx.compose.material.icons.outlined.Compress
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Unarchive
@@ -73,6 +74,7 @@ import com.xjw.qalbum.ui.common.formatBytes
 import com.xjw.qalbum.ui.common.formatTitleDate
 import com.xjw.qalbum.ui.common.sourceLabel
 import com.xjw.qalbum.ui.components.DeleteImagesDialog
+import com.xjw.qalbum.service.cleanup.CompressionCoordinator
 import com.xjw.qalbum.service.cleanup.PictureDeleteOptions
 import com.xjw.qalbum.ui.components.PreviewAction
 import com.xjw.qalbum.ui.components.SaveToAlbumSheet
@@ -84,6 +86,7 @@ import com.xjw.qalbum.ui.imageloading.ImageEntityModel
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import org.koin.androidx.compose.koinViewModel
+import org.koin.compose.koinInject
 
 @Composable
 fun ImageDetailScreen(
@@ -101,6 +104,7 @@ fun ImageDetailScreen(
     val context = LocalContext.current
     var showSaveSheet by remember { mutableStateOf(false) }
     val exportSubdirs by viewModel.exportSubdirs.collectAsState()
+    val compression = koinInject<CompressionCoordinator>()
 
     LaunchedEffect(toast) {
         toast?.let {
@@ -125,6 +129,7 @@ fun ImageDetailScreen(
                 onPageSelected = viewModel::selectIndex,
                 onToggleArchive = { viewModel.toggleArchive(onExhausted = onBack) },
                 onExport = { showSaveSheet = true },
+                onCompress = { compression.start(listOf(s.current.id)) },
                 onSelectVariant = viewModel::selectVariant,
                 onOpenExternal = {
                     viewModel.prepareOpenExternal { target ->
@@ -173,6 +178,7 @@ private fun ImmersivePhotoViewer(
     onSelectVariant: (Long) -> Unit,
     onToggleArchive: () -> Unit,
     onExport: () -> Unit,
+    onCompress: () -> Unit,
     onOpenExternal: () -> Unit,
     onMoveToTrash: (PictureDeleteOptions) -> Unit,
     onDeletePermanently: (PictureDeleteOptions) -> Unit,
@@ -388,6 +394,7 @@ private fun ImmersivePhotoViewer(
                     BottomActions(
                         image = state.current,
                         onToggleArchive = onToggleArchive,
+                        onCompress = onCompress,
                         onInfo = {
                             chromeVisible = true
                             detailsVisible = true
@@ -407,7 +414,6 @@ private fun ImmersivePhotoViewer(
         ) {
             PhotoDetailsSheet(
                 image = state.current,
-                ocr = state.ocr,
                 onClose = { detailsVisible = false },
             )
         }
@@ -507,6 +513,7 @@ private fun TopChrome(
 private fun BottomActions(
     image: ImageEntity,
     onToggleArchive: () -> Unit,
+    onCompress: () -> Unit,
     onInfo: () -> Unit,
     onExport: () -> Unit,
     onDelete: () -> Unit,
@@ -522,6 +529,7 @@ private fun BottomActions(
                 label = if (image.isArchived) "取消归档" else "归档",
                 onClick = onToggleArchive,
             )
+            PreviewAction(Icons.Outlined.Compress, "压缩", onClick = onCompress)
             PreviewAction(Icons.Outlined.Info, "详情", onClick = onInfo)
             PreviewAction(Icons.Outlined.Download, "保存", onClick = onExport)
             PreviewAction(Icons.Outlined.Delete, "删除", onClick = onDelete)

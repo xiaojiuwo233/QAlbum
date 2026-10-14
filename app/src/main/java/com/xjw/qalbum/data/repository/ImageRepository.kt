@@ -4,17 +4,8 @@ import androidx.paging.Pager
 import androidx.paging.PagingConfig
 import androidx.paging.PagingData
 import androidx.paging.PagingSource
-import androidx.room.withTransaction
-import com.xjw.qalbum.data.db.AppDatabase
-import com.xjw.qalbum.data.db.dao.DedupExclusionDao
-import com.xjw.qalbum.data.db.dao.EmbeddingDao
 import com.xjw.qalbum.data.db.dao.ImageDao
-import com.xjw.qalbum.data.db.dao.ImageFeatureRow
-import com.xjw.qalbum.data.db.dao.OcrDao
-import com.xjw.qalbum.data.db.dao.TagDao
-import com.xjw.qalbum.data.db.entity.DedupExclusionEntity
 import com.xjw.qalbum.data.db.entity.ImageEntity
-import com.xjw.qalbum.data.db.entity.OcrTextEntity
 import com.xjw.qalbum.data.paging.RefreshGate
 import com.xjw.qalbum.domain.model.GallerySort
 import com.xjw.qalbum.domain.model.TimelineWindow
@@ -30,12 +21,7 @@ import kotlinx.coroutines.flow.transform
  * 不直接操作文件系统 —— 扫描相关逻辑由 service.indexer 模块负责。
  */
 class ImageRepository(
-    private val db: AppDatabase,
     private val imageDao: ImageDao,
-    private val ocrDao: OcrDao,
-    private val dedupExclusionDao: DedupExclusionDao,
-    private val tagDao: TagDao,
-    private val embeddingDao: EmbeddingDao,
 ) {
 
     // ---- 时间线 ----
@@ -85,30 +71,9 @@ class ImageRepository(
         ).flow
     }
 
-    /** 某标签下活跃图片的 Paging 流（标签管理页用） */
-    fun imagesByTagPager(tagId: Long, gate: RefreshGate? = null): Flow<PagingData<ImageEntity>> {
-        return Pager(
-            config = PagingConfig(
-                pageSize = 60,
-                prefetchDistance = 120,
-                initialLoadSize = 180,
-                // 占位：快速滚动条可直接拖到任意位置（同 timelinePager）
-                enablePlaceholders = true,
-                jumpThreshold = JUMP_THRESHOLD,
-            ),
-            pagingSourceFactory = gated(gate) { imageDao.pagingImagesByTag(tagId) },
-        ).flow
-    }
-
     /** 给了闸门就包一层：批量操作期间网格保持原样，结束后统一刷新 */
     private fun gated(gate: RefreshGate?, factory: () -> PagingSource<Int, ImageEntity>): () -> PagingSource<Int, ImageEntity> =
         gate?.gated(factory) ?: factory
-
-    suspend fun countImagesByTag(tagId: Long): Int = imageDao.countActiveImagesByTag(tagId)
-
-    /** keyset 分块取某标签下活跃图片 id（按 tag 全删时逐块处理，不一次性装载整组） */
-    suspend fun imageIdsByTagChunk(tagId: Long, afterId: Long, limit: Int): List<Long> =
-        imageDao.imageIdsByTagChunk(tagId, afterId, limit)
 
     fun observeTimelineDateBucketCounts(stacked: Boolean): Flow<Map<Long, Int>> =
         imageDao.observeTimelineDateBucketCounts(stacked).map { rows -> rows.toBucketCountMap() }.throttleLatest()
@@ -129,14 +94,8 @@ class ImageRepository(
     suspend fun archiveIdsBetween(statuses: List<String>, from: Long, until: Long): List<Long> =
         imageDao.archiveIdsBetween(statuses, from, until)
 
-    suspend fun tagIdsBetween(tagId: Long, from: Long, until: Long): List<Long> = imageDao.tagIdsBetween(tagId, from, until)
-
     fun observeArchiveDateBucketCounts(statuses: List<String>): Flow<Map<Long, Int>> =
         imageDao.observeArchiveDateBucketCounts(statuses).map { rows -> rows.toBucketCountMap() }.throttleLatest()
-
-    /** 某标签下活跃图片的日期分桶计数（标签详情页时间线表头用，与图库同口径） */
-    fun observeTagDateBucketCounts(tagId: Long): Flow<Map<Long, Int>> =
-        imageDao.observeTagDateBucketCounts(tagId).map { rows -> rows.toBucketCountMap() }.throttleLatest()
 
     /** 归档页看图仍全量取 id：集合由用户手动归档产生，规模与主时间线不同量级 */
     suspend fun archiveTimelineIds(statuses: List<String>): List<Long> = imageDao.archiveTimelineIds(statuses)
@@ -199,95 +158,8 @@ class ImageRepository(
         else if (ids.size <= SQL_IDS_CHUNK) imageDao.getByIds(ids)
         else ids.chunked(SQL_IDS_CHUNK).flatMap { imageDao.getByIds(it) }
 
-    /**
-     * 批量取多个重复组的 active 成员，返回 groupId → 成员列表。
-     * 分块走 IN 查询替代逐组 N+1，几千组也只需个位数次查询；组内顺序保留图优先。
-     */
-    suspend fun getActiveByDuplicateGroups(groupIds: List<Long>): Map<Long, List<ImageEntity>> {
-        if (groupIds.isEmpty()) return emptyMap()
-        val byGroup = HashMap<Long, MutableList<ImageEntity>>()
-        groupIds.chunked(SQL_IDS_CHUNK).forEach { chunk ->
-            imageDao.getActiveByDuplicateGroupIds(chunk).forEach { img ->
-                val gid = img.duplicateGroupId ?: return@forEach
-                byGroup.getOrPut(gid) { ArrayList() }.add(img)
-            }
-        }
-        return byGroup
-    }
-
-    /** 取若干图的视觉特征（反馈学习用） */
-    suspend fun featuresByIds(ids: List<Long>): List<ImageFeatureRow> =
-        if (ids.isEmpty()) emptyList() else imageDao.featuresByIds(ids)
-
     /** 同一张图的全部现存版本（原图 / 预览图 / 缩略图） */
     suspend fun familyMembers(group: Long): List<ImageEntity> = imageDao.familyMembers(group)
-
-    suspend fun getByDuplicateGroup(groupId: Long): List<ImageEntity> =
-        imageDao.getByDuplicateGroup(groupId)
-
-    /**
-     * 拆分重复组：用户判定该组「差异过大」非真重复。整组成员写入一个新 cohort（重新查重时禁止再聚到一起），
-     * 并清除该组的重复分配。返回受影响成员数。
-     *
-     * 整体包进事务：maxCohortId 读取与 insertAll 在单写锁下原子，并发拆分不会共用同一 cohort
-     * 把无关组并进一个排斥集；读组、写排斥、清分配三步也不会被查重管线的 clear/assign 交错撕开。
-     */
-    suspend fun splitDuplicateGroup(groupId: Long): Int = db.withTransaction {
-        val ids = imageDao.imageIdsInDuplicateGroup(groupId)
-        if (ids.size >= 2) {
-            val cohortId = dedupExclusionDao.maxCohortId() + 1
-            dedupExclusionDao.insertAll(ids.map { DedupExclusionEntity(cohortId = cohortId, imageId = it) })
-        }
-        imageDao.clearDuplicateGroup(groupId)
-        ids.size
-    }
-
-    suspend fun getOcr(imageId: Long): OcrTextEntity? = ocrDao.getByImageId(imageId)
-
-    suspend fun setUserKeep(imageId: Long, keep: Boolean?) = imageDao.setUserKeep(imageId, keep)
-
-    /**
-     * 批量设置/清除用户保留：分块 IN 更新并包进单个事务，整批只触发一次表失效——
-     * 逐张独立事务在万级选中时是分钟级 fsync 风暴（守「禁全表逐行写」约束）。
-     */
-    suspend fun setUserKeepBatch(ids: List<Long>, keep: Boolean?) {
-        if (ids.isEmpty()) return
-        db.withTransaction {
-            ids.chunked(SQL_IDS_CHUNK).forEach { imageDao.setUserKeepByIds(it, keep) }
-        }
-    }
-
-    /**
-     * 永久删除路径的派生数据级联清理：ocr_text / ocr_fts（FTS4 独立表无 CASCADE）/
-     * image_tags / image_embeddings / dedup_exclusions 按 ≤[DERIVED_PURGE_CHUNK] 分块、
-     * 单事务删除。images 行本身保留（status='deleted' 是「已清理」统计的纯净数据源），
-     * 但其派生数据必须清掉——死向量会占据语义搜索 TopK 名额，孤儿 OCR/FTS 行只增不减。
-     * 幂等，调用方传入已确认删除成功的 imageId（页级 ≤ 数百个）。
-     */
-    suspend fun purgeDerivedData(ids: List<Long>) {
-        if (ids.isEmpty()) return
-        db.withTransaction {
-            ids.chunked(DERIVED_PURGE_CHUNK).forEach { chunk ->
-                ocrDao.deleteFtsByImageIds(chunk)
-                ocrDao.deleteTextByImageIds(chunk)
-                tagDao.unlinkAllByImageIds(chunk)
-                embeddingDao.deleteByImageIds(chunk)
-                db.aiAnalysisDao().deleteByImageIds(chunk)
-                dedupExclusionDao.deleteByImageIds(chunk)
-            }
-        }
-    }
-
-    /** keyset 分页取 status='deleted' 行 id（历史派生数据一次性清理用，禁止全表装载）。 */
-    suspend fun deletedIdsPaged(afterId: Long, limit: Int): List<Long> =
-        imageDao.deletedIdsPaged(afterId, limit)
-
-    // ---- 搜索（Phase 3 起） ----
-
-    suspend fun search(query: String, limit: Int = 50, offset: Int = 0): List<OcrDao.SearchHit> =
-        ocrDao.searchWithSnippet(query, limit, offset)
-
-    suspend fun searchCount(query: String): Int = ocrDao.countMatches(query)
 
     // ---- 仪表盘统计 ----
 
@@ -296,12 +168,6 @@ class ImageRepository(
     fun observeCleanedStats(): Flow<ImageDao.CleanedStatsRow> = imageDao.observeCleanedStats()
     fun observeCleanedStatsSince(since: Long): Flow<ImageDao.CleanedStatsRow> = imageDao.observeCleanedStatsSince(since)
     fun observeSourceBreakdown(): Flow<List<ImageDao.SourceBreakdownRow>> = imageDao.observeSourceBreakdown().throttleLatest()
-    fun observeAnalysisProgress(): Flow<ImageDao.AnalysisProgressRow> = imageDao.observeAnalysisProgress().throttleLatest()
-
-    /** 「已分析」= 完成全部当前需要阶段的图片数（与图库完成角标同口径） */
-    fun observeFullyAnalyzedCount(ocrRequired: Boolean, aiRequired: Boolean, embRequired: Boolean): Flow<Int> =
-        imageDao.observeFullyAnalyzedCount(ocrRequired, aiRequired, embRequired).throttleLatest()
-    fun observeImageHealth(): Flow<ImageDao.ImageHealthRow> = imageDao.observeImageHealth().throttleLatest()
     fun observeArchiveCount(statuses: List<String>): Flow<Int> = imageDao.observeArchiveCount(statuses).throttleLatest()
     fun observeThumbnailTrashSummary(): Flow<ImageDao.ThumbnailTrashSummary> =
         imageDao.observeThumbnailTrashSummary()
@@ -315,9 +181,6 @@ class ImageRepository(
 
         /** 图库网格离已加载范围超过这么多项（快速滚动拖得远）时直接在目标位置重新加载 */
         const val JUMP_THRESHOLD = 600
-
-        /** 派生数据级联清理的分块大小（< SQLite 变量上限） */
-        private const val DERIVED_PURGE_CHUNK = 500
     }
 }
 

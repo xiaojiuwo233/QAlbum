@@ -8,19 +8,20 @@ import java.time.Instant
 import java.time.ZoneId
 
 /**
- * 图片索引表 —— QAlbum 的核心实体。
+ * 图片表 —— QAlbum 的核心实体。只记录扫描能直接拿到的文件信息，不做任何内容分析。
  *
  * 设计要点：
  * - `cache_key`：从 `Cache_{hash}` 文件名中提取的 hash 部分。
  * - `variant_group`：图片家族键——同一张 QQ 图片的 chatimg / chatraw / chatthumb 由文件名 CRC 推出同一个键
  *   （见 QqCachePaths.familyKey）；`variant_hidden` / `variant_count` / `variant_bytes` 由触发器维护：
- *   图库合并显示时只露出家族中最大的那张，它带上家族的版本数与总大小。`is_variant_primary` 为历史遗留列，不再使用。
+ *   图库合并显示时只露出家族中最大的那张，它带上家族的版本数与总大小。
  * - `variant_bytes`：合并显示时的大小（代表图为整组合计，其余为自身大小），合并显示下按大小排序 / 分组用它。
- * - `duplicate_group_id` / `is_duplicate_best`：基于 xxHash + pHash 检测出的"重复组"。
- * - `status = thumbnail_trash`：历史状态名；现在表示 QQ 缩略图（chatthumb），不进图库时间线，可在缩略图页与来源页清理。
- * - `is_protected`：归档（原「收藏」）。总是按整个家族设置，任何清理都不会删除。归档的图片不在图库显示时
- *   `status = archived`（只按 status 过滤的图库、来源、标签、搜索、缩略图页自然看不到它们），
+ * - `width` / `height`：扫描时由特权进程解析文件头得到（不解码），读不到为 0。
+ * - `status = thumbnail_trash`：历史状态名；现在表示 QQ 缩略图（chatthumb），不进图库时间线，可在缩略图规则与来源页清理。
+ * - `is_protected`：归档。总是按整个家族设置，任何清理都不会删除。归档的图片不在图库显示时
+ *   `status = archived`（只按 status 过滤的图库、来源、清理规则、缩略图页自然看不到它们），
  *   设置为照常显示时保持原 status（见 ArchiveManager）。
+ * - `optimized`：原图压缩状态（0 未处理 / 1 已压缩 / 2 无需压缩）；文件被 QQ 重写时由扫描清零。
  */
 @Entity(
     tableName = "images",
@@ -30,24 +31,18 @@ import java.time.ZoneId
         // 不加索引会退化成全表扫描。unique：insertAll 的 IGNORE 兜底依赖此唯一约束，
         // 否则极端并发下的双插会静默写入重复行且无任何约束拦截。
         Index(value = ["path"], unique = true),
-        Index("xxhash"),
-        Index("phash"),
-        Index("cache_key"),
         Index("variant_group"),
         // 合并显示下按大小排序（同 size 索引的用法：按序走索引、逐行核对条件）
         Index("variant_bytes"),
         Index("status"),
         Index("mtime"),
-        // size 是「大到小」排序与 cleanup 聚合的高频排序列；25w 图无索引会退化成全表 filesort。
+        // size 是「大到小」排序与清理规则聚合的高频排序列；25w 图无索引会退化成全表 filesort。
         Index("size"),
-        Index("delete_score"),
-        Index("info_score"),
-        Index("duplicate_group_id"),
-        // 分桶计数覆盖索引：observeTimelineDateBucketCounts / observeFavoriteDateBucketCounts
+        // 分桶计数覆盖索引：observeTimelineDateBucketCounts / 归档页分桶
         // 只扫索引条目做 GROUP BY date_bucket，免 200w 行全表逐行 strftime。
         Index("status", "source_type", "date_bucket", "is_protected", "variant_hidden"),
         // 时间线定位覆盖索引：timelineRank* / timelineIds*（keyset 定位与窗口）只扫索引条目计数，
-        // 不做 200w 次行回表。
+        // 不做 200w 次行回表；按时间的清理规则同样走它。
         Index("status", "source_type", "mtime", "variant_hidden"),
     ]
 )
@@ -61,7 +56,6 @@ data class ImageEntity(
     @ColumnInfo(name = "source_type") val sourceType: String,
     @ColumnInfo(name = "cache_key") val cacheKey: String,
     @ColumnInfo(name = "variant_group") val variantGroup: Long? = null,
-    @ColumnInfo(name = "is_variant_primary") val isVariantPrimary: Boolean = false,
     // 家族里的其他版本（图库合并显示时隐藏）；仅 active 的非缩略图可能为真
     @ColumnInfo(name = "variant_hidden", defaultValue = "0") val variantHidden: Boolean = false,
     // 家族代表图（最大的那张）记录家族现存版本数（≥2 才记），其余为 0；variant_bytes 见类注释
@@ -76,99 +70,23 @@ data class ImageEntity(
     @ColumnInfo(name = "first_seen") val firstSeen: Long,
     @ColumnInfo(name = "last_seen") val lastSeen: Long,
 
-    // --- 图片元信息 ---
+    // --- 图片元信息（文件头） ---
     @ColumnInfo(name = "mime") val mime: String,
     @ColumnInfo(name = "width") val width: Int,
     @ColumnInfo(name = "height") val height: Int,
     @ColumnInfo(name = "is_animated") val isAnimated: Boolean = false,
-    @ColumnInfo(name = "is_corrupt") val isCorrupt: Boolean = false,
 
-    // --- Hash ---
-    @ColumnInfo(name = "xxhash") val xxhash: String? = null,
-    @ColumnInfo(name = "phash") val phash: Long? = null,
-    // 256bit 分块指纹（视觉去重精筛，要求局部逐格一致）。null = 尚未回填。
-    @ColumnInfo(name = "block_hash", typeAffinity = ColumnInfo.BLOB) val blockHash: ByteArray? = null,
-    // 32 字节特征网格（16 亮度 + 16 边缘密度）：区分深/浅背景与版式的判别特征。null = 尚未回填。
-    @ColumnInfo(name = "feature_grid", typeAffinity = ColumnInfo.BLOB) val featureGrid: ByteArray? = null,
-
-    // --- 质量评估 ---
-    @ColumnInfo(name = "blur_score") val blurScore: Float? = null,
-    @ColumnInfo(name = "is_blank") val isBlank: Boolean = false,
-
-    // --- 分析状态 ---
-    @ColumnInfo(name = "hash_done") val hashDone: Boolean = false,
-    @ColumnInfo(name = "ocr_done") val ocrDone: Boolean = false,
-    @ColumnInfo(name = "ai_done") val aiDone: Boolean = false,
-    @ColumnInfo(name = "embedding_done") val embeddingDone: Boolean = false,
-
-    // --- 评分 ---
-    @ColumnInfo(name = "info_score") val infoScore: Float = 0f,
-    @ColumnInfo(name = "delete_score") val deleteScore: Float = 0f,
-
-    // --- 重复组 ---
-    @ColumnInfo(name = "duplicate_group_id") val duplicateGroupId: Long? = null,
-    @ColumnInfo(name = "is_duplicate_best") val isDuplicateBest: Boolean = false,
-
-    // --- 用户操作状态 ---
+    // --- 状态 ---
     @ColumnInfo(name = "status") val status: String = "active",
     /** 已归档（列名沿用收藏时期的 is_protected） */
     @ColumnInfo(name = "is_protected") val isArchived: Boolean = false,
-    @ColumnInfo(name = "user_keep") val userKeep: Boolean? = null,
+    /** 原图压缩：0 未处理 / 1 已压缩 / 2 无需压缩（见 OriginalCompressor） */
+    @ColumnInfo(name = "optimized", defaultValue = "0") val optimized: Int = 0,
 
-    // 永久删除时间戳：仅三条永久删除路径标记 deleted 时写入，用于首页「今日已清理」统计；
+    // 永久删除时间戳：仅永久删除路径标记 deleted 时写入，用于首页「今日已清理」统计；
     // 功能上线前已删的历史行为 NULL，天然被任何「今日」窗口排除。
     @ColumnInfo(name = "deleted_at") val deletedAt: Long? = null,
-) {
-    // blockHash 是 ByteArray，data class 默认 equals/hashCode 会按引用比较它，导致内容相同的两个实例
-    // 不相等（污染 Compose 重组 / 集合去重）。故显式重写：blockHash 用 contentEquals，其余全字段比较，
-    // hashCode 取 id（满足「equals 相等 → hashCode 相等」契约）。范式同 ImageEmbeddingEntity。
-    // 注意：新增字段时需同步更新此 equals。
-    override fun equals(other: Any?): Boolean {
-        if (this === other) return true
-        if (other !is ImageEntity) return false
-        return id == other.id &&
-            path == other.path &&
-            filename == other.filename &&
-            parentDir == other.parentDir &&
-            sourceType == other.sourceType &&
-            cacheKey == other.cacheKey &&
-            variantGroup == other.variantGroup &&
-            isVariantPrimary == other.isVariantPrimary &&
-            variantHidden == other.variantHidden &&
-            variantCount == other.variantCount &&
-            variantBytes == other.variantBytes &&
-            size == other.size &&
-            mtime == other.mtime &&
-            dateBucket == other.dateBucket &&
-            firstSeen == other.firstSeen &&
-            lastSeen == other.lastSeen &&
-            mime == other.mime &&
-            width == other.width &&
-            height == other.height &&
-            isAnimated == other.isAnimated &&
-            isCorrupt == other.isCorrupt &&
-            xxhash == other.xxhash &&
-            phash == other.phash &&
-            (blockHash?.contentEquals(other.blockHash) ?: (other.blockHash == null)) &&
-            (featureGrid?.contentEquals(other.featureGrid) ?: (other.featureGrid == null)) &&
-            blurScore == other.blurScore &&
-            isBlank == other.isBlank &&
-            hashDone == other.hashDone &&
-            ocrDone == other.ocrDone &&
-            aiDone == other.aiDone &&
-            embeddingDone == other.embeddingDone &&
-            infoScore == other.infoScore &&
-            deleteScore == other.deleteScore &&
-            duplicateGroupId == other.duplicateGroupId &&
-            isDuplicateBest == other.isDuplicateBest &&
-            status == other.status &&
-            isArchived == other.isArchived &&
-            userKeep == other.userKeep &&
-            deletedAt == other.deletedAt
-    }
-
-    override fun hashCode(): Int = id.hashCode()
-}
+)
 
 /**
  * 由 mtime 计算本地日分桶键（year*1000 + dayOfYear）。

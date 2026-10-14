@@ -15,7 +15,6 @@ import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.db.entity.QuarantineEntity
 import com.xjw.qalbum.data.preferences.SettingsRepository
-import com.xjw.qalbum.data.repository.ImageRepository
 import com.xjw.qalbum.fileops.BoundFileOps
 import com.xjw.qalbum.fileops.FileOpsClient
 import com.xjw.qalbum.qq.QqSourceScope
@@ -57,7 +56,6 @@ class QuarantineManager(
     private val cleanupDao: CleanupDao,
     private val settings: SettingsRepository,
     private val fileOpsClient: FileOpsClient,
-    private val imageRepository: ImageRepository,
     private val archive: ArchiveManager,
 ) {
 
@@ -80,7 +78,7 @@ class QuarantineManager(
 
     /**
      * 删除确认弹窗用的事实（只查库，不碰文件，选得再多也很快）：所选图片自身大小、连同其他版本的大小、
-     * 有其他版本的张数、受保护（归档 / 保留）的张数、其他聊天也在用的张数，以及文件访问是否就绪。
+     * 有其他版本的张数、归档（受保护）的张数、其他聊天也在用的张数，以及文件访问是否就绪。
      * 「共用」与执行时的判断一致：不限范围时出现在不止一个会话 / 发送人里，限定来源时出现在范围之外。
      * 实际删除时仍逐组核对文件与关联（见 [PictureFamilyPlanner]）。[includeArchived] 为归档页删除：归档不算保护。
      */
@@ -91,7 +89,7 @@ class QuarantineManager(
                 .flatMap { imageDao.familyMemberSizes(it, includeArchived) }
             val familyIds = members.groupBy({ it.variantGroup }, { it.id })
             val sizes = members.associate { it.id to it.size } + rows.associate { it.id to it.size }
-            fun protected(row: ImageDao.DeleteFactRow) = row.isKept || (row.isArchived && !includeArchived)
+            fun protected(row: ImageDao.DeleteFactRow) = row.isArchived && !includeArchived
             val open = rows.filterNot(::protected)
             val sources = db.qqSourceDao()
             val sharedPaths = open.map { it.path }.chunked(PATH_CHUNK).flatMapTo(HashSet()) { page ->
@@ -163,7 +161,6 @@ class QuarantineManager(
     internal fun linkedOperations(bound: BoundFileOps, provider: FileAccessProvider): LinkedPictureOperations = LinkedPictureOperations(
         db,bound,rootDir,inFlight,
         thumbnail={ image -> generateThumbnail(bound,AtomicBoolean(true),provider,image) },
-        purgeDerived={ ids -> imageRepository.purgeDerivedData(ids) },
     )
 
     /** 把指定图片移到回收站（单张；批量走 [quarantineBatch]）。非 active 的图直接返回 false。 */
@@ -171,7 +168,7 @@ class QuarantineManager(
         quarantineBatch(listOf(imageId to reason)) == 1
 
     /**
-     * 批量移入回收站。每块先持久化 pending 日志并在同一事务重验归档/用户保留，再处理文件。
+     * 批量移入回收站。每块先持久化 pending 日志并在同一事务重验归档，再处理文件。
      * 文件成功后把日志转 ready、图片转 quarantined；失败项恢复 active。任何崩溃点都有日志可对账。
      */
     suspend fun quarantineBatch(
@@ -398,9 +395,6 @@ class QuarantineManager(
                         purged.map { it.imageId }.chunked(SQL_CHUNK).forEach { imageDao.markDeletedFromStatus(it, now, "quarantined") }
                         purged.map { it.id }.chunked(SQL_CHUNK).forEach { cleanupDao.deleteQuarantineByIds(it) }
                     }
-                    // 事务提交后级联清理派生数据（OCR/FTS/标签/向量/排斥）；幂等，
-                    // 与状态事务同处 NonCancellable 块，取消不会打断在两步之间
-                    imageRepository.purgeDerivedData(purged.map { it.imageId })
                 }
             }
         } finally {

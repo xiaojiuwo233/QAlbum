@@ -171,7 +171,7 @@ fun LogScreen(
         ConfirmDialog(
             icon = Icons.Outlined.DeleteSweep,
             title = "清空日志？",
-            text = "将删除已保存的全部日志（包括历史文件），无法恢复。",
+            text = "删除全部日志（含历史文件），无法恢复。",
             confirmLabel = "清空",
             destructive = true,
             onDismiss = { showClearDialog = false },

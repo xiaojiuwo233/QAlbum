@@ -44,7 +44,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
@@ -65,7 +64,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.xjw.qalbum.data.db.entity.ImageEntity
-import com.xjw.qalbum.data.db.entity.OcrTextEntity
 import com.xjw.qalbum.ui.common.formatTitleDate
 import com.xjw.qalbum.ui.common.imageMeta
 import com.xjw.qalbum.ui.detail.PhotoDetailsSheet
@@ -79,7 +77,7 @@ internal val ViewerChromeColor = Color(0xFF1E1F22).copy(alpha = 0.82f)
  * 全屏图片预览：左右滑动切换、双指 / 双击缩放（见 [ZoomableImage]），单击显隐浮层。
  * 与图库看图页手势一致：上滑查看详情、详情打开时下滑收起；未缩放时下滑可拖动关闭。
  * 顶部「关闭 + 时间 + 详情 + 保存 + 分享」；底部操作由调用方经 [bottomBar] 提供，
- * 放在胶囊形浮动操作栏里（审核页：归档 / 勾选 / 清理 / 保留；来源与标签页：归档 / 删除等）。
+ * 放在胶囊形浮动操作栏里（清理规则页：归档 / 压缩 / 移入回收站；聊天来源：归档 / 压缩 / 删除等）。
  *
  * 「详情」复用 [PhotoDetailsSheet]，从底部滑入；点详情卡以外任意处关闭。
  * [images] 是预览时的快照（调用方负责取已加载的有限集合；删除后传入新列表即可）。
@@ -95,7 +93,6 @@ internal fun FullScreenImagePager(
     exportSubdirs: List<String>,
     onCreateSubdir: (String) -> Unit,
     onSave: (id: Long, subdir: String?, alsoTrash: Boolean) -> Unit,
-    onLoadOcr: suspend (Long) -> OcrTextEntity?,
     variantsOf: (suspend (ImageEntity) -> List<ImageEntity>)? = null,
     refreshKey: Any? = null,
     bottomBar: @Composable (current: ImageEntity) -> Unit,
@@ -292,11 +289,7 @@ internal fun FullScreenImagePager(
                 }
             }
 
-            // 「查看详情」：复用图库详情卡（元数据 + OCR），从底部滑入
-            val ocr by produceState<OcrTextEntity?>(null, current.id, detailsVisible) {
-                value = null
-                value = if (detailsVisible) onLoadOcr(current.id) else null
-            }
+            // 「查看详情」：复用图库详情卡（文件信息 + QQ 来源），从底部滑入
             if (detailsVisible) {
                 Box(
                     modifier = Modifier
@@ -312,7 +305,7 @@ internal fun FullScreenImagePager(
                 exit = slideOutVertically(MaterialTheme.motionScheme.fastSpatialSpec()) { it } + fadeOut(fade),
                 modifier = Modifier.align(Alignment.BottomCenter),
             ) {
-                PhotoDetailsSheet(image = current, ocr = ocr, onClose = { detailsVisible = false })
+                PhotoDetailsSheet(image = current, onClose = { detailsVisible = false })
             }
 
             if (showSaveSheet) {

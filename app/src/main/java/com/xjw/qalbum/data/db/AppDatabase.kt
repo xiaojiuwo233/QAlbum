@@ -7,7 +7,8 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.xjw.qalbum.data.db.dao.CleanupDao
-import com.xjw.qalbum.data.db.dao.AiAnalysisDao
+import com.xjw.qalbum.data.db.dao.CleanupRuleDao
+import com.xjw.qalbum.data.db.dao.OriginalBackupDao
 import com.xjw.qalbum.data.db.dao.QqSourceDao
 import com.xjw.qalbum.data.db.entity.QqSourceAccountEntity
 import com.xjw.qalbum.data.db.entity.QqOriginEntity
@@ -17,46 +18,27 @@ import com.xjw.qalbum.data.db.entity.QqSourceFacetCacheEntity
 import com.xjw.qalbum.data.db.entity.QqSourceCacheEntity
 import com.xjw.qalbum.data.db.entity.QqImageContextEntity
 import com.xjw.qalbum.data.db.entity.QqSourceMemberEntity
-import com.xjw.qalbum.data.db.dao.DedupExclusionDao
 import com.xjw.qalbum.data.db.dao.DirSnapshotDao
-import com.xjw.qalbum.data.db.dao.EmbeddingDao
 import com.xjw.qalbum.data.db.dao.ImageDao
-import com.xjw.qalbum.data.db.dao.OcrDao
-import com.xjw.qalbum.data.db.dao.TagDao
-import com.xjw.qalbum.data.db.entity.CleanupBatchEntity
-import com.xjw.qalbum.data.db.entity.AiAnalysisEntity
-import com.xjw.qalbum.data.db.entity.CleanupCandidateEntity
-import com.xjw.qalbum.data.db.entity.DedupExclusionEntity
 import com.xjw.qalbum.data.db.entity.DirSnapshotEntity
-import com.xjw.qalbum.data.db.entity.ImageEmbeddingEntity
 import com.xjw.qalbum.data.db.entity.ImageEntity
-import com.xjw.qalbum.data.db.entity.ImageTagEntity
-import com.xjw.qalbum.data.db.entity.OcrFtsEntity
-import com.xjw.qalbum.data.db.entity.OcrTextEntity
+import com.xjw.qalbum.data.db.entity.OriginalBackupEntity
 import com.xjw.qalbum.data.db.entity.QuarantineEntity
-import com.xjw.qalbum.data.db.entity.TagEntity
 
 /**
  * QAlbum 主数据库
  *
- * - 版本管理：每次 schema 变更递增 version，并写显式 Migration —— 真机已有 200w 行数据，
+ * - 版本管理：每次 schema 变更递增 version，并写显式 Migration —— 真机已有几十万行数据，
  *   任何版本跳变都必须保数据，未覆盖的跳变宁可 fail-fast 抛异常也不允许静默清库。
- * - sqlite-vec 向量表（Phase 4）会通过 SQLite 扩展加载，不在 Room schema 中声明
+ * - v20 起只保存扫描得到的文件信息、归档、回收站、原图压缩记录与聊天来源；
+ *   OCR / AI / 标签 / 查重 / 审核相关的表已在 v19 → v20 删除。
  */
 @Database(
     entities = [
         ImageEntity::class,
-        OcrTextEntity::class,
-        OcrFtsEntity::class,
-        TagEntity::class,
-        ImageTagEntity::class,
-        CleanupBatchEntity::class,
-        CleanupCandidateEntity::class,
         QuarantineEntity::class,
-        ImageEmbeddingEntity::class,
+        OriginalBackupEntity::class,
         DirSnapshotEntity::class,
-        DedupExclusionEntity::class,
-        AiAnalysisEntity::class,
         QqSourceAccountEntity::class,
         QqOriginEntity::class,
         QqOriginPathEntity::class,
@@ -66,19 +48,16 @@ import com.xjw.qalbum.data.db.entity.TagEntity
         QqImageContextEntity::class,
         QqSourceMemberEntity::class,
     ],
-    version = 19,
+    version = AppDatabase.VERSION,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
 
     abstract fun imageDao(): ImageDao
-    abstract fun ocrDao(): OcrDao
-    abstract fun tagDao(): TagDao
     abstract fun cleanupDao(): CleanupDao
-    abstract fun embeddingDao(): EmbeddingDao
+    abstract fun originalBackupDao(): OriginalBackupDao
+    abstract fun cleanupRuleDao(): CleanupRuleDao
     abstract fun dirSnapshotDao(): DirSnapshotDao
-    abstract fun dedupExclusionDao(): DedupExclusionDao
-    abstract fun aiAnalysisDao(): AiAnalysisDao
     abstract fun qqSourceDao(): QqSourceDao
 
     companion object {
@@ -158,7 +137,125 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v19 → v20：清理改为按规则成批处理，删除 OCR / AI / 标签 / 查重 / 审核。
+         * 1. 「保留」（user_keep）转为归档（整张图），之后由 ArchiveManager.sync 按设置隐藏或显示；
+         * 2. 删除 OCR、AI 描述、向量、标签、查重排除、审核批次等表与分析失效触发器；
+         * 3. 重建 images：去掉哈希 / 画质 / 完成标记 / 评分 / 重复组 / 保留等列及其索引，新增 optimized。
+         *    先删掉所有引用 images 的触发器、换表后按原 SQL 重建（避免改名时校验到不存在的表）；
+         *    Room 迁移期间外键未开启，删旧表不会级联删掉来源关联；
+         * 4. 新增 original_backups（原图压缩记录）。
+         */
+        val MIGRATION_19_20 = object : Migration(19, 20) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                DatabaseUpgrade.report("把「保留」转为归档")
+                db.execSQL(
+                    """UPDATE images SET is_protected = 1
+                    WHERE is_protected = 0 AND status IN ('active', 'thumbnail_trash', 'missing', 'archived')
+                      AND (COALESCE(user_keep, 0) = 1 OR variant_group IN (
+                          SELECT variant_group FROM images WHERE COALESCE(user_keep, 0) = 1 AND variant_group IS NOT NULL))""",
+                )
+
+                DatabaseUpgrade.report("删除旧的分析数据（OCR、AI、标签）")
+                db.execSQL("DROP TRIGGER IF EXISTS invalidate_changed_image_analysis")
+                LEGACY_TABLES_V20.forEach { db.execSQL("DROP TABLE IF EXISTS `$it`") }
+
+                val triggers = db.query("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND sql LIKE '%images%'").use { c ->
+                    buildList { while (c.moveToNext()) add(c.getString(0) to c.getString(1)) }
+                }
+                triggers.forEach { (name, _) -> db.execSQL("DROP TRIGGER IF EXISTS `$name`") }
+                // AUTOINCREMENT 序号随旧表一起删掉：记下来，换表后补回，id 不会被重复使用
+                val sequence = db.query("SELECT seq FROM sqlite_sequence WHERE name = 'images'").use { c ->
+                    if (c.moveToFirst()) c.getLong(0) else 0L
+                }
+                db.execSQL(IMAGES_V20.replace("CREATE TABLE IF NOT EXISTS `images`", "CREATE TABLE `images_new`"))
+                copyImagesV20(db)
+                db.execSQL("DROP TABLE images")
+                db.execSQL("ALTER TABLE images_new RENAME TO images")
+                db.execSQL("UPDATE sqlite_sequence SET seq = MAX(seq, $sequence) WHERE name = 'images'")
+                db.execSQL("INSERT INTO sqlite_sequence(name, seq) SELECT 'images', $sequence WHERE $sequence > 0 AND NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = 'images')")
+                IMAGE_INDEXES_V20.forEachIndexed { index, sql ->
+                    DatabaseUpgrade.report("重建索引", index.toLong(), IMAGE_INDEXES_V20.size.toLong())
+                    db.execSQL(sql)
+                }
+                DatabaseUpgrade.report("恢复触发器")
+                triggers.forEach { (_, sql) -> db.execSQL(sql) }
+
+                db.execSQL(ORIGINAL_BACKUPS_V20)
+                ORIGINAL_BACKUP_INDEXES_V20.forEach(db::execSQL)
+            }
+        }
+
+        /** 按 id 分段把旧表复制到新表，每段报告一次进度（几十万行要十几秒） */
+        private fun copyImagesV20(db: SupportSQLiteDatabase) {
+            val (total, maxId) = db.query("SELECT COUNT(*), COALESCE(MAX(id), 0) FROM images").use { c ->
+                c.moveToFirst()
+                c.getLong(0) to c.getLong(1)
+            }
+            DatabaseUpgrade.report("整理图片索引", 0, total)
+            var copied = 0L
+            var from = 0L
+            while (from < maxId) {
+                val until = from + COPY_CHUNK
+                db.execSQL("INSERT INTO images_new ($IMAGE_COLUMNS_V20) SELECT $IMAGE_COLUMNS_V20 FROM images WHERE id > $from AND id <= $until")
+                copied += db.query("SELECT changes()").use { c -> if (c.moveToFirst()) c.getLong(0) else 0L }
+                DatabaseUpgrade.report("整理图片索引", copied.coerceAtMost(total), total)
+                from = until
+            }
+        }
+
+        private const val COPY_CHUNK = 20_000L
+
+        /** v20 → v21：压缩记录增加压缩质量（之前的压缩固定为 85） */
+        val MIGRATION_20_21 = object : Migration(20, 21) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE original_backups ADD COLUMN quality INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("UPDATE original_backups SET quality = 85")
+            }
+        }
+
+        /** v21 → v22：压缩记录增加压缩前的格式（PNG 压缩后是 JPEG，还原时改回来；以前的记录都是 JPEG） */
+        val MIGRATION_21_22 = object : Migration(21, 22) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE original_backups ADD COLUMN original_mime TEXT")
+            }
+        }
+
+        private val LEGACY_TABLES_V20 = listOf(
+            "ocr_fts", "ocr_text", "image_tags", "tags", "ai_analysis", "image_embeddings",
+            "dedup_exclusions", "cleanup_candidates", "cleanup_batches",
+        )
+
+        /** v20 的 images 列（不含新增的 optimized，由默认值补上） */
+        private const val IMAGE_COLUMNS_V20 =
+            "id, path, filename, parent_dir, source_type, cache_key, variant_group, variant_hidden, variant_count, " +
+                "variant_bytes, size, mtime, date_bucket, first_seen, last_seen, mime, width, height, is_animated, " +
+                "status, is_protected, deleted_at"
+
+        // 与 Room 导出的 schemas/20.json 一致（迁移后 Room 会逐表校验列、索引）
+        private const val IMAGES_V20 =
+            "CREATE TABLE IF NOT EXISTS `images` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `path` TEXT NOT NULL, `filename` TEXT NOT NULL, `parent_dir` TEXT NOT NULL, `source_type` TEXT NOT NULL, `cache_key` TEXT NOT NULL, `variant_group` INTEGER, `variant_hidden` INTEGER NOT NULL DEFAULT 0, `variant_count` INTEGER NOT NULL DEFAULT 0, `variant_bytes` INTEGER NOT NULL DEFAULT 0, `size` INTEGER NOT NULL, `mtime` INTEGER NOT NULL, `date_bucket` INTEGER NOT NULL DEFAULT 0, `first_seen` INTEGER NOT NULL, `last_seen` INTEGER NOT NULL, `mime` TEXT NOT NULL, `width` INTEGER NOT NULL, `height` INTEGER NOT NULL, `is_animated` INTEGER NOT NULL, `status` TEXT NOT NULL, `is_protected` INTEGER NOT NULL, `optimized` INTEGER NOT NULL DEFAULT 0, `deleted_at` INTEGER)"
+        private val IMAGE_INDEXES_V20 = listOf(
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_images_path` ON `images` (`path`)",
+            "CREATE INDEX IF NOT EXISTS `index_images_variant_group` ON `images` (`variant_group`)",
+            "CREATE INDEX IF NOT EXISTS `index_images_variant_bytes` ON `images` (`variant_bytes`)",
+            "CREATE INDEX IF NOT EXISTS `index_images_status` ON `images` (`status`)",
+            "CREATE INDEX IF NOT EXISTS `index_images_mtime` ON `images` (`mtime`)",
+            "CREATE INDEX IF NOT EXISTS `index_images_size` ON `images` (`size`)",
+            "CREATE INDEX IF NOT EXISTS `index_images_status_source_type_date_bucket_is_protected_variant_hidden` ON `images` (`status`, `source_type`, `date_bucket`, `is_protected`, `variant_hidden`)",
+            "CREATE INDEX IF NOT EXISTS `index_images_status_source_type_mtime_variant_hidden` ON `images` (`status`, `source_type`, `mtime`, `variant_hidden`)",
+        )
+        private const val ORIGINAL_BACKUPS_V20 =
+            "CREATE TABLE IF NOT EXISTS `original_backups` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `image_id` INTEGER NOT NULL, `path` TEXT NOT NULL, `backup_path` TEXT, `original_size` INTEGER NOT NULL, `original_mtime` INTEGER NOT NULL, `original_width` INTEGER NOT NULL, `original_height` INTEGER NOT NULL, `compressed_size` INTEGER NOT NULL, `compressed_width` INTEGER NOT NULL, `compressed_height` INTEGER NOT NULL, `created_at` INTEGER NOT NULL, `expires_at` INTEGER NOT NULL, `state` TEXT NOT NULL)"
+        private val ORIGINAL_BACKUP_INDEXES_V20 = listOf(
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_original_backups_image_id` ON `original_backups` (`image_id`)",
+            "CREATE INDEX IF NOT EXISTS `index_original_backups_state` ON `original_backups` (`state`)",
+        )
+
         const val DB_NAME = "qalbum.db"
+
+        /** 当前数据库版本（启动时据此判断要不要显示升级进度） */
+        const val VERSION = 22
 
         /** v1 → v2：Phase 3 增加 Room FTS4 OCR 索引。 */
         val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -304,9 +401,7 @@ abstract class AppDatabase : RoomDatabase() {
          *    按 active/用户状态/分析完整度选择 survivor，并合并 OCR、标签、向量、清理候选和排斥关系。
          * 3. 新增 (status, source_type, date_bucket, is_protected) 与 (status, source_type, mtime)
          *    覆盖索引：分桶计数与时间线 rank/窗口查询只扫索引条目，不做 200w 次行回表。
-         * 4. 重建 ocr_fts 内容：simple 分词器无法切分中文（整行中文成单个巨型 token，前缀查询
-         *    永远命中不了行中位置的词），从 ocr_text 原文经 FtsTokenize 逐字切分后重灌。
-         *    游标流式逐行读写（不整表装载进内存），行数 = 已 OCR 图数。
+         * 4. 清空 ocr_fts（原为按中文逐字切分后重灌；OCR 已在 v20 删除，这里不再重建）。
          * 5. 删除零读写方的死表 user_actions / matched_messages（对应实体与 DAO 一并移除）。
          */
         val MIGRATION_9_10 = object : Migration(9, 10) {
@@ -337,20 +432,8 @@ abstract class AppDatabase : RoomDatabase() {
                         "ON `images` (`status`, `source_type`, `mtime`)"
                 )
 
-                // 4. 重建 ocr_fts：游标流式重灌（空文本跳过，本就命中不了任何查询）
+                // 4. OCR 索引在 v20 整体删除，旧内容不再重建
                 db.execSQL("DELETE FROM ocr_fts")
-                val insert = db.compileStatement("INSERT INTO ocr_fts(rowid, text) VALUES (?, ?)")
-                db.query("SELECT image_id, text FROM ocr_text").use { cursor ->
-                    while (cursor.moveToNext()) {
-                        val text = cursor.getString(1)
-                        if (text.isNullOrBlank()) continue
-                        insert.bindLong(1, cursor.getLong(0))
-                        insert.bindString(2, FtsTokenize.tokenizeCjkForIndex(text))
-                        insert.executeInsert()
-                        insert.clearBindings()
-                    }
-                }
-                db.execSQL("INSERT INTO ocr_fts(ocr_fts) VALUES('optimize')")
 
                 // 5. 死表清理
                 db.execSQL("DROP TABLE IF EXISTS `user_actions`")
@@ -699,11 +782,26 @@ abstract class AppDatabase : RoomDatabase() {
         /** 新建数据库时补上 Room 不负责的触发器（升级路径由各 Migration 建立同一套） */
         val creationCallback = object : Callback() {
             override fun onCreate(db: SupportSQLiteDatabase) {
-                createAnalysisInvalidationTrigger(db)
                 createQqSourceTriggers(db)
                 db.execSQL(QqSourceStatsSql.ENSURE_CACHE_ROW)
                 QqSourceStatsSql.createTriggers(db)
                 ImageVariantSql.createTriggers(db)
+            }
+        }
+
+        /** 全部迁移，按版本顺序 */
+        fun allMigrations(): List<Migration> = listOf(
+            MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8,
+            MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14,
+            MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20,
+            MIGRATION_20_21, MIGRATION_21_22,
+        )
+
+        /** 每个迁移开始时报告升级到哪一版（升级弹窗里显示），具体步骤由迁移自己细报 */
+        private fun reporting(migration: Migration): Migration = object : Migration(migration.startVersion, migration.endVersion) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                DatabaseUpgrade.report("升级数据库（$startVersion → $endVersion）")
+                migration.migrate(db)
             }
         }
 
@@ -713,26 +811,7 @@ abstract class AppDatabase : RoomDatabase() {
                 AppDatabase::class.java,
                 DB_NAME,
             )
-                .addMigrations(
-                    MIGRATION_1_2,
-                    MIGRATION_2_3,
-                    MIGRATION_3_4,
-                    MIGRATION_4_5,
-                    MIGRATION_5_6,
-                    MIGRATION_6_7,
-                    MIGRATION_7_8,
-                    MIGRATION_8_9,
-                    MIGRATION_9_10,
-                    MIGRATION_10_11,
-                    MIGRATION_11_12,
-                    MIGRATION_12_13,
-                    MIGRATION_13_14,
-                    MIGRATION_14_15,
-                    MIGRATION_15_16,
-                    MIGRATION_16_17,
-                    MIGRATION_17_18,
-                    MIGRATION_18_19,
-                )
+                .addMigrations(*allMigrations().map(::reporting).toTypedArray())
                 .addCallback(creationCallback)
                 // 刻意不配置任何 destructive 回退：未覆盖的版本跳变（含降级）宁可 fail-fast
                 // 抛异常，也不允许静默清掉 200w 行索引与「已清理」统计（quarantine 被清后

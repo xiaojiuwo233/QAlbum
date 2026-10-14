@@ -115,7 +115,7 @@ fun SaveToAlbumSheet(
                 SegmentedSwitchItem(
                     position = SegmentPosition.Single,
                     title = "保存后移入回收站",
-                    subtitle = "只对保存成功的图片生效，保留期内可在回收站恢复",
+                    subtitle = "只处理保存成功的，可在回收站恢复",
                     checked = alsoTrash,
                     onCheckedChange = { alsoTrash = it },
                 )

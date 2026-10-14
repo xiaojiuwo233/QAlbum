@@ -27,11 +27,11 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Archive
 import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.Compress
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material.icons.outlined.PhotoLibrary
-import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.Unarchive
 import androidx.compose.material3.FilterChip
@@ -70,6 +70,7 @@ import androidx.paging.compose.LazyPagingItems
 import androidx.paging.compose.collectAsLazyPagingItems
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.domain.model.GallerySort
+import com.xjw.qalbum.service.cleanup.CompressionCoordinator
 import com.xjw.qalbum.ui.anim.sharedContainer
 import com.xjw.qalbum.ui.cleanup.PurgeProgressDialog
 import com.xjw.qalbum.ui.common.deleteResultText
@@ -87,6 +88,7 @@ import com.xjw.qalbum.ui.components.SelectionTopBar
 import com.xjw.qalbum.ui.components.ToolbarIconAction
 import com.xjw.qalbum.ui.components.ToolbarPrimaryAction
 import org.koin.androidx.compose.koinViewModel
+import org.koin.compose.koinInject
 
 /** 多选集合的 Saver：让 selectedIds 与弹窗开关一样经 rememberSaveable 恢复，二者成对存亡 */
 private val SelectedIdsSaver = listSaver<Set<Long>, Long>(
@@ -98,7 +100,6 @@ private val SelectedIdsSaver = listSaver<Set<Long>, Long>(
 fun GalleryScreen(
     contentPadding: PaddingValues,
     onImageClick: (Long) -> Unit = {},
-    onOpenSearch: () -> Unit = {},
     onOpenArchive: () -> Unit = {},
     onOpenSources: () -> Unit = {},
     onSelectionModeChange: (Boolean) -> Unit = {},
@@ -114,7 +115,6 @@ fun GalleryScreen(
     val sort by viewModel.gallerySort.collectAsState()
     val largeThreshold by viewModel.largeThresholdBytes.collectAsState()
     val stackVariants by viewModel.stackVariants.collectAsState()
-    val enabledPhases by viewModel.enabledPhases.collectAsState()
     val directory by viewModel.timelineDirectory.collectAsState()
     val fastScroll by viewModel.fastScroll.collectAsState()
     val deleteProgress by viewModel.deleteProgress.collectAsState()
@@ -135,6 +135,7 @@ fun GalleryScreen(
     var showPrefsSheet by rememberSaveable { mutableStateOf(false) }
     var showSaveSheet by rememberSaveable { mutableStateOf(false) }
     val exportSubdirs by viewModel.exportSubdirs.collectAsState()
+    val compression = koinInject<CompressionCoordinator>()
     val selectionMode = selectedIds.isNotEmpty()
     val clearSelection = { selectedIds = emptySet() }
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
@@ -163,11 +164,6 @@ fun GalleryScreen(
                         subtitle = { Text("${sort.label} · 每行 $columns 张") },
                         actions = {
                             IconButton(
-                                onClick = onOpenSearch,
-                                shapes = IconButtonDefaults.shapes(),
-                                modifier = Modifier.sharedContainer("search-bar", sharedScope, animatedScope),
-                            ) { Icon(Icons.Outlined.Search, contentDescription = "搜索") }
-                            IconButton(
                                 onClick = onOpenArchive,
                                 shapes = IconButtonDefaults.shapes(),
                                 modifier = Modifier.sharedContainer("archive-bar", sharedScope, animatedScope),
@@ -193,7 +189,7 @@ fun GalleryScreen(
                 items.itemCount == 0 -> EmptyState(
                     icon = Icons.Outlined.PhotoLibrary,
                     title = "还没有图片",
-                    message = "到「概览」点击「全量扫描」，QAlbum 会把 QQ 聊天图片目录索引进来。",
+                    message = "到「概览」点「全量扫描」导入 QQ 聊天图片",
                     modifier = Modifier.padding(bottom = contentPadding.calculateBottomPadding()),
                 )
                 else -> RefreshableGrid(items = items) {
@@ -207,7 +203,7 @@ fun GalleryScreen(
                         onColumnsChange = viewModel::setColumns,
                         minColumns = SettingsRepository.MIN_GALLERY_COLUMNS,
                         maxColumns = SettingsRepository.MAX_GALLERY_COLUMNS,
-                        badges = PhotoBadges(largeThresholdBytes = largeThreshold, analyzedPhases = enabledPhases, stack = stackVariants),
+                        badges = PhotoBadges(largeThresholdBytes = largeThreshold, stack = stackVariants),
                         sectionIds = viewModel::sectionIds,
                         directory = directory,
                         fastScroll = fastScroll,
@@ -226,6 +222,10 @@ fun GalleryScreen(
                         clearSelection()
                         items.refresh()
                     }
+                })
+                ToolbarIconAction(Icons.Outlined.Compress, "压缩", onClick = {
+                    compression.start(selectedIds)
+                    clearSelection()
                 })
                 ToolbarIconAction(Icons.Outlined.Download, "保存到相册", onClick = { showSaveSheet = true })
                 ToolbarPrimaryAction(Icons.Outlined.Delete, "删除", onClick = { showDeleteConfirm = true })
@@ -351,6 +351,7 @@ fun ArchiveScreen(
     var showSaveSheet by rememberSaveable { mutableStateOf(false) }
     var showDeleteConfirm by rememberSaveable { mutableStateOf(false) }
     val exportSubdirs by viewModel.exportSubdirs.collectAsState()
+    val compression = koinInject<CompressionCoordinator>()
     val selectionMode = selectedIds.isNotEmpty()
     val clearSelection = { selectedIds = emptySet() }
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
@@ -389,8 +390,7 @@ fun ArchiveScreen(
                 items.itemCount == 0 -> EmptyState(
                     icon = Icons.Outlined.Archive,
                     title = "还没有归档的图片",
-                    message = "在图库、聊天来源或看图页点「归档」，同一张图的原图、预览图和缩略图会一起归档：不会被任何清理删除，" +
-                        "默认也不再在图库和聊天来源中显示（可在「设置 → 外观与导出」调整）。在聊天来源里还能把一个人或一个群的图片整体归档。",
+                    message = "归档的图不会被清理，默认也不在图库里显示。在图库、看图页或聊天来源里点「归档」即可。",
                 )
                 else -> PhotoGrid(
                     items = items,
@@ -419,6 +419,10 @@ fun ArchiveScreen(
                         clearSelection()
                         items.refresh()
                     }
+                })
+                ToolbarIconAction(Icons.Outlined.Compress, "压缩", onClick = {
+                    compression.start(selectedIds)
+                    clearSelection()
                 })
                 ToolbarIconAction(Icons.Outlined.Download, "保存到相册", onClick = { showSaveSheet = true })
                 ToolbarPrimaryAction(Icons.Outlined.Delete, "删除", onClick = { showDeleteConfirm = true })

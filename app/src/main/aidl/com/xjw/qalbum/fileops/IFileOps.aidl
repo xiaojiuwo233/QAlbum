@@ -50,4 +50,19 @@ interface IFileOps {
     // 同一特权调用内核验状态后移动/删除。状态变化、符号链接、已有目标均拒绝。
     boolean[] moveFilesChecked(in String[] sources, in String[] targets, in String[] stamps) = 10;
     boolean[] deleteFilesChecked(in String[] paths, in String[] stamps) = 11;
+
+    // 批量读图片宽高：只解析文件头（不解码），每个路径两个 int（宽、高），读不到为 0。
+    int[] readImageInfo(in String[] paths) = 12;
+    // 原图压缩替换：核对 target 的 stamp → backup 非空时先把原图独占复制过去（不覆盖已有文件）
+    // → content 写成同目录临时文件并把修改时间设为 mtimeMs → 再核对一次 → 原子改名替换 target。
+    // 返回 0 成功；1 状态已变化；2 路径不允许；3 读写失败。
+    int replaceFileChecked(String target, in ParcelFileDescriptor content, String backup, String stamp, long mtimeMs) = 13;
+    // 还原原图：stamp 非空时核对 target（压缩后的文件），为空时要求 target 不存在；
+    // 把 backup 复制成同目录临时文件、设修改时间后原子替换 target，成功后删除 backup。返回码同上，4 = 备份不存在。
+    int restoreFileChecked(String backup, String target, String stamp, long mtimeMs) = 14;
+    // 从回收站送回：target 必须不存在；content 写成同目录临时文件，属主与权限跟所在目录一致（QQ 才读得到），
+    // 修改时间设为 mtimeMs，再改名成 target（期间 target 被占用则放弃）。返回码同上。
+    int writeFileChecked(String target, in ParcelFileDescriptor content, long mtimeMs) = 15;
+    // 修正属主：与所在目录属主不同的文件改成目录的属主，改不了就放开读写。每个路径 0 无需修改、1 已修正、2 失败。
+    int[] repairOwnership(in String[] paths) = 16;
 }

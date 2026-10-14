@@ -6,7 +6,6 @@
     <!-- 底部导航 -->
     <string name="nav_dashboard">概览</string>
     <string name="nav_gallery">图库</string>
-    <string name="nav_search">搜索</string>
     <string name="nav_cleanup">清理</string>
     <string name="nav_settings">设置</string>
 

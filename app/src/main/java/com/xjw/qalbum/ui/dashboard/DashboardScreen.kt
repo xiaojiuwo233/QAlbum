@@ -23,7 +23,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -34,12 +33,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Archive
-import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.CleaningServices
 import androidx.compose.material.icons.outlined.DataUsage
 import androidx.compose.material.icons.outlined.Forum
-import androidx.compose.material.icons.outlined.HealthAndSafety
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Inventory2
 import androidx.compose.material.icons.outlined.RocketLaunch
@@ -50,7 +46,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularWavyProgressIndicator
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LargeFlexibleTopAppBar
@@ -60,7 +55,6 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.material3.WavyProgressIndicatorDefaults
 import androidx.compose.material3.toShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -82,13 +76,10 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.domain.model.ScanProgress
-import com.xjw.qalbum.service.analysis.AnalysisProgress
-import com.xjw.qalbum.service.analysis.AnalysisState
 import com.xjw.qalbum.ui.anim.StaggeredEntrance
 import com.xjw.qalbum.ui.common.formatBytes
 import com.xjw.qalbum.ui.common.formatCount
@@ -108,8 +99,6 @@ fun DashboardScreen(
     val state by viewModel.uiState.collectAsState()
     val running by viewModel.scanRunning.collectAsState()
     val progress by viewModel.scanProgress.collectAsState()
-    val analysisState by viewModel.analysisState.collectAsState()
-    val analysisRunning by viewModel.analysisRunningProgress.collectAsState()
     val cleanedStats by viewModel.cleanedStats.collectAsState()
     val todayCleanedStats by viewModel.todayCleanedStats.collectAsState()
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
@@ -157,7 +146,7 @@ fun DashboardScreen(
                     position = SegmentPosition.Single,
                     icon = Icons.Outlined.Forum,
                     title = "按聊天来源浏览",
-                    subtitle = "按群聊、私聊、发送人查看图片与占用空间",
+                    subtitle = "按群聊、私聊和发送人查看图片",
                     onClick = onOpenSources,
                     iconContainerColor = MaterialTheme.colorScheme.tertiaryContainer,
                     iconContentColor = MaterialTheme.colorScheme.onTertiaryContainer,
@@ -172,15 +161,7 @@ fun DashboardScreen(
                     onCancel = viewModel::cancelScan,
                 )
             }
-            StaggeredEntrance(index++) { StorageBreakdownCard(state.breakdown, state.totalSizeBytes) }
-            StaggeredEntrance(index++) {
-                AnalysisPipelineCard(
-                    progress = state.analysisProgress,
-                    analysisState = analysisState,
-                    running = analysisRunning,
-                )
-            }
-            StaggeredEntrance(index) { ImageHealthCard(state) }
+            StaggeredEntrance(index) { StorageBreakdownCard(state.breakdown, state.totalSizeBytes) }
         }
     }
 }
@@ -529,145 +510,6 @@ private fun LegendItem(color: Color, label: String, value: String, percentage: F
     }
 }
 
-// ── 分析流水线 ───────────────────────────────────────────────────────
-
-@Composable
-private fun AnalysisPipelineCard(
-    progress: ImageDao.AnalysisProgressRow,
-    analysisState: AnalysisState,
-    running: AnalysisProgress?,
-) {
-    val totalImages = progress.totalImages.coerceAtLeast(1)
-    DashboardCard(title = "分析进度", icon = Icons.Outlined.AutoAwesome) {
-        AnimatedVisibility(
-            visible = analysisState == AnalysisState.Running,
-            enter = expandVertically() + fadeIn(),
-            exit = shrinkVertically() + fadeOut(),
-        ) {
-            Column(Modifier.padding(bottom = 16.dp)) {
-                val phaseLabel = running?.phase?.displayName ?: "准备中"
-                Text(
-                    when {
-                        running == null -> "准备中…"
-                        running.total > 0 -> "正在$phaseLabel · ${running.processed}/${running.total}"
-                        else -> "正在$phaseLabel…${running.msg?.let { " $it" } ?: ""}"
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-                Spacer(Modifier.height(8.dp))
-                WavyProgress(fraction = running?.takeIf { it.total > 0 }?.let { it.processed.toFloat() / it.total })
-            }
-        }
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-            val moving = analysisState == AnalysisState.Running
-            PipelineRing("哈希", progress.hashDone, totalImages, MaterialTheme.colorScheme.primary, 0, moving)
-            PipelineRing("文字识别", progress.ocrDone, totalImages, MaterialTheme.colorScheme.tertiary, 1, moving)
-            PipelineRing("AI 标签", progress.aiDone, totalImages, MaterialTheme.colorScheme.secondary, 2, moving)
-            PipelineRing("向量", progress.embeddingDone, totalImages, MaterialTheme.colorScheme.error, 3, moving)
-        }
-    }
-}
-
-@Composable
-private fun PipelineRing(label: String, done: Int, total: Int, color: Color, delayIndex: Int, moving: Boolean) {
-    val fraction = if (total > 0) done.toFloat() / total else 0f
-    val animatedFraction by animateFloatAsState(
-        targetValue = fraction,
-        animationSpec = tween(durationMillis = 800, delayMillis = delayIndex * 100, easing = FastOutSlowInEasing),
-        label = "ring-$label",
-    )
-    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.width(76.dp)) {
-        Box(modifier = Modifier.size(60.dp), contentAlignment = Alignment.Center) {
-            CircularWavyProgressIndicator(
-                progress = { animatedFraction },
-                color = color,
-                trackColor = color.copy(alpha = 0.16f),
-                modifier = Modifier.fillMaxSize(),
-                // 只在分析进行时流动：常驻概览页的逐帧动画会让页面一直重绘
-                waveSpeed = if (moving) WavyProgressIndicatorDefaults.CircularWavelength else 0.dp,
-            )
-            Text(
-                text = "${(fraction * 100).toInt()}%",
-                style = MaterialTheme.typography.labelMediumEmphasized,
-                color = color,
-            )
-        }
-        Spacer(Modifier.height(6.dp))
-        Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurface)
-        Text(
-            "${compactCount(done)}/${compactCount(total)}",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-        )
-    }
-}
-
-// ── 文件概况 ─────────────────────────────────────────────────────────
-
-@Composable
-private fun ImageHealthCard(state: DashboardUiState) {
-    val total = state.imageCount.coerceAtLeast(1)
-    val health = state.health
-    val normalCount = (state.imageCount - health.corrupt - health.blank - health.animated).coerceAtLeast(0)
-    DashboardCard(
-        title = "文件概况",
-        icon = Icons.Outlined.HealthAndSafety,
-        trailing = {
-            if (health.archivedCount > 0) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Outlined.Archive, contentDescription = null, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.tertiary)
-                    Spacer(Modifier.width(4.dp))
-                    Text("${health.archivedCount} 已归档", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.tertiary)
-                }
-            }
-        },
-    ) {
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            HealthBarRow("正常", normalCount, normalCount.toFloat() / total, MaterialTheme.colorScheme.primary)
-            if (health.animated > 0) HealthBarRow("动图", health.animated, health.animated.toFloat() / total, MaterialTheme.colorScheme.tertiary)
-            if (health.blank > 0) HealthBarRow("空白", health.blank, health.blank.toFloat() / total, MaterialTheme.colorScheme.secondary)
-            if (health.corrupt > 0) HealthBarRow("损坏", health.corrupt, health.corrupt.toFloat() / total, MaterialTheme.colorScheme.error)
-        }
-    }
-}
-
-@Composable
-private fun HealthBarRow(label: String, count: Int, fraction: Float, color: Color) {
-    val animatedFraction by animateFloatAsState(
-        targetValue = fraction.coerceIn(0f, 1f),
-        animationSpec = tween(800, easing = FastOutSlowInEasing),
-        label = "bar-$label",
-    )
-    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Text(text = label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.width(44.dp))
-        Spacer(Modifier.width(8.dp))
-        Box(
-            modifier = Modifier
-                .weight(1f)
-                .height(12.dp)
-                .clip(CircleShape)
-                .background(color.copy(alpha = 0.14f)),
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxHeight()
-                    .fillMaxWidth(animatedFraction)
-                    .clip(CircleShape)
-                    .background(color),
-            )
-        }
-        Spacer(Modifier.width(8.dp))
-        Text(
-            text = formatCount(count),
-            style = MaterialTheme.typography.labelLarge,
-            modifier = Modifier.width(52.dp),
-            textAlign = TextAlign.End,
-        )
-    }
-}
-
 // ── 扫描 ─────────────────────────────────────────────────────────────
 
 @Composable
@@ -682,7 +524,7 @@ private fun ScanCard(
         Text(
             when {
                 running || progress != null -> statusText(running, progress)
-                else -> "增量扫描只比对有变化的目录，通常几秒完成；全量扫描会重新核对全部目录并检测已删除的文件。"
+                else -> "增量扫描只看有变化的目录，几秒完成；全量扫描核对全部文件，能发现已删除的。"
             },
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,

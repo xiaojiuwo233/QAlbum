@@ -34,6 +34,7 @@ import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.Archive
+import androidx.compose.material.icons.outlined.Compress
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.CleaningServices
 import androidx.compose.material.icons.outlined.Close
@@ -95,6 +96,8 @@ import com.xjw.qalbum.data.db.dao.QqArchiveCounts
 import com.xjw.qalbum.data.db.dao.QqContent
 import com.xjw.qalbum.data.db.dao.QqSourceFacet
 import com.xjw.qalbum.data.db.entity.ImageEntity
+import com.xjw.qalbum.service.cleanup.CompressionCoordinator
+import com.xjw.qalbum.service.cleanup.OriginalCompressor
 import com.xjw.qalbum.service.cleanup.PictureDeleteOptions
 import com.xjw.qalbum.ui.cleanup.PurgeProgressDialog
 import com.xjw.qalbum.ui.cleanup.shareChooser
@@ -122,6 +125,7 @@ import com.xjw.qalbum.ui.gallery.GalleryTimelineItem
 import com.xjw.qalbum.ui.gallery.archivedText
 import kotlinx.coroutines.launch
 import org.koin.androidx.compose.koinViewModel
+import org.koin.compose.koinInject
 import org.koin.core.parameter.parametersOf
 
 private val SelectedIdsSaver = listSaver<Set<Long>, Long>(save = { it.toList() }, restore = { it.toSet() })
@@ -178,6 +182,8 @@ fun QqSourceBrowseScreen(
     var showFilterSheet by rememberSaveable { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
     var preview by remember { mutableStateOf<SourcePreview?>(null) }
+    val compression = koinInject<CompressionCoordinator>()
+    val compressor = koinInject<OriginalCompressor>()
     val selectionMode = selectedIds.isNotEmpty()
     val clearSelection = { selectedIds = emptySet() }
     // 只删缩略图时默认不连带原图 / 预览图；删图片时默认整组处理
@@ -197,6 +203,14 @@ fun QqSourceBrowseScreen(
     }
     // 换内容后旧的选择不再对应当前网格
     LaunchedEffect(content) { clearSelection() }
+    // 看图时压缩了：快照里换成新的大小与压缩状态
+    LaunchedEffect(compressor) {
+        compressor.changes.collect { ids ->
+            val current = preview ?: return@collect
+            val refreshed = current.images.map { image -> if (image.id in ids) viewModel.entity(image.id) ?: image else image }
+            preview = preview?.copy(images = refreshed)
+        }
+    }
     // 换筛选 / 内容 / 排序 / 合并方式后回到顶部（网格带占位、知道总数，不回顶会停在新列表的中间）；旋转屏幕不算
     val browseKey = "${filter?.id}/$content/$sort/$stacked"
     var shownKey by rememberSaveable { mutableStateOf(browseKey) }
@@ -402,6 +416,10 @@ fun QqSourceBrowseScreen(
                         items.refresh()
                     }
                 })
+                ToolbarIconAction(Icons.Outlined.Compress, "压缩", onClick = {
+                    compression.start(selectedIds)
+                    clearSelection()
+                })
                 ToolbarIconAction(Icons.Outlined.Download, "保存到相册", onClick = { showSave = true })
                 ToolbarPrimaryAction(Icons.Outlined.Delete, "删除", onClick = { showDelete = true })
             }
@@ -503,7 +521,6 @@ fun QqSourceBrowseScreen(
                     }
                 }
             },
-            onLoadOcr = viewModel::ocr,
             bottomBar = { image ->
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                     PreviewAction(
@@ -526,6 +543,7 @@ fun QqSourceBrowseScreen(
                             }
                         },
                     )
+                    PreviewAction(icon = Icons.Outlined.Compress, label = "压缩", onClick = { compression.start(listOf(image.id)) })
                     PreviewAction(
                         icon = Icons.Outlined.Delete,
                         label = "删除",
@@ -810,8 +828,8 @@ private fun ScopeArchiveDialog(
                     if (counts.shared > 0) InfoLine("其中 ${formatCountExact(counts.shared)} 张其他聊天也在用，一并归档")
                 }
                 Text(
-                    "同一张图的原图、预览图和缩略图一起归档，之后任何清理都不会删除它们" +
-                        if (hidden) "；归档后只在「图库 → 归档」里显示。" else "。",
+                    "原图、预览图、缩略图一起归档，不会被清理" +
+                        if (hidden) "，之后只在「图库 → 归档」里显示。" else "。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 4.dp),
@@ -863,12 +881,12 @@ private fun ScopeTrashDialog(
                 }
                 OptionRow(
                     checked = request.includeShared,
-                    label = "也清理与其他会话 / 发送人共用的图片",
+                    label = "也清理其他聊天共用的图片",
                     onChange = { on -> onChange { it.copy(includeShared = on) } },
                 )
                 OptionRow(
                     checked = request.linkedVersions,
-                    label = "同时清理同一张图的其他缓存版本（原图、预览图、缩略图）",
+                    label = "连同原图、预览图、缩略图等其他版本",
                     onChange = { on -> onChange { it.copy(linkedVersions = on) } },
                 )
                 Spacer(Modifier.height(4.dp))
@@ -882,10 +900,10 @@ private fun ScopeTrashDialog(
                                 if (request.includeShared) "，将一并清理" else "，将跳过",
                         )
                     }
-                    if (counts.protectedCount > 0) InfoLine("${formatCountExact(counts.protectedCount)} 张已归档或保留，将跳过")
+                    if (counts.protectedCount > 0) InfoLine("${formatCountExact(counts.protectedCount)} 张已归档，将跳过")
                 }
                 Text(
-                    "先移入回收站，保留期内可恢复；在后台进行，可以离开本页。删除 QQ 缓存后，聊天里对应的图片可能需要重新下载，过期的将无法再查看。",
+                    "移入回收站，到期前可恢复。删除后 QQ 里的图片可能要重新下载，过期的就看不了了。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 4.dp),

@@ -13,7 +13,6 @@ import com.xjw.qalbum.data.db.entity.QqOriginEntity
 import com.xjw.qalbum.data.db.entity.QqOriginPathEntity
 import com.xjw.qalbum.data.db.entity.QqSourceAccountEntity
 import com.xjw.qalbum.data.preferences.SettingsRepository
-import com.xjw.qalbum.data.repository.ImageRepository
 import com.xjw.qalbum.fileops.BoundFileOps
 import com.xjw.qalbum.fileops.FileOpsImpl
 import com.xjw.qalbum.fileops.IFileOps
@@ -46,22 +45,6 @@ class PictureBatchDeleteTest {
     private lateinit var db: AppDatabase
     private val bound = BoundFileOps(InProcessFileOps) {}
     private val hd = jpeg(480, 360)
-
-    private object InProcessFileOps : IFileOps.Stub() {
-        override fun destroy() {}
-        override fun listSubdirs(root: String, offset: Int, limit: Int): Array<String> = FileOpsImpl.listSubdirs(root, offset, limit)
-        override fun listFiles(dir: String, offset: Int, limit: Int): Array<String> = FileOpsImpl.listFiles(dir, offset, limit)
-        override fun readHeaders(paths: Array<String>, n: Int): ByteArray = FileOpsImpl.readHeaders(paths, n)
-        override fun deleteFiles(paths: Array<String>): BooleanArray = FileOpsImpl.deleteFiles(paths)
-        override fun openRead(path: String): ParcelFileDescriptor? = FileOpsImpl.openRead(path)
-        override fun qqAccountCatalog(userId: Int): String = ""
-        override fun qqDatabaseState(userId: Int, account: String): String = ""
-        override fun openQqDatabaseRead(userId: Int, account: String, name: String): ParcelFileDescriptor? = null
-        override fun statFiles(paths: Array<String>): Array<String> = FileOpsImpl.statFiles(paths)
-        override fun moveFilesChecked(sources: Array<String>, targets: Array<String>, stamps: Array<String>): BooleanArray =
-            FileOpsImpl.moveFilesChecked(sources, targets, stamps)
-        override fun deleteFilesChecked(paths: Array<String>, stamps: Array<String>): BooleanArray = FileOpsImpl.deleteFilesChecked(paths, stamps)
-    }
 
     @Test
     fun jpegAliasIsQuarantinedRestoredAndProtectedWithItsFamily() = runBlocking {
@@ -123,6 +106,14 @@ class PictureBatchDeleteTest {
         override fun statFiles(paths: Array<String>): Array<String> = InProcessFileOps.statFiles(paths)
         override fun moveFilesChecked(sources: Array<String>, targets: Array<String>, stamps: Array<String>): BooleanArray = BooleanArray(sources.size)
         override fun deleteFilesChecked(paths: Array<String>, stamps: Array<String>): BooleanArray = InProcessFileOps.deleteFilesChecked(paths, stamps)
+        override fun readImageInfo(paths: Array<String>): IntArray = InProcessFileOps.readImageInfo(paths)
+        override fun replaceFileChecked(target: String, content: ParcelFileDescriptor, backup: String, stamp: String, mtimeMs: Long): Int =
+            InProcessFileOps.replaceFileChecked(target, content, backup, stamp, mtimeMs)
+        override fun restoreFileChecked(backup: String, target: String, stamp: String, mtimeMs: Long): Int =
+            InProcessFileOps.restoreFileChecked(backup, target, stamp, mtimeMs)
+        override fun writeFileChecked(target: String, content: ParcelFileDescriptor, mtimeMs: Long): Int =
+            InProcessFileOps.writeFileChecked(target, content, mtimeMs)
+        override fun repairOwnership(paths: Array<String>): IntArray = InProcessFileOps.repairOwnership(paths)
     }
 
     @Before
@@ -184,8 +175,7 @@ class PictureBatchDeleteTest {
 
     private fun manager(): QuarantineManager {
         val koin = GlobalContext.get()
-        val repository = ImageRepository(db, db.imageDao(), db.ocrDao(), db.dedupExclusionDao(), db.tagDao(), db.embeddingDao())
-        return QuarantineManager(context, koin.get(), db, db.imageDao(), db.cleanupDao(), koin.get(), koin.get(), repository, archive())
+        return QuarantineManager(context, koin.get(), db, db.imageDao(), db.cleanupDao(), koin.get(), koin.get(), archive())
     }
 
     private fun archive() = ArchiveManager(db, GlobalContext.get().get<SettingsRepository>(), GlobalContext.get().get<CoroutineScope>())
@@ -277,6 +267,8 @@ class PictureBatchDeleteTest {
         val (families, ids) = seed(12)
         val ops = operations(manager(), BoundFileOps(NoRenameFileOps) {})
         val sizes = families.flatMap { it.files }.associate { it.name to it.length() }
+        val contents = families.flatMap { it.files }.associate { it.path to it.readBytes() }
+        val mtimes = families.flatMap { it.files }.associate { it.path to it.lastModified() }
         var result = PictureDeleteResult()
         PictureFamilyPlanner(db, root.path).batches(ids, PictureDeleteOptions(), bound) { groups -> result += ops.quarantineAll(groups, "测试", Long.MAX_VALUE) }
         assertEquals(PictureDeleteResult(pictures = 12, files = 48, selectedProcessed = 12), result)
@@ -287,6 +279,15 @@ class PictureBatchDeleteTest {
             val copy = File(record[2]!!)
             assertEquals(sizes.getValue(copy.name.substringAfter('_').substringAfter('_')), copy.length())
         }
+
+        // 恢复时改名同样送不回去（各应用目录有各自的存储配额）：复制回原位置，内容与修改时间不变，回收站副本删掉
+        records.map { it[3]!! }.distinct().forEach { group -> assertTrue(ops.restore(db.cleanupDao().getQuarantineGroup(group))) }
+        contents.forEach { (path, bytes) ->
+            assertArrayEquals(bytes, File(path).readBytes())
+            assertEquals(mtimes.getValue(path), File(path).lastModified())
+        }
+        assertEquals(0, count("SELECT COUNT(*) FROM quarantine"))
+        assertTrue(records.none { File(it[2]!!).exists() })
     }
 
     @Test

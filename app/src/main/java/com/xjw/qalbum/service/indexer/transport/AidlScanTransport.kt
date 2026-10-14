@@ -64,6 +64,19 @@ class AidlScanTransport(
         }.awaitAll().flatten()
     }
 
+    override val readsImageSizes: Boolean get() = true
+
+    override suspend fun readImageSizes(paths: List<String>): List<Pair<Int, Int>?> = withContext(Dispatchers.IO) {
+        paths.chunked(HEADER_BATCH).flatMap { chunk ->
+            val sizes = bound.callWithTimeout(timeoutMs = HEADER_CALL_TIMEOUT_MS) { it.readImageInfo(chunk.toTypedArray()) }
+            chunk.indices.map { i ->
+                val w = sizes.getOrElse(i * 2) { 0 }
+                val h = sizes.getOrElse(i * 2 + 1) { 0 }
+                if (w > 0 && h > 0) w to h else null
+            }
+        }
+    }
+
     override fun close() = bound.close()
 
     /**

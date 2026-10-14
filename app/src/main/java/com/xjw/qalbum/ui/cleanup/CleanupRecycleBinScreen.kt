@@ -1,6 +1,5 @@
 package com.xjw.qalbum.ui.cleanup
 
-import android.content.Intent
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -69,7 +68,8 @@ import androidx.paging.compose.collectAsLazyPagingItems
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import coil3.request.crossfade
-import com.xjw.qalbum.ThumbnailTrashActivity
+import com.xjw.qalbum.data.db.entity.ImageEntity
+import com.xjw.qalbum.data.db.entity.OriginalBackupEntity
 import com.xjw.qalbum.data.db.entity.QuarantineEntity
 import com.xjw.qalbum.data.db.AppDatabase
 import com.xjw.qalbum.data.db.dao.CleanupDao
@@ -79,11 +79,19 @@ import com.xjw.qalbum.ui.components.BackButton
 import com.xjw.qalbum.ui.components.ConfirmDialog
 import com.xjw.qalbum.ui.components.EmptyState
 import com.xjw.qalbum.ui.components.LoadingState
-import com.xjw.qalbum.ui.components.SegmentPosition
 import com.xjw.qalbum.ui.components.ViewerIconButton
 import java.io.File
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.saveable.rememberSaveable
+import com.xjw.qalbum.ui.imageloading.ImageEntityModel
 
-/** 回收站：已移入回收站的图片，点按查看后可恢复或永久删除；全屏、隐藏底部导航栏。 */
+/**
+ * 回收站：两个分页——移入回收站的图片（点按查看后可恢复或永久删除），以及原图压缩前的原图（可还原或删除释放空间）。
+ */
 @Composable
 fun CleanupRecycleBinScreen(
     contentPadding: PaddingValues,
@@ -92,15 +100,18 @@ fun CleanupRecycleBinScreen(
 ) {
     val context = LocalContext.current
     val items = viewModel.quarantine.collectAsLazyPagingItems()
+    val backups = viewModel.backedUp.collectAsLazyPagingItems()
     val quarantineStats by viewModel.quarantineStats.collectAsState()
-    val thumbnailSummary by viewModel.thumbnailTrashSummary.collectAsState()
+    val backupStats by viewModel.backupStats.collectAsState()
     val busy by viewModel.busy.collectAsState()
 
-    // 计数 / 总大小走 DB 聚合：列表已分页，内存里没有全量项
-    val totalCount = quarantineStats.count
-    val totalBytes = quarantineStats.bytes
+    var tab by rememberSaveable { mutableIntStateOf(0) }
+    val originals = tab == 1
+    val totalCount = if (originals) backupStats.count else quarantineStats.count
+    val totalBytes = if (originals) backupStats.bytes else quarantineStats.bytes
     var showClearConfirm by remember { mutableStateOf(false) }
     var preview by remember { mutableStateOf<QuarantineEntity?>(null) }
+    var backupPreview by remember { mutableStateOf<ImageEntity?>(null) }
 
     Scaffold(
         topBar = {
@@ -131,21 +142,39 @@ fun CleanupRecycleBinScreen(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            item(span = { GridItemSpan(maxLineSpan) }, key = "notice") {
-                InfoBanner("回收站位于应用专属目录：到期会自动永久删除；卸载或清除应用数据时，其中的图片也会一并丢失。")
-            }
-            item(span = { GridItemSpan(maxLineSpan) }, key = "thumbs") {
-                Box(Modifier.padding(bottom = 6.dp)) {
-                    ThumbnailEntryItem(
-                        position = SegmentPosition.Single,
-                        count = thumbnailSummary.count,
-                        bytes = thumbnailSummary.bytes,
-                        onOpen = { context.startActivity(Intent(context, ThumbnailTrashActivity::class.java)) },
-                    )
+            item(span = { GridItemSpan(maxLineSpan) }, key = "tabs") {
+                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
+                    listOf("移入回收站的", "压缩前的原图").forEachIndexed { index, label ->
+                        SegmentedButton(
+                            selected = tab == index,
+                            onClick = { tab = index },
+                            shape = SegmentedButtonDefaults.itemShape(index, 2),
+                        ) { Text(label) }
+                    }
                 }
             }
-
-            if (items.itemCount == 0) {
+            item(span = { GridItemSpan(maxLineSpan) }, key = "notice-$tab") {
+                InfoBanner(
+                    if (originals) "压缩前的原图暂存在这里，到期删除。还原即换回原图。"
+                    else "到期自动永久删除。卸载或清除 QAlbum 数据时会一并删除。",
+                )
+            }
+            if (originals) {
+                if (backups.itemCount == 0) {
+                    val loading = backups.loadState.refresh is LoadState.Loading
+                    item(span = { GridItemSpan(maxLineSpan) }, key = if (loading) "backups-loading" else "backups-empty") {
+                        Box(Modifier.fillMaxWidth().height(320.dp)) {
+                            if (loading) LoadingState()
+                            else EmptyState(icon = Icons.Outlined.Inventory2, title = "没有压缩前的原图", message = "压缩时保留的原图会放在这里")
+                        }
+                    }
+                } else {
+                    items(count = backups.itemCount, key = { index -> backups.peek(index)?.id?.let { "b$it" } ?: "backup-loading-$index" }) { index ->
+                        val image = backups[index]
+                        if (image != null) BackupTile(image, onClick = { backupPreview = image }, modifier = Modifier.animateItem())
+                    }
+                }
+            } else if (items.itemCount == 0) {
                 // 首次读取完成前显示加载中，不能当成「回收站是空的」
                 val loading = items.loadState.refresh is LoadState.Loading
                 item(span = { GridItemSpan(maxLineSpan) }, key = if (loading) "loading" else "empty") {
@@ -156,7 +185,7 @@ fun CleanupRecycleBinScreen(
                             EmptyState(
                                 icon = Icons.Outlined.Inventory2,
                                 title = "回收站是空的",
-                                message = "从图库、审核或聊天来源删除的图片会先来到这里。",
+                                message = "删除的图片会先放在这里",
                             )
                         }
                     }
@@ -185,23 +214,157 @@ fun CleanupRecycleBinScreen(
         )
     }
 
+    backupPreview?.let { image ->
+        BackupPreviewDialog(
+            image = image,
+            busy = busy,
+            onClose = { backupPreview = null },
+            onRestore = { viewModel.restoreOriginal(image.id); backupPreview = null },
+            onDelete = { viewModel.deleteOriginal(image.id); backupPreview = null },
+        )
+    }
+
     if (showClearConfirm) {
         ConfirmDialog(
             icon = Icons.Outlined.DeleteForever,
-            title = "清空回收站？",
-            text = "将永久删除回收站中的 $totalCount 组图片（${formatBytes(totalBytes)}），包括随图片移入的关联缓存，无法恢复。其他 QQ 预览缓存不受影响。",
+            title = if (originals) "删除全部原图？" else "清空回收站？",
+            text = if (originals) {
+                "删除 $totalCount 张原图（${formatBytes(totalBytes)}），之后无法还原。压缩后的图片保留。"
+            } else {
+                "永久删除 $totalCount 组图片（${formatBytes(totalBytes)}），连同关联缓存，无法恢复。"
+            },
             confirmLabel = "永久删除",
             destructive = true,
             onDismiss = { showClearConfirm = false },
             onConfirm = {
                 showClearConfirm = false
-                viewModel.purgeAllRecycleBin { count ->
-                    Toast.makeText(context, "已永久删除 $count 项", Toast.LENGTH_SHORT).show()
+                if (originals) {
+                    viewModel.purgeAllOriginals { count -> Toast.makeText(context, "已删除 $count 张原图", Toast.LENGTH_SHORT).show() }
+                } else {
+                    viewModel.purgeAllRecycleBin { count -> Toast.makeText(context, "已永久删除 $count 项", Toast.LENGTH_SHORT).show() }
                 }
             },
         )
     }
     // 清理进度模态由 CleanupScreen 根部统一展示
+}
+
+/** 压缩前的原图：格子里显示压缩后的图片（就是同一张图） */
+@Composable
+private fun BackupTile(image: ImageEntity, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .aspectRatio(1f)
+            .clip(MaterialTheme.shapes.medium)
+            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+            .clickable(onClick = onClick),
+    ) {
+        AsyncImage(
+            model = ImageRequest.Builder(context).data(ImageEntityModel(image, tile = true)).crossfade(true).build(),
+            contentDescription = image.filename,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.fillMaxSize(),
+        )
+    }
+}
+
+/** 压缩前的原图：查看压缩后的效果，还原原图或删除原图 */
+@Composable
+private fun BackupPreviewDialog(
+    image: ImageEntity,
+    busy: Boolean,
+    onClose: () -> Unit,
+    onRestore: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    val context = LocalContext.current
+    var confirmDelete by remember { mutableStateOf(false) }
+    val database = koinInject<AppDatabase>()
+    val record by produceState<OriginalBackupEntity?>(null, image.id) { value = database.originalBackupDao().getByImageId(image.id) }
+    Dialog(
+        onDismissRequest = onClose,
+        properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false, decorFitsSystemWindows = false),
+    ) {
+        Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+            AsyncImage(
+                model = ImageRequest.Builder(context).data(ImageEntityModel(image, tile = false)).crossfade(true).build(),
+                contentDescription = image.filename,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize(),
+            )
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.7f), Color.Transparent)))
+                    .statusBarsPadding()
+                    .padding(start = 4.dp, top = 6.dp, end = 12.dp, bottom = 28.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                ViewerIconButton(Icons.Outlined.Close, "关闭", onClose)
+                Text(
+                    "压缩后的图片",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = Color.White,
+                    modifier = Modifier.weight(1f).padding(start = 4.dp),
+                )
+            }
+            Surface(
+                shape = MaterialTheme.shapes.extraLarge.copy(
+                    bottomStart = androidx.compose.foundation.shape.CornerSize(0.dp),
+                    bottomEnd = androidx.compose.foundation.shape.CornerSize(0.dp),
+                ),
+                color = MaterialTheme.colorScheme.surfaceContainerLow,
+                modifier = Modifier.align(Alignment.BottomCenter),
+            ) {
+                Column(
+                    modifier = Modifier.fillMaxWidth().navigationBarsPadding().padding(24.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    record?.let { r ->
+                        QuarantineInfoRow("原图", "${formatBytes(r.originalSize)} · ${r.originalWidth.coerceAtLeast(0)}×${r.originalHeight.coerceAtLeast(0)}")
+                        QuarantineInfoRow("压缩后", "${formatBytes(r.compressedSize)} · ${r.compressedWidth}×${r.compressedHeight}")
+                        QuarantineInfoRow("自动删除原图", autoDeleteText(r.expiresAt))
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        FilledTonalButton(onClick = onRestore, enabled = !busy, shapes = ButtonDefaults.shapes(), modifier = Modifier.weight(1f)) {
+                            Icon(Icons.Outlined.Restore, contentDescription = null, modifier = Modifier.size(ButtonDefaults.IconSize))
+                            Spacer(Modifier.width(ButtonDefaults.IconSpacing))
+                            Text("还原原图")
+                        }
+                        Button(
+                            onClick = { confirmDelete = true },
+                            enabled = !busy,
+                            shapes = ButtonDefaults.shapes(),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.error,
+                                contentColor = MaterialTheme.colorScheme.onError,
+                            ),
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Icon(Icons.Outlined.Delete, contentDescription = null, modifier = Modifier.size(ButtonDefaults.IconSize))
+                            Spacer(Modifier.width(ButtonDefaults.IconSpacing))
+                            Text("删除原图")
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (confirmDelete) {
+        ConfirmDialog(
+            icon = Icons.Outlined.DeleteForever,
+            title = "删除这张原图？",
+            text = "压缩后的图片保留，但无法再还原。",
+            confirmLabel = "删除原图",
+            destructive = true,
+            onDismiss = { confirmDelete = false },
+            onConfirm = { confirmDelete = false; onDelete() },
+        )
+    }
 }
 
 @Composable

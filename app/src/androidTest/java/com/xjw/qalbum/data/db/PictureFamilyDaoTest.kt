@@ -53,9 +53,7 @@ class PictureFamilyDaoTest {
             val imgId = dao.insert(image(img, "chatimg", "active", 300))
             val thumbId = dao.insert(image(thumb, "chatthumb", "thumbnail_trash", 20))
             val otherId = dao.insert(image(other, "chatimg", "active", 400))
-            // 旧版查重把预览图与另一张图分到一组；之后才下载了原图，原图成为代表、预览图被隐藏
-            sql.execSQL("UPDATE images SET duplicate_group_id = 5 WHERE id IN ($imgId, $otherId)")
-            assertEquals(listOf(5L), dao.duplicateGroupsWithPairs())
+            // 之后才下载了原图：原图成为代表、预览图被隐藏
             val rawId = dao.insert(image(raw, "chatraw", "active", 2_000))
 
             assertEquals(2, dao.countActiveTimeline(stacked = true))
@@ -87,12 +85,6 @@ class PictureFamilyDaoTest {
                 sources.queryIds(QqScopeSql.sectionIds(all, QqContent.IMAGES, stacked = true, TimelineSection.Size(2_100, 3_000))),
             )
 
-            // 组 5 只剩另一张图可见，不再算重复
-            assertEquals(emptyList<Long>(), dao.duplicateGroupsWithPairs())
-            assertEquals(emptyList<Long>(), dao.duplicateGroupsWithPairsAmong(listOf(5L)))
-            // 重新查重后原图与另一张图成组
-            sql.execSQL("UPDATE images SET duplicate_group_id = 5 WHERE id = $rawId")
-            assertEquals(listOf(5L), dao.duplicateGroupsWithPairsAmong(listOf(5L, 6L)))
         } finally {
             db.close()
         }
@@ -114,7 +106,7 @@ class PictureFamilyDaoTest {
             dao.insert(image(raw, "chatraw", "active", 2_000))
             dao.insert(image(thumb, "chatthumb", "thumbnail_trash", 20))
             val jpgId = dao.insert(image("$raw.jpg", "chatraw", "active", 3_000).copy(
-                variantGroup = null, isArchived = true, userKeep = true,
+                variantGroup = null, isArchived = true,
             ))
             QqSourceStatsBuilder(db).rebuild {}
             assertEquals(2, dao.countActiveTimeline(stacked = true))
@@ -129,7 +121,6 @@ class PictureFamilyDaoTest {
             assertEquals(4, jpg.variantCount)
             assertEquals(5_320L, jpg.variantBytes)
             assertTrue(jpg.isArchived)
-            assertEquals(true, jpg.userKeep)
             QqSourceStatsBuilder(db).rebuild {}
             val sources = db.qqSourceDao()
             val group = sources.facetId(0, "group")!!

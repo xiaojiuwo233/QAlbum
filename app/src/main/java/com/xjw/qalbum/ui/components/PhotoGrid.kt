@@ -41,7 +41,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.outlined.Archive
 import androidx.compose.material.icons.outlined.Check
-import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
@@ -92,9 +91,7 @@ import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.domain.model.TimelineSection
 import com.xjw.qalbum.ui.anim.sharedImage
 import com.xjw.qalbum.ui.common.formatBytes
-import com.xjw.qalbum.ui.gallery.EnabledPhases
 import com.xjw.qalbum.ui.gallery.GalleryTimelineItem
-import com.xjw.qalbum.ui.gallery.isFullyAnalyzed
 import com.xjw.qalbum.ui.imageloading.ImageEntityModel
 
 /** 网格图块上显示哪些角标 */
@@ -104,8 +101,6 @@ data class PhotoBadges(
     val archived: Boolean = true,
     /** 超过该字节数显示「MB+」；null 不显示 */
     val largeThresholdBytes: Long? = null,
-    /** 已启用分析项全部完成时显示小对勾；null 不显示 */
-    val analyzedPhases: EnabledPhases? = null,
     /** 右下角显示文件大小（按大小排序时更直观） */
     val size: Boolean = false,
     /** 合并显示同一张图的多个版本：左下角显示版本数，大小按全部版本合计 */
@@ -522,28 +517,8 @@ fun PhotoTile(
         if (showInfoBadges && threshold != null && bytes > threshold) {
             TileTextBadge("MB+", Modifier.align(Alignment.TopEnd))
         }
-        val phases = badges.analyzedPhases
-        val analyzed = showInfoBadges && phases != null && isFullyAnalyzed(image, phases)
-        if (showInfoBadges && (stacked || analyzed)) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                modifier = Modifier.align(Alignment.BottomStart).padding(5.dp),
-            ) {
-                if (stacked) TileStackBadge(image.variantCount)
-                if (analyzed) {
-                    Icon(
-                        Icons.Outlined.CheckCircle,
-                        contentDescription = null,
-                        modifier = Modifier
-                            .size(16.dp)
-                            .clip(CircleShape)
-                            .background(Color.Black.copy(alpha = 0.32f))
-                            .padding(1.dp),
-                        tint = Color.White.copy(alpha = 0.85f),
-                    )
-                }
-            }
+        if (showInfoBadges && stacked) {
+            TileStackBadge(image.variantCount, Modifier.align(Alignment.BottomStart).padding(5.dp))
         }
         if (badges.size) {
             TileTextBadge(formatBytes(bytes), Modifier.align(Alignment.BottomEnd))

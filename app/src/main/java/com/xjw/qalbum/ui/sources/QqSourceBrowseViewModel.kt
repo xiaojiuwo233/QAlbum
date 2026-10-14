@@ -17,7 +17,6 @@ import com.xjw.qalbum.data.db.dao.QqScopeOrder
 import com.xjw.qalbum.data.db.dao.QqScopeSql
 import com.xjw.qalbum.data.db.dao.QqSourceFacet
 import com.xjw.qalbum.data.db.entity.ImageEntity
-import com.xjw.qalbum.data.db.entity.OcrTextEntity
 import com.xjw.qalbum.data.paging.RefreshGate
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.data.repository.ImageRepository
@@ -57,6 +56,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.xjw.qalbum.service.work.BackgroundTasks
 
 /** 按来源范围整体清理前的确认状态：[counts] 为 null 表示正在统计 */
 data class QqTrashConfirmation(
@@ -96,6 +96,7 @@ class QqSourceBrowseViewModel(
     private val quarantine: QuarantineManager,
     private val archive: ArchiveManager,
     private val appScope: CoroutineScope,
+    private val tasks: BackgroundTasks,
 ) : ViewModel() {
     private val dao = repository.dao
 
@@ -283,14 +284,15 @@ class QqSourceBrowseViewModel(
         return dao.queryIds(QqScopeSql.sectionIds(ids, content.value, settings.galleryStackVariants.first(), section))
     }
 
+    /** 看图快照里刷新一张（压缩后大小与状态变了） */
+    suspend fun entity(id: Long): ImageEntity? = images.getById(id)
+
     /** 看图时这张图的全部版本（合并显示、且有两个以上版本时） */
     suspend fun versionsOf(image: ImageEntity): List<ImageEntity> {
         val group = image.variantGroup ?: return emptyList()
         if (image.variantCount < 2 || content.value != QqContent.IMAGES || !settings.galleryStackVariants.first()) return emptyList()
         return images.familyMembers(group).takeIf { it.size >= 2 }.orEmpty()
     }
-
-    suspend fun ocr(id: Long): OcrTextEntity? = images.getOcr(id)
 
     fun share(id: Long, onReady: (ExternalViewTarget) -> Unit) {
         viewModelScope.launch { imageFiles.prepareShare(id)?.let(onReady) }
@@ -332,11 +334,19 @@ class QqSourceBrowseViewModel(
         }
     }
 
+    /** 批量操作：页面上显示进度对话框，同时登记为后台任务（通知栏进度，切到后台不中断） */
     private suspend fun <T> withDeleteProgress(label: String, block: suspend (onProgress: (Int, Int) -> Unit) -> T): T =
-        try {
-            refreshGate.hold { block { done, total -> _deleteProgress.value = PurgeProgress(done, total, label) } }
-        } finally {
-            _deleteProgress.value = null
+        tasks.track(label.removePrefix("正在").removeSuffix("…"), cancellable = false) { handle ->
+            try {
+                refreshGate.hold {
+                    block { done, total ->
+                        _deleteProgress.value = PurgeProgress(done, total, label)
+                        handle.update("已处理 $done / $total 张", done.toLong(), total.toLong())
+                    }
+                }
+            } finally {
+                _deleteProgress.value = null
+            }
         }
 
     /** 保存到 Pictures/QAlbum[/子目录]；[alsoTrash] 只对保存成功的原图移入回收站 */
@@ -344,7 +354,7 @@ class QqSourceBrowseViewModel(
         if (ids.isEmpty()) return
         appScope.launch {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q && !imageFiles.canExportPreQ()) {
-                _message.value = "保存失败：需要存储权限，请在系统设置中授予后重试"
+                _message.value = "保存失败：请在系统设置中授予存储权限"
                 return@launch
             }
             val saved = ids.filter { imageFiles.exportToGallery(it, subdir) }
@@ -442,7 +452,7 @@ class QqSourceBrowseViewModel(
         appScope.launch {
             val done = withDeleteProgress("正在归档…") { progress -> archive.archiveScope(request.ids, progress) }
             _message.value = "已归档 ${formatCountExact(done)} 张" +
-                if (settings.archiveVisible.first()) "，不会被清理删除" else "，它们只在「图库 → 归档」里显示，不会被清理删除"
+                if (settings.archiveVisible.first()) "，不会被清理" else "，不会被清理，之后只在「图库 → 归档」里显示"
         }
     }
 }
@@ -450,9 +460,9 @@ class QqSourceBrowseViewModel(
 /** 按范围归档前的确认状态：[counts] 为 null 表示正在统计 */
 data class QqArchiveRequest(val ids: QqScopeIds, val counts: QqArchiveCounts?)
 
-/** 删除结果文案：归档 / 保留的图片会被跳过，文件访问未就绪时一张也删不掉，两种情况都要说清楚 */
+/** 删除结果文案：归档的图片会被跳过，文件访问未就绪时一张也删不掉，两种情况都要说清楚 */
 internal fun removalMessage(action: String, done: Int, total: Int): String = when {
-    done == 0 -> "${action.removePrefix("已")}失败：图片已归档或保留，或文件访问未就绪"
-    done < total -> "$action $done 张；${total - done} 张未处理（已归档或保留，或文件访问失败）"
+    done == 0 -> "${action.removePrefix("已")}失败：图片已归档或无法访问"
+    done < total -> "$action $done 张；${total - done} 张已归档或无法访问，未处理"
     else -> "$action $done 张"
 }

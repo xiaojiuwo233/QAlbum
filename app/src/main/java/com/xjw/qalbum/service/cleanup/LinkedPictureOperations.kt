@@ -5,6 +5,7 @@ import com.xjw.qalbum.data.db.AppDatabase
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.db.entity.QuarantineEntity
 import com.xjw.qalbum.fileops.BoundFileOps
+import com.xjw.qalbum.fileops.FileOpsImpl
 import com.xjw.qalbum.qq.QqCachePaths
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -30,7 +31,6 @@ internal class LinkedPictureOperations(
     private val directory: File,
     private val inFlight: MutableSet<Long>,
     private val thumbnail: suspend (ImageEntity) -> String?,
-    private val purgeDerived: suspend (List<Long>) -> Unit,
 ) {
     private val images=db.imageDao()
     private val cleanup=db.cleanupDao()
@@ -187,7 +187,6 @@ internal class LinkedPictureOperations(
                 for(page in done.map { it.id }.chunked(200))cleanup.deleteQuarantineByIds(page)
             }
             done.forEach { it.thumbnailPath?.let { p->runCatching { File(p).delete() } } }
-            if(done.isNotEmpty())purgeDerived(done.map { it.imageId })
             val deleted=done.mapTo(HashSet()) { it.id }
             for(item in ready) {
                 val count=item.records.count { it.id in deleted }
@@ -211,7 +210,9 @@ internal class LinkedPictureOperations(
                     check(images.markRestorePending(record.imageId,record.originalPath)==1)
                 }
             }
+            // 改名送不回去的（QQ 与 QAlbum 的目录各有存储配额，系统拒绝跨目录改名）复制回去
             val moved=move(records.map { it.quarantinePath },records.map { it.originalPath },sources.map { it!!.stamp })
+                .mapIndexed { i,ok->ok || copyBack(records[i],sources[i]!!) }
             if(moved.all { it }) {
                 withContext(NonCancellable) { finishRestore(records) }
                 return true
@@ -269,16 +270,38 @@ internal class LinkedPictureOperations(
         return held
     }
 
+    /**
+     * 改名送不回原位置时复制回去：特权进程按 QQ 目录的属主与权限写好原文件（修改时间不变，QQ 读得到），
+     * 核对大小后再删回收站里的副本。中途退出时由 [reconcileRestore] 收尾。
+     */
+    private suspend fun copyBack(record:QuarantineEntity,source:State):Boolean {
+        // 回收站副本多是 App 自己复制进来的，直接读；读不了（root 改名进来的）再走特权读
+        val content=runCatching { ParcelFileDescriptor.open(File(record.quarantinePath),ParcelFileDescriptor.MODE_READ_ONLY) }.getOrNull()
+            ?:bound.callWithTimeout(onAbandoned={ it?.close() }) { it.openRead(record.quarantinePath) }?:return false
+        val code=content.use { pfd->bound.callWithTimeout(timeoutMs=COPY_TIMEOUT_MS) { it.writeFileChecked(record.originalPath,pfd,source.mtime) } }
+        if(code!=FileOpsImpl.REPLACE_OK || states(listOf(record.originalPath)).single()?.size!=record.size)return false
+        return delete(listOf(record.quarantinePath),listOf(source.stamp)).single()
+    }
+
     private suspend fun reconcileRestore(records:List<QuarantineEntity>) {
         val current=records.mapNotNull { cleanup.getQuarantineById(it.id) }.filter { it.state=="restoring" }
         if(current.isEmpty())return
         val original=states(current.map { it.originalPath })
-        val quarantine=rawStats(current.map { it.quarantinePath })
+        var quarantine=rawStats(current.map { it.quarantinePath })
+        // 复制送回后没来得及删回收站副本：原位置已经完整，删掉副本
+        val copied=current.indices.filter { original[it]?.size==current[it].size && state(quarantine[it])?.size==current[it].size }
+        if(copied.isNotEmpty()) {
+            delete(copied.map { current[it].quarantinePath },copied.map { state(quarantine[it])!!.stamp })
+            quarantine=rawStats(current.map { it.quarantinePath })
+        }
         if(current.indices.all { original[it]?.size==current[it].size && quarantine[it]=="M" }) { finishRestore(current);return }
         val moved=current.indices.filter { original[it]?.size==current[it].size && quarantine[it]=="M" }
         if(moved.isNotEmpty())move(moved.map { current[it].originalPath },moved.map { current[it].quarantinePath },moved.map { original[it]!!.stamp })
         val afterOriginal=rawStats(current.map { it.originalPath })
         val afterQuarantine=states(current.map { it.quarantinePath })
+        // 已经送回、又改名退不回回收站的（跨目录改名被拒）：这几张就算恢复了
+        val stayed=moved.filter { afterOriginal[it].startsWith("S|") && afterQuarantine[it]==null }
+        if(stayed.isNotEmpty())finishRestore(stayed.map { current[it] })
         db.withTransaction {
             for(i in current.indices)if(afterOriginal[i]=="M" && afterQuarantine[i]?.size==current[i].size) {
                 images.rollbackRestorePending(current[i].imageId)
@@ -362,5 +385,7 @@ internal class LinkedPictureOperations(
         const val SQL_CHUNK=900
         /** 缩略图解码与特权批量调用的并发数 */
         const val PARALLELISM=4
+        /** 复制送回一个文件的特权调用超时（大原图要写几十 MB） */
+        const val COPY_TIMEOUT_MS=60_000L
     }
 }

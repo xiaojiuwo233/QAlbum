@@ -233,7 +233,7 @@ fun QqSourcesScreen(
     if (clearConfirm) {
         ConfirmDialog(
             title = "清除来源索引？",
-            text = "只移除 QAlbum 保存的群聊、发送人与图片关联，图片文件和 QQ 数据都不受影响。之后可随时重新读取。",
+            text = "只清除 QAlbum 里的来源关联，不动图片和 QQ 数据，可随时重新读取。",
             confirmLabel = "清除",
             destructive = true,
             onConfirm = { clearConfirm = false; viewModel.clearIndex() },
@@ -297,8 +297,7 @@ private fun IntroCard(onRefresh: () -> Unit) {
             )
             Text("还没有读取聊天来源", style = MaterialTheme.typography.titleLargeEmphasized)
             Text(
-                "通过 Root 复制 QQ 数据库的只读副本，把缓存图片关联到具体的群聊、私聊和发送人。" +
-                    "整个过程不会修改 QQ 的任何文件或数据。",
+                "用 Root 读取 QQ 数据库的副本，把图片关联到群聊、私聊和发送人。不会改动 QQ 的任何数据。",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -331,8 +330,8 @@ private fun RunningCard(progress: QqSourceProgress, onCancel: () -> Unit) {
                 fraction = if (progress.total > 0) progress.done.toFloat() / progress.total else null,
             )
             Text(
-                if (progress.label == "整理来源统计") "首次使用或读取新来源后需要整理一次，之后删除图片会即时更新统计。"
-                else "可以离开本页，任务会在后台继续。",
+                if (progress.label == "整理来源统计") "读取新来源后要整理一次，之后统计自动更新。"
+                else "可离开本页，后台继续。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f),
             )
@@ -403,7 +402,7 @@ private fun SummaryCard(
                     )
                     Spacer(Modifier.width(6.dp))
                     Text(
-                        "部分来源未能读取：筛选和清理只覆盖已关联的图片，「其他会话共用」的统计可能偏少。",
+                        "部分来源未能读取，筛选和清理只覆盖已关联的图片。",
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }

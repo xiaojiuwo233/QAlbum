@@ -8,6 +8,8 @@ import android.system.StructStat
 import android.os.Build
 import java.io.File
 import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.io.RandomAccessFile
 
 /**
  * [IFileOps] 的真正实现，运行在特权进程内（Root 进程或 Shizuku 的 shell 进程）。
@@ -30,6 +32,19 @@ internal object FileOpsImpl {
 
     /** 「还有下一页」哨兵。真实条目都含 '|'，不会冲突。 */
     const val MORE_MARKER = "+"
+
+    /** 压缩 / 还原原图时在同目录写的临时文件后缀（扫描跳过这类文件，见 ScanPipeline） */
+    const val TEMP_SUFFIX = ".qalbum-tmp"
+
+    const val REPLACE_OK = 0
+    const val REPLACE_CHANGED = 1
+    const val REPLACE_DENIED = 2
+    const val REPLACE_IO = 3
+    const val REPLACE_MISSING = 4
+
+    const val REPAIR_NONE = 0
+    const val REPAIR_DONE = 1
+    const val REPAIR_FAILED = 2
 
     fun listSubdirs(root: String, offset: Int, limit: Int): Array<String> =
         listEntries(root, offset, limit, dirsOnly = true)
@@ -116,6 +131,202 @@ internal object FileOpsImpl {
                 check(File(paths[i]).delete())
                 true
             } catch (_: Exception) { false }
+        }
+    }
+
+    /** 每个路径两个 int（宽、高），读不到为 0；只读文件头，见 [ImageHeaderParser] */
+    fun readImageInfo(paths: Array<String>): IntArray {
+        val out = IntArray(paths.size * 2)
+        for (i in paths.indices) {
+            val size = try {
+                RandomAccessFile(paths[i], "r").use { file ->
+                    ImageHeaderParser.parse(file.length()) { offset, length -> file.readAt(offset, length) }
+                }
+            } catch (_: Exception) {
+                null
+            } ?: continue
+            out[i * 2] = size.width
+            out[i * 2 + 1] = size.height
+        }
+        return out
+    }
+
+    private fun RandomAccessFile.readAt(offset: Long, length: Int): ByteArray {
+        if (offset < 0 || offset >= length()) return ByteArray(0)
+        seek(offset)
+        val buf = ByteArray(minOf(length.toLong(), length() - offset).toInt())
+        var total = 0
+        while (total < buf.size) {
+            val r = read(buf, total, buf.size - total)
+            if (r < 0) break
+            total += r
+        }
+        return if (total == buf.size) buf else buf.copyOf(total)
+    }
+
+    /**
+     * 原图压缩的替换（见 IFileOps.replaceFileChecked）。全程不留下「原路径没有文件」的窗口：
+     * 备份是复制出来的，新内容先落成同目录临时文件，最后一步原子改名覆盖原图。
+     * 临时文件由本进程（root / shell）新建，改名前先换成原文件的属主与权限（见 [matchOwnership]），否则 QQ 读不到自己的缓存。
+     */
+    fun replaceFileChecked(target: String, content: ParcelFileDescriptor, backup: String, stamp: String, mtimeMs: Long): Int {
+        val guard = MutationGuard()
+        val temp = File("$target$TEMP_SUFFIX")
+        var backupCreated = false
+        try {
+            if (!guard.allowed(target) || (backup.isNotEmpty() && !guard.allowed(backup))) return REPLACE_DENIED
+            if (!matches(target, stamp)) return REPLACE_CHANGED
+            if (backup.isNotEmpty()) {
+                copyExclusive(File(target), File(backup))
+                backupCreated = true
+            }
+            temp.delete()
+            ParcelFileDescriptor.AutoCloseInputStream(content).use { input ->
+                FileOutputStream(temp).use { output ->
+                    input.copyTo(output)
+                    output.fd.sync()
+                }
+            }
+            matchOwnership(temp.path, ownerReference(target))
+            temp.setLastModified(mtimeMs)
+            if (!matches(target, stamp)) {
+                temp.delete()
+                if (backupCreated) File(backup).delete()
+                return REPLACE_CHANGED
+            }
+            Os.rename(temp.path, target)
+            return REPLACE_OK
+        } catch (_: Exception) {
+            temp.delete()
+            if (backupCreated) File(backup).delete()
+            return REPLACE_IO
+        }
+    }
+
+    /** 还原原图（见 IFileOps.restoreFileChecked） */
+    fun restoreFileChecked(backup: String, target: String, stamp: String, mtimeMs: Long): Int {
+        val guard = MutationGuard()
+        val temp = File("$target$TEMP_SUFFIX")
+        try {
+            if (!guard.allowed(target) || !guard.allowed(backup)) return REPLACE_DENIED
+            if (!File(backup).isFile) return REPLACE_MISSING
+            val targetOk = if (stamp.isEmpty()) !File(target).exists() else matches(target, stamp)
+            if (!targetOk) return REPLACE_CHANGED
+            temp.delete()
+            FileInputStream(backup).use { input ->
+                FileOutputStream(temp).use { output ->
+                    input.copyTo(output)
+                    output.fd.sync()
+                }
+            }
+            matchOwnership(temp.path, ownerReference(target))
+            temp.setLastModified(mtimeMs)
+            val stillOk = if (stamp.isEmpty()) !File(target).exists() else matches(target, stamp)
+            if (!stillOk) {
+                temp.delete()
+                return REPLACE_CHANGED
+            }
+            Os.rename(temp.path, target)
+            File(backup).delete()
+            return REPLACE_OK
+        } catch (_: Exception) {
+            temp.delete()
+            return REPLACE_IO
+        }
+    }
+
+    /** 从回收站送回（见 IFileOps.writeFileChecked）：不覆盖已有文件，新文件的属主与权限跟所在目录一致 */
+    fun writeFileChecked(target: String, content: ParcelFileDescriptor, mtimeMs: Long): Int {
+        val guard = MutationGuard()
+        val temp = File("$target$TEMP_SUFFIX")
+        try {
+            if (!guard.allowed(target)) return REPLACE_DENIED
+            if (File(target).exists()) return REPLACE_CHANGED
+            val parent = File(target).parentFile ?: return REPLACE_DENIED
+            temp.delete()
+            ParcelFileDescriptor.AutoCloseInputStream(content).use { input ->
+                FileOutputStream(temp).use { output ->
+                    input.copyTo(output)
+                    output.fd.sync()
+                }
+            }
+            matchOwnership(temp.path, ownerReference(target))
+            temp.setLastModified(mtimeMs)
+            if (File(target).exists()) {
+                temp.delete()
+                return REPLACE_CHANGED
+            }
+            Os.rename(temp.path, target)
+            return REPLACE_OK
+        } catch (_: Exception) {
+            temp.delete()
+            return REPLACE_IO
+        }
+    }
+
+    /**
+     * 修正 QQ 目录里属主不对的文件（0.2.1 压缩 / 还原时由 root / shell 新建，QQ 读不到）：与所在目录属主不同的，
+     * 改成目录的属主，改不了就放开读写。每个路径返回 0 无需修改、1 已修正、2 失败。
+     */
+    fun repairOwnership(paths: Array<String>): IntArray {
+        val guard = MutationGuard()
+        return IntArray(paths.size) { i ->
+            try {
+                if (!guard.allowed(paths[i])) return@IntArray REPAIR_FAILED
+                val file = Os.lstat(paths[i])
+                if (!OsConstants.S_ISREG(file.st_mode)) return@IntArray REPAIR_FAILED
+                val reference = ownerReference(paths[i])
+                if (file.st_uid == reference.st_uid) return@IntArray REPAIR_NONE
+                matchOwnership(paths[i], reference)
+                REPAIR_DONE
+            } catch (_: Exception) {
+                REPAIR_FAILED
+            }
+        }
+    }
+
+    /**
+     * 新文件该跟谁一致：原文件属于所在目录的属主时照抄原文件（连同权限）；没有原文件、或原文件本身属主就不对
+     * （0.2.1 留下的）时按所在目录（QQ 的目录属于 QQ）。
+     */
+    private fun ownerReference(target: String): StructStat {
+        val dir = Os.lstat(File(target).parent ?: "/")
+        val file = try {
+            Os.lstat(target)
+        } catch (_: ErrnoException) {
+            return dir
+        }
+        return if (file.st_uid == dir.st_uid) file else dir
+    }
+
+    /**
+     * 让本进程新建的 [path] 与 [reference] 同属主、同组、同权限：QQ 的缓存文件属于 QQ（组 ext_data_rw，权限 660），
+     * root / shell 新建的文件 QQ 读不到。root 直接改属主；shell（Shizuku）改不了属主，就放开读写权限 ——
+     * 文件所在的 QQ 目录只有 QQ 和系统能进，别的应用仍然碰不到它。
+     */
+    private fun matchOwnership(path: String, reference: StructStat) {
+        val owned = try {
+            Os.chown(path, reference.st_uid, reference.st_gid)
+            true
+        } catch (_: ErrnoException) {
+            false
+        }
+        val mode = if (OsConstants.S_ISDIR(reference.st_mode)) 0x1B0 else reference.st_mode and 0x1FF
+        Os.chmod(path, if (owned) mode else 0x1B6)
+    }
+
+    /** 独占创建 [to]（已存在则失败，不覆盖）后整份复制 [from] 并落盘；fd 由输出流关闭 */
+    private fun copyExclusive(from: File, to: File) {
+        to.parentFile?.mkdirs()
+        val fd = Os.open(to.path, OsConstants.O_CREAT or OsConstants.O_EXCL or OsConstants.O_WRONLY, 0x180)
+        try {
+            FileOutputStream(fd).use { output ->
+                FileInputStream(from).use { input -> input.copyTo(output) }
+                output.fd.sync()
+            }
+        } catch (e: Exception) {
+            to.delete()
+            throw e
         }
     }
 

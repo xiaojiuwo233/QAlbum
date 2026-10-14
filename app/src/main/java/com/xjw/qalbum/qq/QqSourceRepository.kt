@@ -12,10 +12,12 @@ import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.fileops.FileOpsClient
 import com.xjw.qalbum.service.cleanup.QuarantineManager
 import com.xjw.qalbum.service.cleanup.PictureDeleteOptions
+import com.xjw.qalbum.service.work.BackgroundTasks
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -36,6 +38,7 @@ class QqSourceRepository(
     client: FileOpsClient,
     private val quarantine: QuarantineManager,
     private val appScope: CoroutineScope,
+    private val tasks: BackgroundTasks,
 ) {
     val dao = db.qqSourceDao()
     val sourcesComplete = settings.qqSourcesComplete
@@ -69,8 +72,10 @@ class QqSourceRepository(
         if (!_progress.compareAndSet(null, QqSourceProgress(label, cancellable = false))) return
         val started = System.currentTimeMillis()
         try {
-            stats.rebuild { fraction ->
-                _progress.value = QqSourceProgress(label, ((fraction ?: 0f) * 1000).toLong(), if (fraction == null) 0 else 1000, false)
+            mirrored(label, cancellable = false) {
+                stats.rebuild { fraction ->
+                    _progress.value = QqSourceProgress(label, ((fraction ?: 0f) * 1000).toLong(), if (fraction == null) 0 else 1000, false)
+                }
             }
             Timber.i("QQ source stats rebuilt in %d ms", System.currentTimeMillis() - started)
         } catch (e: CancellationException) {
@@ -85,6 +90,24 @@ class QqSourceRepository(
         }
     }
 
+    /**
+     * 把 [_progress] 同步到后台任务（通知栏显示进度，切到后台也保持前台优先级）。
+     * [cancellable] 时通知上的「停止」取消当前协程，与页面上的停止按钮效果相同。
+     */
+    private suspend fun <T> mirrored(title: String, cancellable: Boolean, block: suspend () -> T): T =
+        tasks.track(title, cancellable) { handle ->
+            coroutineScope {
+                val mirror = launch {
+                    progress.collect { p -> if (p != null) handle.update(p.label, p.done, p.total) }
+                }
+                try {
+                    block()
+                } finally {
+                    mirror.cancel()
+                }
+            }
+        }
+
     fun acknowledgeMessage() { _message.value = null }
     private fun report(text: String) { _report.value = text; _message.value = text }
     fun cancel() { if (_progress.value?.cancellable == true) job?.cancel() }
@@ -93,7 +116,7 @@ class QqSourceRepository(
         if (!_progress.compareAndSet(null, QqSourceProgress("获取 Root 权限"))) return
         statsFailed = false
         startFacetCache()
-        job = appScope.launch(Dispatchers.IO) {
+        job = appScope.launch(Dispatchers.IO) { mirrored("读取聊天来源", cancellable = true) {
             var bound: com.xjw.qalbum.fileops.BoundFileOps? = null
             var successful = 0
             var pictures = 0
@@ -175,7 +198,7 @@ class QqSourceRepository(
                 bound?.close()
                 _progress.value = null
             }
-        }
+        } }
     }
 
     private fun logFailure(error: Exception, stage: String) {
@@ -219,16 +242,16 @@ class QqSourceRepository(
     ) {
         if (scope.groupKey == null && scope.senderKey == null || contents.isEmpty()) return
         if (!_progress.compareAndSet(null, QqSourceProgress("准备移入回收站", cancellable = false))) return
-        job = appScope.launch(Dispatchers.IO) {
+        job = appScope.launch(Dispatchers.IO) { mirrored("按来源移入回收站", cancellable = false) {
             var moved = 0
             try {
                 quarantine.fileAccessError()?.let { reason ->
                     _message.value = reason
-                    return@launch
+                    return@mirrored
                 }
                 val ids = scopeIds(scope) ?: run {
                     _message.value = "来源统计还在整理，请稍后再试"
-                    return@launch
+                    return@mirrored
                 }
                 val counts = dao.queryCounts(QqScopeSql.counts(ids, contents, includeShared))
                 val maxId = dao.maxImageId() ?: 0L
@@ -251,7 +274,7 @@ class QqSourceRepository(
             } finally {
                 _progress.value = null
             }
-        }
+        } }
     }
 
     /** 来源键 → 分类 id；分类尚未整理出来时返回 null */

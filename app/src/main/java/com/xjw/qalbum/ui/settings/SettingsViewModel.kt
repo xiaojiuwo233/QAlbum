@@ -2,32 +2,19 @@ package com.xjw.qalbum.ui.settings
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.room.withTransaction
 import com.xjw.qalbum.access.AccessManager
-import com.xjw.qalbum.data.db.AppDatabase
-import com.xjw.qalbum.data.db.dao.EmbeddingDao
-import com.xjw.qalbum.data.db.dao.ImageDao
-import com.xjw.qalbum.data.db.dao.OcrDao
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.domain.model.AccessMode
-import com.xjw.qalbum.domain.model.AnalysisConfig
-import com.xjw.qalbum.domain.model.AutoFavoriteConfig
-import com.xjw.qalbum.domain.model.CleanupConfig
-import com.xjw.qalbum.domain.model.DuplicateStrictness
-import com.xjw.qalbum.domain.model.normalizeAnalysisLimit
-import com.xjw.qalbum.domain.model.CleanupPreset
 import com.xjw.qalbum.domain.model.ScanProgress
+import com.xjw.qalbum.service.cleanup.CompressDemo
 import com.xjw.qalbum.service.indexer.ScanController
-import com.xjw.qalbum.service.ocr.OcrModelDownloadService
-import com.xjw.qalbum.service.ocr.OcrModelDownloadState
-import com.xjw.qalbum.service.ocr.OcrModelStatus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -38,30 +25,19 @@ import kotlinx.coroutines.sync.withLock
  * - 暴露当前访问模式 / 路径 / 动态取色等设置
  * - 提供"检查权限"动作，把 Shizuku/Root 可用性同步回 UI
  * - 提供"立即扫描"动作（包装 [ScanController]）
+ * - 回收站保留天数与原图压缩参数
  */
 class SettingsViewModel(
     private val settings: SettingsRepository,
     private val accessManager: AccessManager,
     private val scanController: ScanController,
-    private val imageDao: ImageDao,
-    private val ocrDao: OcrDao,
-    private val embeddingDao: EmbeddingDao,
-    private val db: AppDatabase,
-    private val ocrModelDownload: OcrModelDownloadService,
     private val appScope: CoroutineScope,
+    private val compressDemo: CompressDemo,
 ) : ViewModel() {
 
     /**
-     * 设置落盘统一走 App 级 [appScope]，而非 [viewModelScope]。
-     *
-     * 二级设置页输入后，用户常直接点返回 / 系统返回离开页面，此时由 InstantSaveTextField
-     * 的 onDispose 兜底触发保存；但该页对应的 NavBackStackEntry 正随这次返回销毁，
-     * viewModelScope 会被一并取消，落在其上的 DataStore 写入会被丢弃（输入退出后仍是旧值）。
-     * 用独立于页面生命周期的 appScope 写入，确保离开即落盘。
-     *
-     * 全部写入经 [persistMutex]（公平锁）串行：updateXxxConfig 系列是「first() 读旧 JSON →
-     * copy → 整体写回」，读-改-写落在 DataStore edit 事务之外，快速连续操作若并发执行会
-     * 读到同一旧快照互相覆盖（开关自己弹回）。互斥后每个块都基于前一个块已落盘的最新值。
+     * 设置落盘统一走 App 级 [appScope]，而非 [viewModelScope]：二级设置页输入后常直接返回，
+     * 页面的 viewModelScope 会随返回取消，写入会丢。全部写入经 [persistMutex] 串行。
      */
     private fun persist(block: suspend () -> Unit) {
         appScope.launch { persistMutex.withLock { block() } }
@@ -71,37 +47,12 @@ class SettingsViewModel(
         settings.accessMode,
         settings.chatpicPath,
         settings.dynamicColorEnabled,
-        settings.aiEnabled,
-        settings.aiEndpoint,
-    ) { mode, path, dynamicColor, aiEnabled, aiEndpoint ->
-        SettingsBase(mode, path, dynamicColor, aiEnabled, aiEndpoint)
-    }.combine(
-        combine(settings.aiApiKey, settings.aiModel, settings.aiEmbeddingModel) { k, m, em ->
-            Triple(k, m, em)
-        }
-    ) { base, ai ->
-        SettingsUiState(
-            accessMode = base.accessMode,
-            chatpicPath = base.chatpicPath,
-            dynamicColorEnabled = base.dynamicColorEnabled,
-            aiEnabled = base.aiEnabled,
-            aiEndpoint = base.aiEndpoint,
-            aiApiKey = ai.first,
-            aiModel = ai.second,
-            aiEmbeddingModel = ai.third,
-        )
+    ) { mode, path, dynamicColor ->
+        SettingsUiState(accessMode = mode, chatpicPath = path, dynamicColorEnabled = dynamicColor)
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),
         initialValue = SettingsUiState(),
-    )
-
-    private data class SettingsBase(
-        val accessMode: AccessMode,
-        val chatpicPath: String,
-        val dynamicColorEnabled: Boolean,
-        val aiEnabled: Boolean,
-        val aiEndpoint: String,
     )
 
     private val _accessStatus = MutableStateFlow(AccessStatus.Unknown)
@@ -179,240 +130,51 @@ class SettingsViewModel(
     fun startDeepVerify() = scanController.startDeepVerify()
     fun cancelScan() = scanController.cancel()
 
-    // ---- AI 配置 ----
+    // ---- 清理：回收站与原图压缩 ----
 
-    fun setAiEnabled(enabled: Boolean) {
-        persist { settings.setAiEnabled(enabled) }
-    }
-    /** 用户在隐私弹窗确认「向公网 AI 服务上传图片」；上传链路（带图请求）据此放行（C148 兜底闸门） */
-    fun acknowledgePublicAiEndpoint() {
-        persist { settings.setAiPublicEndpointAcknowledged(true) }
-    }
-    fun setAiEndpoint(endpoint: String) {
-        persist { settings.setAiEndpoint(endpoint.trim()) }
-    }
-    fun setAiApiKey(key: String) {
-        persist { settings.setAiApiKey(key.trim()) }
-    }
-    fun setAiModel(model: String) {
-        persist { settings.setAiModel(model.trim()) }
-    }
-    fun setAiEmbeddingModel(model: String) {
-        persist { settings.setAiEmbeddingModel(model.trim()) }
+    val quarantineRetentionDays: StateFlow<Int> = settings.quarantineRetentionDays
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 30)
+
+    fun setQuarantineRetentionDays(days: Int) {
+        persist { settings.setQuarantineRetentionDays(days) }
     }
 
-    val aiDisableThinking: StateFlow<Boolean> = settings.aiDisableThinking
+    val compressMaxSide: StateFlow<Int> = settings.compressMaxSide
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsRepository.DEFAULT_COMPRESS_MAX_SIDE)
+
+    fun setCompressMaxSide(side: Int) {
+        persist { settings.setCompressMaxSide(side) }
+    }
+
+    val compressKeepOriginal: StateFlow<Boolean> = settings.compressKeepOriginal
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
 
-    val aiConcurrency: StateFlow<Int> = settings.aiConcurrency
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsRepository.DEFAULT_AI_CONCURRENCY)
-
-    val aiMaxTokens: StateFlow<Int> = settings.aiMaxTokens
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsRepository.DEFAULT_AI_MAX_TOKENS)
-
-    fun setAiDisableThinking(enabled: Boolean) {
-        persist { settings.setAiDisableThinking(enabled) }
-    }
-    fun setAiConcurrency(value: Int) {
-        persist { settings.setAiConcurrency(value) }
-    }
-    fun setAiMaxTokens(value: Int) {
-        persist { settings.setAiMaxTokens(value) }
+    fun setCompressKeepOriginal(keep: Boolean) {
+        persist { settings.setCompressKeepOriginal(keep) }
     }
 
-    // ---- 清理规则配置 ----
+    val compressQuality: StateFlow<Int> = settings.compressQuality
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsRepository.DEFAULT_COMPRESS_QUALITY)
 
-    val cleanupConfig: StateFlow<CleanupConfig> = settings.cleanupConfig
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CleanupConfig.DEFAULT)
-
-    private fun updateCleanupConfig(transform: (CleanupConfig) -> CleanupConfig) {
-        persist {
-            settings.setCleanupConfig(transform(settings.cleanupConfig.first()))
-        }
+    fun setCompressQuality(quality: Int) {
+        persist { settings.setCompressQuality(quality) }
     }
 
-    fun applyCleanupPreset(preset: CleanupPreset) = updateCleanupConfig { preset.config }
-
-    fun setDuplicateEnabled(enabled: Boolean) = updateCleanupConfig { it.copy(duplicateEnabled = enabled) }
-    fun setLowResolutionEnabled(enabled: Boolean) = updateCleanupConfig { it.copy(lowResolutionEnabled = enabled) }
-    fun setLowResolutionMaxPixels(pixels: Long) = updateCleanupConfig { it.copy(lowResolutionMaxPixels = pixels) }
-    fun setBlurEnabled(enabled: Boolean) = updateCleanupConfig { it.copy(blurEnabled = enabled) }
-    fun setBlurMaxScore(score: Float) = updateCleanupConfig { it.copy(blurMaxScore = score) }
-    fun setTinyFileEnabled(enabled: Boolean) = updateCleanupConfig { it.copy(tinyFileEnabled = enabled) }
-    fun setTinyFileMaxBytes(bytes: Long) = updateCleanupConfig { it.copy(tinyFileMaxBytes = bytes) }
-    fun setBlankEnabled(enabled: Boolean) = updateCleanupConfig { it.copy(blankEnabled = enabled) }
-    fun setCorruptEnabled(enabled: Boolean) = updateCleanupConfig { it.copy(corruptEnabled = enabled) }
-    fun setEmojiEnabled(enabled: Boolean) = updateCleanupConfig { it.copy(emojiEnabled = enabled) }
-    fun setEmojiSquareRatio(ratio: Float) = updateCleanupConfig { it.copy(emojiSquareRatio = ratio) }
-    fun setEmojiMaxSide(px: Int) = updateCleanupConfig { it.copy(emojiMaxSide = px) }
-    fun setEmojiMinSide(px: Int) = updateCleanupConfig { it.copy(emojiMinSide = px) }
-
-    // ---- 分析每项开关/数量 / 排序 / 重置 ----
-
-    val analysisConfig: StateFlow<AnalysisConfig> = settings.analysisConfig
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AnalysisConfig.DEFAULT)
-
-    val analysisOldestFirst: StateFlow<Boolean> = settings.analysisOldestFirst
+    val compressCompare: StateFlow<Boolean> = settings.compressCompare
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
 
-    private fun updateAnalysisConfig(transform: (AnalysisConfig) -> AnalysisConfig) {
-        persist { settings.setAnalysisConfig(transform(settings.analysisConfig.first())) }
+    fun setCompressCompare(enabled: Boolean) {
+        persist { settings.setCompressCompare(enabled) }
     }
 
-    fun setHashLimit(limit: Int) = updateAnalysisConfig { it.copy(hashLimit = normalizeAnalysisLimit(limit)) }
-    fun setOcrEnabled(enabled: Boolean) = updateAnalysisConfig { it.copy(ocrEnabled = enabled) }
-    fun setOcrLimit(limit: Int) = updateAnalysisConfig { it.copy(ocrLimit = normalizeAnalysisLimit(limit)) }
-    fun setAiTagEnabled(enabled: Boolean) = updateAnalysisConfig { it.copy(aiTagEnabled = enabled) }
-    fun setAiLimit(limit: Int) = updateAnalysisConfig { it.copy(aiLimit = normalizeAnalysisLimit(limit)) }
-    fun setEmbeddingEnabled(enabled: Boolean) = updateAnalysisConfig { it.copy(embeddingEnabled = enabled) }
-    fun setEmbeddingLimit(limit: Int) = updateAnalysisConfig { it.copy(embeddingLimit = normalizeAnalysisLimit(limit)) }
-
-    fun setAnalysisOldestFirst(oldestFirst: Boolean) {
-        persist { settings.setAnalysisOldestFirst(oldestFirst) }
-    }
-
-    val ocrModelDownloadState: StateFlow<OcrModelDownloadState> = ocrModelDownload.downloadState
-
-    /** 模型安装状态直接透传服务侧异步流（磁盘 IO 在 appScope 后台完成，不在 VM 同步读盘） */
-    val ocrModelStatus: StateFlow<OcrModelStatus> = ocrModelDownload.modelStatus
-
-    fun refreshOcrModelStatus() {
-        ocrModelDownload.refreshStatus()
-    }
-
-    fun downloadOcrModel() {
-        ocrModelDownload.startDownload()
-    }
-
-    fun deleteOcrModel() {
-        // clearModel 完成后自动回推 modelStatus/downloadState；此处再并发 refresh 可能
-        // 在删除中途读盘，把删了一半的状态晚一步覆盖回流里
-        ocrModelDownload.clearModel()
-    }
-
-    // ---- 每次审核数量 ----
-
-    val reviewLimit: StateFlow<Int> = settings.reviewLimit
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsRepository.DEFAULT_REVIEW_LIMIT)
-
-    fun setReviewLimit(limit: Int) {
-        persist { settings.setReviewLimit(limit) }
-    }
-
-    val cleanupAllDuplicates: StateFlow<Boolean> = settings.cleanupAllDuplicates
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
-
-    fun setCleanupAllDuplicates(enabled: Boolean) {
-        persist { settings.setCleanupAllDuplicates(enabled) }
-    }
-
-    val maxDuplicateGroupSize: StateFlow<Int> = settings.maxDuplicateGroupSize
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsRepository.DEFAULT_MAX_DUP_GROUP_SIZE)
-
-    fun setMaxDuplicateGroupSize(value: Int) {
-        persist { settings.setMaxDuplicateGroupSize(value) }
-    }
-
-    val duplicateStrictness: StateFlow<DuplicateStrictness> = settings.duplicateStrictness
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), DuplicateStrictness.DEFAULT)
-
-    fun setDuplicateStrictness(value: DuplicateStrictness) {
-        persist { settings.setDuplicateStrictness(value) }
-    }
-
-    /** 清除重复检测的学习成果，回退到当前严格度档位的基础模型。 */
-    fun resetDuplicateModel() {
-        persist { settings.resetSimilarityWeights() }
-    }
-
-    // ---- 推荐删除 ----
-
-    val recommendEnabled: StateFlow<Boolean> = settings.recommendEnabled
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
-
-    val recommendLimit: StateFlow<Int> = settings.recommendLimit
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsRepository.DEFAULT_RECOMMEND_LIMIT)
-
-    fun setRecommendEnabled(enabled: Boolean) {
-        persist { settings.setRecommendEnabled(enabled) }
-    }
-
-    fun setRecommendLimit(value: Int) {
-        persist { settings.setRecommendLimit(value) }
-    }
-
-    /** 清除推荐删除的学习成果。 */
-    fun resetDeleteModel() {
-        persist { settings.resetDeleteModel() }
-    }
-
-    // ---- 自动归档配置（分析阶段，默认关闭，规则可自定义）----
-
-    val autoFavoriteConfig: StateFlow<AutoFavoriteConfig> = settings.autoFavoriteConfig
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AutoFavoriteConfig.DEFAULT)
-
-    private fun updateAutoFavoriteConfig(transform: (AutoFavoriteConfig) -> AutoFavoriteConfig) {
-        persist {
-            settings.setAutoFavoriteConfig(transform(settings.autoFavoriteConfig.first()))
-        }
-    }
-
-    fun setAutoFavoriteEnabled(enabled: Boolean) = updateAutoFavoriteConfig { it.copy(enabled = enabled) }
-    fun setAutoFavoriteIdNumber(enabled: Boolean) = updateAutoFavoriteConfig { it.copy(idNumber = enabled) }
-    fun setAutoFavoriteOrderNo(enabled: Boolean) = updateAutoFavoriteConfig { it.copy(orderNo = enabled) }
-    fun setAutoFavoriteAmount(enabled: Boolean) = updateAutoFavoriteConfig { it.copy(amount = enabled) }
-    fun setAutoFavoritePhone(enabled: Boolean) = updateAutoFavoriteConfig { it.copy(phone = enabled) }
-    fun setAutoFavoriteAddress(enabled: Boolean) = updateAutoFavoriteConfig { it.copy(address = enabled) }
-
-    /**
-     * 重置任务进行中标志。任务挂在 [appScope]、跨设置页进出存活，故用进程级状态，
-     * 任意 ViewModel 实例（每个二级页各一个）都能观察到同一次任务的进行/完成。
-     */
-    val analysisResetting: StateFlow<Boolean> = analysisResetRunning.asStateFlow()
-
-    /**
-     * 仅重置本地分析（hash/质量/重复/评分），重新分析时只重跑这些免费的本地阶段。
-     *
-     * 约 200 万行的全表 UPDATE 需数十秒，必须挂 [appScope]：本 ViewModel 随二级页
-     * NavBackStackEntry 销毁，落在 viewModelScope 会在用户返回时被静默取消（点了没生效）。
-     */
-    fun resetLocalAnalysis() {
-        if (!analysisResetRunning.compareAndSet(expect = false, update = true)) return
-        appScope.launch {
-            try {
-                db.withTransaction { imageDao.resetLocalAnalysis() }
-            } finally {
-                analysisResetRunning.value = false
-            }
-        }
-    }
-
-    /** 重置全部分析标记（含 OCR/AI/向量），并清空 OCR 文本与向量数据 */
-    fun resetAllAnalysis() {
-        if (!analysisResetRunning.compareAndSet(expect = false, update = true)) return
-        appScope.launch {
-            try {
-                // 单事务：标记清零与 OCR/向量清空要么同时生效要么都不生效，
-                // 避免中断留下「ocr_done 已清但 ocr_text/FTS 与向量残留」的半套状态
-                db.withTransaction {
-                    imageDao.resetAllAnalysis()
-                    ocrDao.clearAllOcr()
-                    embeddingDao.deleteAll()
-                    db.aiAnalysisDao().deleteAll()
-                    db.tagDao().clearAllAiTags()
-                }
-            } finally {
-                analysisResetRunning.value = false
-            }
-        }
-    }
+    /** 压缩质量演示：内置照片按当前质量实际压一次 */
+    val compressDemoResult: StateFlow<CompressDemo.Result?> = settings.compressQuality
+        .mapLatest { compressDemo.render(it) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     companion object {
         /** 设置写串行锁（公平）：见 [persist]；跨页面 ViewModel 实例共用，防先后两页的写乱序覆盖 */
         private val persistMutex = Mutex()
-
-        /** 重置分析任务的进程级进行中标志（任务在 appScope 上跑，寿命长于任何页面实例） */
-        private val analysisResetRunning = MutableStateFlow(false)
     }
 }
 
@@ -420,11 +182,6 @@ data class SettingsUiState(
     val accessMode: AccessMode = AccessMode.SHIZUKU,
     val chatpicPath: String = SettingsRepository.DEFAULT_CHATPIC_PATH,
     val dynamicColorEnabled: Boolean = true,
-    val aiEnabled: Boolean = false,
-    val aiEndpoint: String = "",
-    val aiApiKey: String = "",
-    val aiModel: String = "gpt-4o-mini",
-    val aiEmbeddingModel: String = "text-embedding-3-small",
 )
 
 enum class AccessStatus { Unknown, Ready, NotReady }

@@ -85,8 +85,8 @@ internal class PictureFamilyPlanner(private val db: AppDatabase, private val roo
                 if(!seen.add(key))continue
                 val linked=members.any { it in linkedPaths }
                 val records=members.mapNotNull { indexed[it] }
-                // 归档页删除（includeArchived）时归档不算保护，用户保留仍然算
-                val protected=records.any { (it.isArchived && !options.includeArchived) || it.userKeep==true }
+                // 归档页删除（includeArchived）时归档不算保护
+                val protected=records.any { it.isArchived && !options.includeArchived }
                 var unavailable=uncertain || records.any { it.status !in visibleStatuses && it.status != "missing" }
                 val assets=ArrayList<PictureAsset>()
                 if(!unavailable) for(path in members) {
