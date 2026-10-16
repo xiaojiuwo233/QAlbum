@@ -16,11 +16,13 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -64,6 +66,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.paging.LoadState
 import androidx.paging.compose.LazyPagingItems
@@ -139,6 +142,9 @@ fun GalleryScreen(
     val selectionMode = selectedIds.isNotEmpty()
     val clearSelection = { selectedIds = emptySet() }
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
+    // 顶栏盖在网格上面：网格从屏幕顶端排起、上方留出顶栏的高度，顶栏收起或换成多选顶栏时网格都不动，
+    // 长按后拖动连选的位置才对得上
+    val topInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + TopAppBarDefaults.TopAppBarExpandedHeight
 
     // 多选时外层隐藏底部导航，把位置让给浮动操作栏
     val latestSelectionCallback by rememberUpdatedState(onSelectionModeChange)
@@ -161,7 +167,6 @@ fun GalleryScreen(
                 } else {
                     TopAppBar(
                         title = { Text("图库") },
-                        subtitle = { Text("${sort.label} · 每行 $columns 张") },
                         actions = {
                             IconButton(
                                 onClick = onOpenArchive,
@@ -181,18 +186,18 @@ fun GalleryScreen(
             }
         },
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
-    ) { topPadding ->
-        Box(modifier = Modifier.fillMaxSize().padding(top = topPadding.calculateTopPadding())) {
+    ) { _ ->
+        Box(modifier = Modifier.fillMaxSize()) {
             when {
                 items.loadState.refresh is LoadState.Loading && items.itemCount == 0 ->
-                    LoadingState(Modifier.padding(bottom = contentPadding.calculateBottomPadding()))
+                    LoadingState(Modifier.padding(top = topInset, bottom = contentPadding.calculateBottomPadding()))
                 items.itemCount == 0 -> EmptyState(
                     icon = Icons.Outlined.PhotoLibrary,
                     title = "还没有图片",
                     message = "到「概览」点「全量扫描」导入 QQ 聊天图片",
-                    modifier = Modifier.padding(bottom = contentPadding.calculateBottomPadding()),
+                    modifier = Modifier.padding(top = topInset, bottom = contentPadding.calculateBottomPadding()),
                 )
-                else -> RefreshableGrid(items = items) {
+                else -> RefreshableGrid(items = items, topInset = topInset) {
                     PhotoGrid(
                         items = items,
                         columns = columns,
@@ -207,7 +212,7 @@ fun GalleryScreen(
                         sectionIds = viewModel::sectionIds,
                         directory = directory,
                         fastScroll = fastScroll,
-                        contentPadding = contentPadding,
+                        contentPadding = PaddingValues(top = topInset, bottom = contentPadding.calculateBottomPadding()),
                         sharedScope = if (imageShared) sharedScope else null,
                         animatedScope = animatedScope,
                     )
@@ -295,7 +300,7 @@ fun GalleryScreen(
  * 扫描 / 分析期间分页源频繁失效也会进入 Loading，不应每次都把指示器拽出来。
  */
 @Composable
-private fun RefreshableGrid(items: LazyPagingItems<*>, content: @Composable () -> Unit) {
+private fun RefreshableGrid(items: LazyPagingItems<*>, topInset: Dp = 0.dp, content: @Composable () -> Unit) {
     var userRefreshing by remember { mutableStateOf(false) }
     val refreshing = items.loadState.refresh is LoadState.Loading
     LaunchedEffect(refreshing) { if (!refreshing) userRefreshing = false }
@@ -312,7 +317,7 @@ private fun RefreshableGrid(items: LazyPagingItems<*>, content: @Composable () -
             PullToRefreshDefaults.LoadingIndicator(
                 state = state,
                 isRefreshing = userRefreshing,
-                modifier = Modifier.align(Alignment.TopCenter),
+                modifier = Modifier.align(Alignment.TopCenter).padding(top = topInset),
             )
         },
     ) { content() }
@@ -338,7 +343,6 @@ fun ArchiveScreen(
     viewModel: GalleryViewModel = koinViewModel(),
 ) {
     val items = viewModel.archiveTimeline.collectAsLazyPagingItems()
-    val archiveCount by viewModel.archiveCount.collectAsState(initial = 0)
     val archiveVisible by viewModel.archiveVisible.collectAsState()
     val deleteProgress by viewModel.deleteProgress.collectAsState()
     val directory by viewModel.archiveDirectory.collectAsState()
@@ -354,16 +358,14 @@ fun ArchiveScreen(
     val compression = koinInject<CompressionCoordinator>()
     val selectionMode = selectedIds.isNotEmpty()
     val clearSelection = { selectedIds = emptySet() }
-    val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
 
     BackHandler(enabled = selectionMode) { clearSelection() }
 
     val topBarEnter = MaterialTheme.motionScheme.defaultEffectsSpec<Float>()
     val topBarExit = MaterialTheme.motionScheme.fastEffectsSpec<Float>()
+    // 顶栏固定：进入多选时高度不变，网格不跳
     Scaffold(
-        modifier = Modifier
-            .sharedContainer("archive-bar", sharedScope, animatedScope)
-            .nestedScroll(scrollBehavior.nestedScrollConnection),
+        modifier = Modifier.sharedContainer("archive-bar", sharedScope, animatedScope),
         topBar = {
             AnimatedContent(
                 targetState = selectionMode,
@@ -375,9 +377,7 @@ fun ArchiveScreen(
                 } else {
                     TopAppBar(
                         title = { Text("归档") },
-                        subtitle = { Text("$archiveCount 张 · 不会被清理" + if (archiveVisible) "" else " · 图库中不显示") },
                         navigationIcon = { BackButton(onBack) },
-                        scrollBehavior = scrollBehavior,
                     )
                 }
             }

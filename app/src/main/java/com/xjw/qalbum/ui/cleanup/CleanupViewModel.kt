@@ -2,31 +2,21 @@ package com.xjw.qalbum.ui.cleanup
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.paging.Pager
-import androidx.paging.PagingConfig
-import androidx.paging.PagingData
-import androidx.paging.cachedIn
 import com.xjw.qalbum.data.db.AppDatabase
 import com.xjw.qalbum.data.db.dao.CleanupDao
 import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.db.dao.RuleStats
-import com.xjw.qalbum.data.db.entity.ImageEntity
-import com.xjw.qalbum.data.db.entity.QuarantineEntity
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.data.repository.ImageRepository
 import com.xjw.qalbum.domain.model.AccessMode
 import com.xjw.qalbum.service.cleanup.ArchiveManager
-import com.xjw.qalbum.service.cleanup.CleanupController
-import com.xjw.qalbum.service.cleanup.OriginalCompressor
 import com.xjw.qalbum.service.cleanup.rules.CleanupRule
 import com.xjw.qalbum.service.cleanup.rules.CleanupRunner
 import com.xjw.qalbum.service.cleanup.rules.RuleScope
 import com.xjw.qalbum.service.cleanup.rules.RuleSql
 import com.xjw.qalbum.service.cleanup.rules.SqlPart
-import com.xjw.qalbum.service.work.BackgroundTasks
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -39,7 +29,6 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.transform
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import timber.log.Timber
 import java.time.LocalDate
 import java.time.Year
@@ -48,9 +37,9 @@ import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 跨 ViewModel 实例共享的操作状态。回收站批量操作跑在 App 级作用域（比页面长寿），busy / 进度 / 提示
- * 必须在页面重建之间保持一致。
+ * 必须在页面重建之间保持一致；进度对话框与提示由清理页根部统一显示（见 CleanupScreen）。
  */
-private object CleanupOpState {
+internal object CleanupOpState {
     private val busyCount = AtomicInteger(0)
 
     val busy = MutableStateFlow(false)
@@ -88,18 +77,15 @@ data class MonthBucket(val year: Int, val month: Int, val count: Int, val bytes:
 }
 
 /**
- * 清理页（规则列表、存储概览）、按时间清理、回收站共用。规则的预览与执行见 [RulePreviewViewModel]、[CleanupRunner]。
+ * 清理页（规则列表、存储概览）与按时间清理共用。规则的预览与执行见 [RulePreviewViewModel]、[CleanupRunner]，
+ * 回收站页见 [RecycleBinViewModel]。
  */
 class CleanupViewModel(
     private val db: AppDatabase,
-    private val cleanupController: CleanupController,
     private val runner: CleanupRunner,
-    private val compressor: OriginalCompressor,
     private val imageRepository: ImageRepository,
     private val archive: ArchiveManager,
     private val settings: SettingsRepository,
-    private val tasks: BackgroundTasks,
-    private val appScope: CoroutineScope,
 ) : ViewModel() {
 
     private val ruleDao = db.cleanupRuleDao()
@@ -188,28 +174,16 @@ class CleanupViewModel(
             }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
-    // ---- 回收站 ----
+    // ---- 回收站入口 ----
 
-    val quarantine: Flow<PagingData<QuarantineEntity>> =
-        cleanupController.pagingQuarantine().cachedIn(viewModelScope)
-
-    val quarantineStats: StateFlow<CleanupDao.QuarantineStatsRow> =
-        cleanupController.observeQuarantineStats()
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CleanupDao.QuarantineStatsRow(0, 0))
-
-    /** 压缩前的原图（列出压缩后的图片本身） */
-    val backedUp: Flow<PagingData<ImageEntity>> = Pager(
-        PagingConfig(pageSize = 60, prefetchDistance = 120, initialLoadSize = 60, enablePlaceholders = false),
-        pagingSourceFactory = { db.originalBackupDao().pagingBackedUpImages() },
-    ).flow.cachedIn(viewModelScope)
+    val quarantineStats: StateFlow<CleanupDao.QuarantineStatsRow> = db.cleanupDao().observeQuarantineStats()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CleanupDao.QuarantineStatsRow(0, 0))
 
     /** 原图备份张数与占用 */
     val backupStats: StateFlow<CleanupDao.QuarantineStatsRow> = db.originalBackupDao().observeStats()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CleanupDao.QuarantineStatsRow(0, 0))
 
-    val busy: StateFlow<Boolean> = CleanupOpState.busy.asStateFlow()
-
-    /** 清空回收站等操作的进度；为 null 表示当前没有在跑 */
+    /** 回收站批量操作的进度；为 null 表示当前没有在跑 */
     val purgeProgress: StateFlow<PurgeProgress?> = CleanupOpState.purgeProgress.asStateFlow()
 
     /** 操作结果 / 失败提示（Toast 展示后调 [consumeMessage] 清空）；进程级共享，重建不丢 */
@@ -218,112 +192,28 @@ class CleanupViewModel(
     fun consumeMessage() {
         CleanupOpState.message.value = null
     }
-
-    fun restore(quarantineId: Long) {
-        // busy 置位 + QuarantineManager 的 inFlight 互斥，恢复期间的清空 / 同记录永久删除不会与移动交错
-        launchGuarded("恢复") {
-            val ok = cleanupController.restore(quarantineId)
-            CleanupOpState.message.value =
-                if (ok) "已恢复到原位置" else "恢复失败：原位置已有文件或无法访问，图片仍在回收站"
-        }
-    }
-
-    fun purge(quarantineId: Long) {
-        launchGuarded("永久删除") {
-            val ok = cleanupController.purge(quarantineId)
-            if (!ok) CleanupOpState.message.value = "永久删除失败，请稍后重试"
-        }
-    }
-
-    fun purgeAllRecycleBin(onDone: (Int) -> Unit = {}) {
-        launchGuarded("清空回收站") {
-            val total = cleanupController.countQuarantine()
-            CleanupOpState.purgeProgress.value = PurgeProgress(0, total)
-            try {
-                tasks.track("清空回收站", cancellable = false) { handle ->
-                    var purged = 0
-                    var processed = 0
-                    var afterId = 0L
-                    while (true) {
-                        val page = cleanupController.listQuarantinePaged(afterId, PURGE_PAGE)
-                        if (page.isEmpty()) break
-                        afterId = page.last().id
-                        purged += cleanupController.purgeByRecords(page)
-                        processed += page.size
-                        CleanupOpState.purgeProgress.value = PurgeProgress(processed.coerceAtMost(total), total)
-                        handle.update("已删除 $processed / $total 项", processed.toLong(), total.toLong())
-                    }
-                    onMain { onDone(purged) }
-                }
-            } finally {
-                CleanupOpState.purgeProgress.value = null
-            }
-        }
-    }
-
-    /** 还原压缩前的原图 */
-    fun restoreOriginal(imageId: Long) {
-        launchGuarded("还原原图") {
-            CleanupOpState.message.value =
-                if (compressor.restore(imageId)) "已还原原图" else "还原失败：文件已变化或无法访问"
-        }
-    }
-
-    /** 删除压缩前的原图备份（释放空间） */
-    fun deleteOriginal(imageId: Long) {
-        launchGuarded("删除原图") {
-            if (compressor.purgeByImageIds(listOf(imageId)) == 0) CleanupOpState.message.value = "原图删除失败，可稍后重试"
-        }
-    }
-
-    fun purgeAllOriginals(onDone: (Int) -> Unit = {}) {
-        launchGuarded("删除全部原图") {
-            val total = backupStats.value.count
-            CleanupOpState.purgeProgress.value = PurgeProgress(0, total, "正在删除原图…")
-            try {
-                tasks.track("删除压缩前的原图", cancellable = false) { handle ->
-                    val purged = compressor.purgeAll { done ->
-                        CleanupOpState.purgeProgress.value = PurgeProgress(done.coerceAtMost(total), total, "正在删除原图…")
-                        handle.update("已删除 $done / $total 张", done.toLong(), total.toLong())
-                    }
-                    onMain { onDone(purged) }
-                }
-            } finally {
-                CleanupOpState.purgeProgress.value = null
-            }
-        }
-    }
-
-    /**
-     * 统一协程入口：磁盘将满时 Room 写入等异常必须兜住降级为可见错误，而不是穿透 launch 杀进程。
-     * 文件操作跑在 App 级作用域，离开页面不中断。
-     */
-    private fun launchGuarded(label: String, block: suspend CoroutineScope.() -> Unit) {
-        appScope.launch {
-            CleanupOpState.pushBusy()
-            try {
-                block()
-            } catch (ce: CancellationException) {
-                throw ce
-            } catch (t: Throwable) {
-                Timber.e(t, "%s 失败", label)
-                CleanupOpState.message.value = "$label 失败：${t.message ?: t.javaClass.simpleName}"
-            } finally {
-                CleanupOpState.popBusy()
-            }
-        }
-    }
-
-    /** UI 回调统一回主线程：appScope 任务跑在 IO 线程，直接 Toast 会崩。 */
-    private suspend fun onMain(block: () -> Unit) = withContext(Dispatchers.Main) { block() }
-
-    private companion object {
-        const val PURGE_PAGE = 200
-    }
 }
 
 /** 批量操作进度：已处理 / 总数 */
 data class PurgeProgress(val done: Int, val total: Int, val label: String = "正在清理…")
+
+/**
+ * 回收站等页面的文件操作：跑在 App 级作用域，离开页面也不中断；期间算 busy，磁盘将满时 Room 写入等异常
+ * 兜住转成可见提示，而不是穿透 launch 杀进程。
+ */
+internal fun CoroutineScope.launchCleanupOp(label: String, block: suspend CoroutineScope.() -> Unit) = launch {
+    CleanupOpState.pushBusy()
+    try {
+        block()
+    } catch (ce: CancellationException) {
+        throw ce
+    } catch (t: Throwable) {
+        Timber.e(t, "%s 失败", label)
+        CleanupOpState.message.value = "$label 失败：${t.message ?: t.javaClass.simpleName}"
+    } finally {
+        CleanupOpState.popBusy()
+    }
+}
 
 /**
  * 聚合观察流节流：清理进行中每批提交都会让统计重查，这里每 [periodMs] 至多下发一次（首个值立即下发）。

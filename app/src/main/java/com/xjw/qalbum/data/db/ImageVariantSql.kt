@@ -34,6 +34,9 @@ object ImageVariantSql {
         "UPDATE images SET variant_hidden = ${hidden(group)}, variant_count = ${stackCount(group)}, " +
             "variant_bytes = ${stackBytes(group)} WHERE variant_group = $group;"
 
+    /** 重算一个家族，家族键是参数 ?1（成员换了家族时用：触发器只管状态 / 大小 / 类型的变化） */
+    val recomputeGroup: String = recomputeFamily("?1").removeSuffix(";")
+
     private val TRIGGERS = listOf("image_variants_insert", "image_variants_update", "image_variants_delete")
 
     /** 与实体声明的索引一致（Room 迁移校验会比对） */

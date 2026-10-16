@@ -233,7 +233,6 @@ private fun SettingsDetailScaffold(
         topBar = {
             LargeFlexibleTopAppBar(
                 title = { Text(category.title) },
-                subtitle = { Text(category.subtitle) },
                 navigationIcon = { BackButton(onBack) },
                 scrollBehavior = scrollBehavior,
             )

@@ -136,6 +136,8 @@ fun PhotoGrid(
     fastScroll: Boolean = false,
     sharedScope: SharedTransitionScope? = null,
     animatedScope: AnimatedVisibilityScope? = null,
+    /** 格子显示什么：默认是图片本身的小版本（见 ImageEntityModel.tile），回收站等页面换成自己的文件 */
+    tileModel: (GalleryTimelineItem.Photo) -> Any = { ImageEntityModel(it.image, tile = true) },
     leadingContent: (LazyGridScope.() -> Unit)? = null,
 ) {
     val selectionMode = selectedIds.isNotEmpty()
@@ -147,6 +149,8 @@ fun PhotoGrid(
     val currentSelected by rememberUpdatedState(selectedIds)
     val currentOnChange by rememberUpdatedState(onSelectedIdsChange)
     val currentSectionIds by rememberUpdatedState(sectionIds)
+    // 顶栏盖在网格上时（图库）上方留白就是顶栏：拖到它下沿附近才开始往上自动滚
+    val topInset by rememberUpdatedState(contentPadding.calculateTopPadding())
     val haptic = LocalHapticFeedback.current
     val layoutDirection = LocalLayoutDirection.current
     val scope = rememberCoroutineScope()
@@ -295,8 +299,9 @@ fun PhotoGrid(
                             }
                             val autoScroll = launch {
                                 while (isActive) {
+                                    val top = topInset.toPx() + edge
                                     val step = when {
-                                        pointer.y < edge -> -maxStep * (edge - pointer.y) / edge
+                                        pointer.y < top -> -maxStep * (top - pointer.y) / edge
                                         pointer.y > size.height - edge -> maxStep * (pointer.y - (size.height - edge)) / edge
                                         else -> 0f
                                     }
@@ -367,6 +372,7 @@ fun PhotoGrid(
                         val selected = id in selectedIds
                         PhotoTile(
                             image = image,
+                            model = tileModel(item),
                             selected = selected,
                             selectionMode = selectionMode,
                             badges = badges,
@@ -460,6 +466,7 @@ fun PhotoSectionHeader(
 @Composable
 fun PhotoTile(
     image: ImageEntity,
+    model: Any = ImageEntityModel(image, tile = true),
     selected: Boolean,
     selectionMode: Boolean,
     onClick: () -> Unit,
@@ -498,7 +505,7 @@ fun PhotoTile(
         if (showImage) {
             // 格子读同一张图更小的版本（QQ 高清缩略图 / 预览图），见 ImageEntityModel.tile
             AsyncImage(
-                model = ImageRequest.Builder(context).data(ImageEntityModel(image, tile = true)).crossfade(true).build(),
+                model = ImageRequest.Builder(context).data(model).crossfade(true).build(),
                 contentDescription = image.filename,
                 contentScale = contentScale,
                 modifier = Modifier

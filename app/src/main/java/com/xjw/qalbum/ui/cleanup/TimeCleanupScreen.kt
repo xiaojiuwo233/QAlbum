@@ -55,7 +55,6 @@ fun TimeCleanupScreen(
         topBar = {
             LargeFlexibleTopAppBar(
                 title = { Text("按时间清理") },
-                subtitle = { Text("按月统计，不含归档的图") },
                 navigationIcon = { BackButton(onBack) },
                 scrollBehavior = scrollBehavior,
             )

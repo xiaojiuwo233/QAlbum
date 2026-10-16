@@ -221,10 +221,6 @@ internal fun SourceSortMenuButton(sort: SourceSort, onSort: (SourceSort) -> Unit
     }
 }
 
-/** 两段式统计：数量 + 占用空间 */
-internal fun statsText(count: Int?, bytes: Long?): String =
-    if (count == null || bytes == null) "正在统计…" else "${formatCountExact(count)} 张 · ${formatBytes(bytes)}"
-
 @Composable
 internal fun InfoLine(text: String, color: Color = MaterialTheme.colorScheme.onSurfaceVariant) {
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 2.dp)) {

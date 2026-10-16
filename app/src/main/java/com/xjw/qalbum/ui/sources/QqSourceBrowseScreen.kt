@@ -67,7 +67,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.ToggleButton
 import androidx.compose.material3.ToggleButtonDefaults
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -83,7 +82,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.role
@@ -154,7 +152,6 @@ fun QqSourceBrowseScreen(
     val lookup by viewModel.lookup.collectAsState()
     val base by viewModel.baseFacet.collectAsState()
     val content by viewModel.content.collectAsState()
-    val stats by viewModel.stats.collectAsState()
     val current by viewModel.currentFacet.collectAsState()
     val sort by viewModel.sort.collectAsState()
     val columns by viewModel.columns.collectAsState()
@@ -234,12 +231,11 @@ fun QqSourceBrowseScreen(
         SourceKind.ALL -> "全部来源图片"
     }
     val noun = if (content == QqContent.THUMBNAILS) "缩略图" else "图片"
-    val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
 
     val topBarEnter = MaterialTheme.motionScheme.defaultEffectsSpec<Float>()
     val topBarExit = MaterialTheme.motionScheme.fastEffectsSpec<Float>()
+    // 顶栏固定：进入多选时高度不变，网格不跳，长按后拖动连选的位置才对得上
     Scaffold(
-        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
             AnimatedContent(
                 targetState = selectionMode,
@@ -260,16 +256,6 @@ fun QqSourceBrowseScreen(
                 } else {
                     TopAppBar(
                         title = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                        subtitle = {
-                            Text(
-                                buildString {
-                                    append(statsText(stats?.count, stats?.bytes))
-                                    append(" · ")
-                                    append(sort.label)
-                                },
-                                maxLines = 1,
-                            )
-                        },
                         navigationIcon = { BackButton(onBack) },
                         actions = {
                             if (target.kind != SourceKind.ALL) {
@@ -307,7 +293,6 @@ fun QqSourceBrowseScreen(
                                 }
                             }
                         },
-                        scrollBehavior = scrollBehavior,
                     )
                 }
             }

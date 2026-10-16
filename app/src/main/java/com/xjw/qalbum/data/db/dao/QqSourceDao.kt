@@ -16,6 +16,7 @@ import com.xjw.qalbum.data.db.entity.QqAutoArchiveEntity
 import com.xjw.qalbum.data.db.entity.QqImageContextEntity
 import com.xjw.qalbum.data.db.entity.QqOriginEntity
 import com.xjw.qalbum.data.db.entity.QqOriginPathEntity
+import com.xjw.qalbum.data.db.entity.QqPreviewCheckEntity
 import com.xjw.qalbum.data.db.entity.QqReadMarkEntity
 import com.xjw.qalbum.data.db.entity.QqSourceAccountEntity
 import com.xjw.qalbum.domain.model.TimelineSection
@@ -73,6 +74,22 @@ data class QqSourceSummary(
 
 data class QqFacetKindCount(val kind: Int, val chatType: Int, val count: Int)
 data class QqSeenSummary(val total: Int, val stale: Int)
+data class QqImageMd5(val imageId: Long, val md5: String)
+data class QqPreviewFamilyMove(val id: Long, val fromGroup: Long?, val toGroup: Long)
+
+/** 还没核对过的 chatimg 与同一时刻、由自己发出的 chatraw（见 QqSentPreviewLinker） */
+data class QqPreviewCandidate(
+    val previewId: Long,
+    val previewPath: String,
+    val previewSize: Long = 0,
+    val previewWidth: Int,
+    val previewHeight: Int,
+    val previewTime: Long,
+    val rawPath: String,
+    val rawWidth: Int,
+    val rawHeight: Int,
+    val rawTime: Long,
+)
 data class QqPicturePathEdge(val originId: String, val path: String)
 data class QqPictureContext(val conversationKey: String, val senderKey: String)
 data class QqPathContext(val path: String, val conversationKey: String, val senderKey: String)
@@ -277,6 +294,10 @@ interface QqSourceDao {
         WHERE i.status NOT IN ('deleted', 'quarantined')""")
     suspend fun linkOriginPaths()
 
+    @Query("""INSERT OR IGNORE INTO image_qq_origins(image_id, origin_id)
+        SELECT i.id, p.origin_id FROM images i JOIN qq_origin_paths p ON p.path = i.path WHERE i.id IN (:ids)""")
+    suspend fun linkImages(ids: List<Long>)
+
     @Transaction
     suspend fun reconcileLinks() {
         registerIndexedJpegPaths()
@@ -286,6 +307,35 @@ interface QqSourceDao {
     @Query("""INSERT OR IGNORE INTO qq_origin_paths(path, origin_id)
         SELECT :path, origin_id FROM qq_origin_paths WHERE path = :referencePath""")
     suspend fun registerDerivedPath(path: String, referencePath: String)
+
+    /**
+     * 发送图片缓存的候选：还没核对过（或文件变了）的 chatimg，配上修改时间在它之前 [before] 毫秒到之后 [after] 毫秒内、
+     * 关联消息里有 [senders]（各账号自己）发出的 chatraw。
+     */
+    @Query("""SELECT c.id AS previewId, c.path AS previewPath, c.size AS previewSize, c.width AS previewWidth,
+        c.height AS previewHeight, c.mtime AS previewTime, r.path AS rawPath, r.width AS rawWidth, r.height AS rawHeight, r.mtime AS rawTime
+        FROM images c JOIN images r ON r.mtime BETWEEN c.mtime - :before AND c.mtime + :after
+        WHERE c.source_type = 'chatimg' AND c.status IN ('active', 'archived')
+          AND NOT EXISTS (SELECT 1 FROM qq_preview_checks k WHERE k.path = c.path AND k.size = c.size)
+          AND r.source_type = 'chatraw' AND r.status IN ('active', 'archived')
+          AND EXISTS (SELECT 1 FROM image_qq_origins l CROSS JOIN qq_origins o ON o.id = l.origin_id
+              WHERE l.image_id = r.id AND o.sender_key IN (:senders))""")
+    suspend fun sentPreviewCandidates(senders: List<String>, before: Long, after: Long): List<QqPreviewCandidate>
+
+    /** 这些图关联的消息记下的 MD5（按消息 MD5 命名的 chatimg 是 QQ 显示用的，不算发送图片缓存） */
+    @Query("""SELECT l.image_id AS imageId, o.md5 AS md5 FROM image_qq_origins l CROSS JOIN qq_origins o ON o.id = l.origin_id
+        WHERE l.image_id IN (:ids)""")
+    suspend fun linkedMd5s(ids: List<Long>): List<QqImageMd5>
+
+    @Upsert
+    suspend fun putPreviewChecks(checks: List<QqPreviewCheckEntity>)
+
+    /** 发送图片缓存还不在原图那一家里的（图库合并显示用）：预览、它现在的家族键、原图的家族键 */
+    @Query("""SELECT i.id AS id, i.variant_group AS fromGroup, r.variant_group AS toGroup
+        FROM qq_preview_checks k CROSS JOIN images i ON i.path = k.path CROSS JOIN images r ON r.path = k.raw_path
+        WHERE k.raw_path IS NOT NULL AND i.size = k.size AND r.variant_group IS NOT NULL
+          AND i.variant_group IS NOT r.variant_group""")
+    suspend fun previewFamilyMoves(): List<QqPreviewFamilyMove>
 
     @Query("SELECT * FROM qq_source_accounts ORDER BY display_name, account_key")
     fun observeAccounts(): Flow<List<QqSourceAccountEntity>>

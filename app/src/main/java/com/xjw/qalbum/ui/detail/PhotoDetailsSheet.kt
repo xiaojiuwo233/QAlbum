@@ -56,12 +56,13 @@ import kotlin.math.roundToInt
 
 /**
  * 图片详情卡：标题（时间 + 文件名）+ 文件信息 + QQ 来源。
- * 图库详情页与各处预览共用，保证「查看详情」完全一致。
+ * 图库详情页与各处预览共用，保证「查看详情」完全一致；[header] 显示在文件信息之前（如回收站里的删除信息）。
  */
 @Composable
 internal fun PhotoDetailsSheet(
     image: ImageEntity,
     onClose: () -> Unit,
+    header: (@Composable () -> Unit)? = null,
 ) {
     val sources = koinInject<QqSourceDao>()
     val sourceFlow = remember(image.id, sources) { sources.observeImageOrigins(image.id) }
@@ -113,10 +114,14 @@ internal fun PhotoDetailsSheet(
                         )
                     }
                 }
+                if (header != null) item(key = "header") { header() }
                 item(key = "meta") { MetadataBlock(image) }
                 if (image.optimized == OriginalCompressor.COMPRESSED) {
                     item(key = "compress-header") { SectionHeader("原图压缩") }
-                    item(key = "compress") { CompressionBlock(record, onRestore = { compression.restoreOriginal(image.id) }) }
+                    // 在回收站里的图还原不了原图（压缩后的文件不在原位置）
+                    item(key = "compress") {
+                        CompressionBlock(record, onRestore = { compression.restoreOriginal(image.id) }, canRestore = image.status != "quarantined")
+                    }
                 }
                 item(key = "source-header") { SectionHeader("QQ 来源") }
                 if (origins.isEmpty()) {
@@ -156,7 +161,7 @@ private fun MetadataBlock(image: ImageEntity) {
 
 /** 压缩记录：质量、压缩前后的大小与尺寸、压缩时间、原图备份（可以还原） */
 @Composable
-private fun CompressionBlock(record: OriginalBackupEntity?, onRestore: () -> Unit) {
+private fun CompressionBlock(record: OriginalBackupEntity?, onRestore: () -> Unit, canRestore: Boolean = true) {
     SegmentedCard(SegmentPosition.Single, verticalArrangement = Arrangement.spacedBy(2.dp)) {
         if (record == null) {
             Text(
@@ -179,7 +184,7 @@ private fun CompressionBlock(record: OriginalBackupEntity?, onRestore: () -> Uni
             if (record.backupPath != null) "保留到 ${formatDateTime(record.expiresAt)}，可以还原"
             else "没有保留，无法还原",
         )
-        if (record.backupPath != null) {
+        if (record.backupPath != null && canRestore) {
             OutlinedButton(onClick = onRestore, shapes = ButtonDefaults.shapes(), modifier = Modifier.padding(top = 8.dp)) {
                 Text("还原原图")
             }

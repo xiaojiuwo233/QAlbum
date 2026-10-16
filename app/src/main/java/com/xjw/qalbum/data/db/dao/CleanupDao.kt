@@ -5,6 +5,10 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.RawQuery
+import androidx.sqlite.db.SupportSQLiteQuery
+import com.xjw.qalbum.data.db.entity.ImageEntity
+import com.xjw.qalbum.data.db.entity.OriginalBackupEntity
 import com.xjw.qalbum.data.db.entity.QuarantineEntity
 import kotlinx.coroutines.flow.Flow
 
@@ -85,6 +89,34 @@ interface CleanupDao {
 
     @Query("SELECT COUNT(DISTINCT COALESCE(group_id,'legacy:'||id)) AS count, IFNULL(SUM(size), 0) AS bytes FROM quarantine WHERE state='ready'")
     fun observeQuarantineStats(): Flow<QuarantineStatsRow>
+
+    // ---- 回收站页（查询由 RecycleBinSql 拼出） ----
+
+    @RawQuery(observedEntities = [QuarantineEntity::class, ImageEntity::class])
+    fun pagingTrash(query: SupportSQLiteQuery): PagingSource<Int, TrashUnit>
+
+    @RawQuery(observedEntities = [OriginalBackupEntity::class, ImageEntity::class])
+    fun pagingBackups(query: SupportSQLiteQuery): PagingSource<Int, BackupUnit>
+
+    @RawQuery(observedEntities = [QuarantineEntity::class, OriginalBackupEntity::class, ImageEntity::class])
+    fun observeBinBuckets(query: SupportSQLiteQuery): Flow<List<ImageDao.BucketCountRow>>
+
+    @RawQuery(observedEntities = [QuarantineEntity::class, ImageEntity::class])
+    fun observeTrashReasons(query: SupportSQLiteQuery): Flow<List<TrashReasonRow>>
+
+    @RawQuery
+    suspend fun binIds(query: SupportSQLiteQuery): List<Long>
+
+    /** 分组计数的一次性查询：每次网格刷新时现查，分组标题上的张数与刚做完的操作一致 */
+    @RawQuery
+    suspend fun binBuckets(query: SupportSQLiteQuery): List<ImageDao.BucketCountRow>
+
+    @RawQuery
+    suspend fun trashUnits(query: SupportSQLiteQuery): List<TrashUnit>
+
+    /** 选中的图（每组的代表图）对应的回收站记录 */
+    @Query("SELECT * FROM quarantine WHERE state = 'ready' AND image_id IN (:imageIds)")
+    suspend fun readyByImageIds(imageIds: List<Long>): List<QuarantineEntity>
 
     data class QuarantineStatsRow(val count: Int, val bytes: Long)
 }

@@ -23,6 +23,7 @@ import android.system.OsConstants
 import java.io.FileOutputStream
 import com.xjw.qalbum.fileops.HeaderBatchCodec
 import com.xjw.qalbum.service.indexer.MagicBytesDetector
+import timber.log.Timber
 
 /** 已确认的文件组操作；所有原位置变更均使用带文件身份核验的特权接口。 */
 internal class LinkedPictureOperations(
@@ -196,30 +197,79 @@ internal class LinkedPictureOperations(
         }
     }.sum()
 
-    /** 原位置有新文件时保留整组，不覆盖、不改名成 QQ 无法定位的缓存文件。 */
-    suspend fun restore(records:List<QuarantineEntity>):Boolean {
-        if(records.isEmpty() || records.any { it.state!="ready" } || !claim(records.map { it.imageId }))return false
+    /** 恢复的结果：恢复了 / 原位置已经有文件（多是 QQ 又下载了一份）/ 恢复不了 */
+    enum class RestoreOutcome { RESTORED, OCCUPIED, FAILED }
+
+    /** [archive]：原位置的新文件接替了归档过的旧记录，要接着归档的新图 */
+    data class RestoreResult(val outcome:RestoreOutcome, val archive:List<Long> = emptyList())
+
+    /**
+     * 原位置有新文件时默认保留整组，不覆盖、不改名成 QQ 无法定位的缓存文件（[RestoreOutcome.OCCUPIED]）。
+     * [keepExisting] 时用原位置现有的文件：这几份回收站里的副本删掉，其余照常送回。
+     */
+    suspend fun restore(records:List<QuarantineEntity>, keepExisting:Boolean=false):RestoreResult {
+        if(records.isEmpty() || records.any { it.state!="ready" } || !claim(records.map { it.imageId }))return RestoreResult(RestoreOutcome.FAILED)
         try {
             val sources=states(records.map { it.quarantinePath })
+            if(records.indices.any { sources[it]?.size!=records[it].size })return RestoreResult(RestoreOutcome.FAILED)
             val targets=rawStats(records.map { it.originalPath })
-            if(records.indices.any { sources[it]?.size!=records[it].size || targets[it]!="M" })return false
-            if(records.map { it.originalPath }.chunked(200).any { images.getAnyByPaths(it).isNotEmpty() })return false
-            db.withTransaction {
-                for(record in records) {
-                    check(cleanup.markQuarantineRestoring(record.id)==1)
-                    check(images.markRestorePending(record.imageId,record.originalPath)==1)
+            val indexed=records.map { it.originalPath }.chunked(200).flatMap { images.getAnyByPaths(it) }.associateBy { it.path }
+            val occupied=records.indices.filterTo(HashSet()) { targets[it].startsWith("S|") || records[it].originalPath in indexed }
+            // 原位置读不出状态：先不动
+            if(records.indices.any { it !in occupied && targets[it]!="M" })return RestoreResult(RestoreOutcome.FAILED)
+            if(occupied.isNotEmpty() && !keepExisting)return RestoreResult(RestoreOutcome.OCCUPIED)
+            val free=records.indices.filter { it !in occupied }
+            val moving=free.map { records[it] }
+            if(moving.isNotEmpty()) {
+                db.withTransaction {
+                    for(record in moving) {
+                        check(cleanup.markQuarantineRestoring(record.id)==1)
+                        check(images.markRestorePending(record.imageId,record.originalPath)==1)
+                    }
+                }
+                // 改名送不回去的（QQ 与 QAlbum 的目录各有存储配额，系统拒绝跨目录改名）复制回去
+                val moved=move(moving.map { it.quarantinePath },moving.map { it.originalPath },free.map { sources[it]!!.stamp })
+                    .mapIndexed { i,ok->ok || copyBack(moving[i],sources[free[i]]!!) }
+                if(!moved.all { it }) {
+                    withContext(NonCancellable) { reconcileRestore(moving) }
+                    return RestoreResult(RestoreOutcome.FAILED)
                 }
             }
-            // 改名送不回去的（QQ 与 QAlbum 的目录各有存储配额，系统拒绝跨目录改名）复制回去
-            val moved=move(records.map { it.quarantinePath },records.map { it.originalPath },sources.map { it!!.stamp })
-                .mapIndexed { i,ok->ok || copyBack(records[i],sources[i]!!) }
-            if(moved.all { it }) {
-                withContext(NonCancellable) { finishRestore(records) }
-                return true
+            return withContext(NonCancellable) {
+                val taken=occupied.sorted()
+                val archive=if(taken.isEmpty())emptyList() else useExisting(taken.map { records[it] },taken.map { sources[it]!!.stamp },indexed)
+                if(moving.isNotEmpty())finishRestore(moving)
+                RestoreResult(RestoreOutcome.RESTORED,archive)
             }
-            withContext(NonCancellable) { reconcileRestore(records) }
-            return false
         } finally { release(records.map { it.imageId }) }
+    }
+
+    /**
+     * 原位置已有文件的几份：用现有的。新文件已经入库的，旧记录作废，归档过的话新图接着归档（返回这些新图）；
+     * 还没入库的，旧记录指回原位置（下次扫描按实际文件更新）。先改库再删回收站里的副本：删不掉的只是留在私有目录里的文件，
+     * 不会留下回收站里删不掉的记录。
+     */
+    private suspend fun useExisting(taken:List<QuarantineEntity>, stamps:List<String>, indexed:Map<String,ImageEntity>):List<Long> {
+        val olds=taken.map { it.imageId }.chunked(SQL_CHUNK).flatMap { images.getAnyByIds(it) }.associateBy { it.id }
+        val archive=ArrayList<Long>()
+        val now=System.currentTimeMillis()
+        db.withTransaction {
+            for(record in taken) {
+                val current=indexed[record.originalPath]
+                if(current!=null) {
+                    images.markDeletedFromStatus(listOf(record.imageId),now,"quarantined")
+                    if(olds[record.imageId]?.isArchived==true)archive+=current.id
+                } else {
+                    check(images.markRestorePending(record.imageId,record.originalPath)==1)
+                    check(images.finalizeRestore(record.imageId,now)==1)
+                }
+                cleanup.deleteQuarantine(record.id)
+            }
+        }
+        val gone=delete(taken.map { it.quarantinePath },stamps)
+        if(!gone.all { it })Timber.w("Restore: %d trash copies left after keeping existing files",gone.count { !it })
+        taken.forEach { it.thumbnailPath?.let { path->runCatching { File(path).delete() } } }
+        return archive
     }
 
     suspend fun reconcileByRecord(record:QuarantineEntity):Int {

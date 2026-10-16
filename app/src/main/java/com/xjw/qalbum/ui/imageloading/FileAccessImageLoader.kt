@@ -338,6 +338,15 @@ private class FilePathFetcher(
     private val fastPath: FdFastPath,
 ) : Fetcher {
     override suspend fun fetch(): FetchResult {
+        // App 自己能读的文件（回收站里复制进来的图、缩略图等）直接读，不经特权进程
+        val own = File(data.path)
+        if (own.canRead()) {
+            return SourceFetchResult(
+                source = ImageSource(file = own.toOkioPath(), fileSystem = FileSystem.SYSTEM),
+                mimeType = null,
+                dataSource = DataSource.DISK,
+            )
+        }
         // 裸路径无 size/mtime 版本信息，不落磁盘缓存（避免文件原位替换后读到陈旧内容）；
         // fd 直读为流式，不整图进内存
         val pfd = fastPath.openRead(data.path)

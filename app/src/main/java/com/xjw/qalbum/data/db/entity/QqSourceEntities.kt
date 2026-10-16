@@ -178,3 +178,16 @@ data class QqReadMarkEntity(
     @ColumnInfo(name = "max_rowid") val maxRowid: Long,
     @ColumnInfo(name = "full_read_at") val fullReadAt: Long,
 )
+
+/**
+ * 发送图片缓存的核对结果（按 chatimg 文件）：自己发图时 QQ 把生成的预览另存到 chatimg，文件名按预览自己内容的
+ * MD5 算，消息里没有这个 MD5，QQ 之后不会再读它。[rawPath] 是同一次发送的原图（据此在图库里合并成同一张图）；
+ * 为 null 表示核对过、不是这种文件。[size] 变了（文件被替换）就重新核对。
+ */
+@Entity(tableName = "qq_preview_checks")
+data class QqPreviewCheckEntity(
+    @PrimaryKey val path: String,
+    val size: Long,
+    @ColumnInfo(name = "raw_path") val rawPath: String?,
+    @ColumnInfo(name = "checked_at") val checkedAt: Long,
+)

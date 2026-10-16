@@ -70,7 +70,7 @@ class PictureBatchDeleteTest {
         val head = db.cleanupDao().listQuarantinePaged(0, 10).single()
         val records = db.cleanupDao().getQuarantineGroup(head.groupId!!)
         assertEquals(files.map { it.path }.toSet(), records.map { it.originalPath }.toSet())
-        assertTrue(ops.restore(records))
+        assertEquals(LinkedPictureOperations.RestoreOutcome.RESTORED, ops.restore(records).outcome)
         assertTrue(files.all { it.isFile })
         assertArrayEquals(expected, jpg.readBytes())
         assertEquals(0, count("SELECT COUNT(*) FROM quarantine"))
@@ -246,9 +246,54 @@ class PictureBatchDeleteTest {
         assertEquals(9, count("SELECT COUNT(*) FROM images WHERE status = 'quarantined' AND is_protected = 1"))
         // 恢复后回到归档（整张图，包括后来登记的高清缩略图）
         val head = db.cleanupDao().listQuarantinePaged(0, 10).first()
-        assertTrue(ops.restore(db.cleanupDao().getQuarantineGroup(head.groupId!!)))
+        assertEquals(LinkedPictureOperations.RestoreOutcome.RESTORED, ops.restore(db.cleanupDao().getQuarantineGroup(head.groupId!!)).outcome)
         archive().sync(visible = false)
         assertEquals(4, count("SELECT COUNT(*) FROM images WHERE status = 'archived' AND is_protected = 1"))
+    }
+
+    @Test
+    fun restoreCanKeepFilesQqDownloadedAgain() = runBlocking {
+        val (families, ids) = seed(1)
+        val family = families.single()
+        val originals = family.files.associate { it.path to it.readBytes() }
+        // 从归档里删的：恢复后要回到归档
+        db.imageDao().archive(ids, hidden = false)
+        val ops = operations(manager())
+        PictureFamilyPlanner(db, root.path).batches(ids, PictureDeleteOptions(includeArchived = true), bound) { groups ->
+            ops.quarantineAll(groups, "测试", Long.MAX_VALUE, archived = true)
+        }
+        assertTrue(family.files.none { it.exists() })
+        val records = db.cleanupDao().getQuarantineGroup(db.cleanupDao().listQuarantinePaged(0, 10).single().groupId!!)
+        val oldRaw = records.single { it.originalPath == family.raw.path }.imageId
+
+        // QQ 又下载了原图（扫描已入库）和预览图（还没扫描）
+        val again = jpeg(1600, 1200).copyOf(30_000)
+        family.raw.writeBytes(again)
+        family.img.writeBytes(again)
+        val newRaw = db.imageDao().insert(
+            ImageEntity(
+                path = family.raw.path, filename = family.raw.name, parentDir = family.raw.parent!!, sourceType = "chatraw",
+                cacheKey = family.raw.name, variantGroup = QqCachePaths.familyKey(family.raw.path), size = again.size.toLong(),
+                mtime = 1, firstSeen = 1, lastSeen = 1, mime = "image/jpeg", width = 1, height = 1, status = "active",
+            ),
+        )
+        // 默认不动：整组留在回收站
+        assertEquals(LinkedPictureOperations.RestoreOutcome.OCCUPIED, ops.restore(records).outcome)
+        assertEquals(records.size, count("SELECT COUNT(*) FROM quarantine"))
+
+        // 用现有的文件：原图、预览图保持 QQ 的新文件，其余从回收站送回；回收站清空
+        val result = ops.restore(records, keepExisting = true)
+        assertEquals(LinkedPictureOperations.RestoreOutcome.RESTORED, result.outcome)
+        assertArrayEquals(again, family.raw.readBytes())
+        assertArrayEquals(again, family.img.readBytes())
+        assertArrayEquals(originals.getValue(family.thumb.path), family.thumb.readBytes())
+        assertArrayEquals(originals.getValue(family.hd.path), family.hd.readBytes())
+        assertEquals(0, count("SELECT COUNT(*) FROM quarantine"))
+        assertEquals(0, trash.walk().count { it.isFile })
+        // 旧原图记录作废，新原图接着归档；预览图的旧记录指回原位置
+        assertEquals("deleted", db.imageDao().getById(oldRaw)!!.status)
+        assertEquals(listOf(newRaw), result.archive)
+        assertEquals(family.img.path, db.imageDao().getAnyByPaths(listOf(family.img.path)).single().path)
     }
 
     @Test
@@ -283,7 +328,9 @@ class PictureBatchDeleteTest {
         }
 
         // 恢复时改名同样送不回去（各应用目录有各自的存储配额）：复制回原位置，内容与修改时间不变，回收站副本删掉
-        records.map { it[3]!! }.distinct().forEach { group -> assertTrue(ops.restore(db.cleanupDao().getQuarantineGroup(group))) }
+        records.map { it[3]!! }.distinct().forEach { group ->
+            assertEquals(LinkedPictureOperations.RestoreOutcome.RESTORED, ops.restore(db.cleanupDao().getQuarantineGroup(group)).outcome)
+        }
         contents.forEach { (path, bytes) ->
             assertArrayEquals(bytes, File(path).readBytes())
             assertEquals(mtimes.getValue(path), File(path).lastModified())

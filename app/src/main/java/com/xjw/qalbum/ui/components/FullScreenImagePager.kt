@@ -83,18 +83,22 @@ internal val ViewerChromeColor = Color(0xFF1E1F22).copy(alpha = 0.82f)
  * [images] 是预览时的快照（调用方负责取已加载的有限集合；删除后传入新列表即可）。
  * 提供 [variantsOf] 时（合并显示），底部出现版本条，可切换显示同一张图的其他版本；[refreshKey] 变化时重新取版本
  * （例如归档状态变了）。[bottomBar] 拿到的是正在显示的那个版本。
+ * [onShare] / [onSave] 为 null 时不显示分享 / 保存；[modelOf] 给出每张图读哪个文件（回收站里的图读回收站的文件），
+ * [detailsHeader] 显示在详情卡的文件信息之前。
  */
 @Composable
 internal fun FullScreenImagePager(
     images: List<ImageEntity>,
     startIndex: Int,
     onClose: () -> Unit,
-    onShare: (Long) -> Unit,
-    exportSubdirs: List<String>,
-    onCreateSubdir: (String) -> Unit,
-    onSave: (id: Long, subdir: String?, alsoTrash: Boolean) -> Unit,
+    onShare: ((Long) -> Unit)?,
+    exportSubdirs: List<String> = emptyList(),
+    onCreateSubdir: (String) -> Unit = {},
+    onSave: ((id: Long, subdir: String?, alsoTrash: Boolean) -> Unit)?,
     variantsOf: (suspend (ImageEntity) -> List<ImageEntity>)? = null,
     refreshKey: Any? = null,
+    modelOf: (ImageEntity) -> Any = { ImageEntityModel(it) },
+    detailsHeader: (@Composable (ImageEntity) -> Unit)? = null,
     bottomBar: @Composable (current: ImageEntity) -> Unit,
 ) {
     if (images.isEmpty()) {
@@ -212,7 +216,7 @@ internal fun FullScreenImagePager(
             ) { page ->
                 val shown = shownOn(images[page])
                 ZoomableImage(
-                    model = ImageEntityModel(shown),
+                    model = modelOf(shown),
                     contentDescription = shown.filename,
                     modifier = Modifier.fillMaxSize(),
                     stateKey = shown.id,
@@ -266,8 +270,8 @@ internal fun FullScreenImagePager(
                         )
                     }
                     ViewerIconButton(Icons.Outlined.Info, "详情") { detailsVisible = true }
-                    ViewerIconButton(Icons.Outlined.Download, "保存") { showSaveSheet = true }
-                    ViewerIconButton(Icons.Outlined.Share, "分享") { onShare(current.id) }
+                    if (onSave != null) ViewerIconButton(Icons.Outlined.Download, "保存") { showSaveSheet = true }
+                    if (onShare != null) ViewerIconButton(Icons.Outlined.Share, "分享") { onShare(current.id) }
                 }
             }
 
@@ -281,6 +285,7 @@ internal fun FullScreenImagePager(
                     if (variants.size >= 2) {
                         VariantStrip(
                             variants = variants,
+                            modelOf = modelOf,
                             currentId = current.id,
                             onSelect = { id -> shownVersions = shownVersions + (pageImage.id to id) },
                         )
@@ -305,10 +310,14 @@ internal fun FullScreenImagePager(
                 exit = slideOutVertically(MaterialTheme.motionScheme.fastSpatialSpec()) { it } + fadeOut(fade),
                 modifier = Modifier.align(Alignment.BottomCenter),
             ) {
-                PhotoDetailsSheet(image = current, onClose = { detailsVisible = false })
+                PhotoDetailsSheet(
+                    image = current,
+                    onClose = { detailsVisible = false },
+                    header = detailsHeader?.let { content -> { content(current) } },
+                )
             }
 
-            if (showSaveSheet) {
+            if (showSaveSheet && onSave != null) {
                 SaveToAlbumSheet(
                     imageCount = 1,
                     subdirs = exportSubdirs,

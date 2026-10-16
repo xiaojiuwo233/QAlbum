@@ -97,7 +97,6 @@ fun LogScreen(
         topBar = {
             TopAppBar(
                 title = { Text("日志") },
-                subtitle = { Text("共 ${ui.totalCount} 条 · 占用 ${formatBytes(ui.diskSizeBytes)}") },
                 navigationIcon = { BackButton(onBack) },
                 actions = {
                     IconButton(

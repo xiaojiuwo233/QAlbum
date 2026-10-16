@@ -108,15 +108,6 @@ fun DashboardScreen(
         topBar = {
             LargeFlexibleTopAppBar(
                 title = { Text("QAlbum") },
-                subtitle = {
-                    Text(
-                        if (state.loaded && state.imageCount > 0) {
-                            "${formatCount(state.imageCount)} 张聊天图片 · ${formatBytes(state.totalSizeBytes)}"
-                        } else {
-                            "QQ 聊天图片管理"
-                        },
-                    )
-                },
                 actions = { CleanedStatsLabel(cleanedStats, todayCleanedStats) },
                 scrollBehavior = scrollBehavior,
             )

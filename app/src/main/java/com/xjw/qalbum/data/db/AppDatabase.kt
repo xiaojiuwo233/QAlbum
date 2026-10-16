@@ -15,6 +15,7 @@ import com.xjw.qalbum.data.db.entity.QqSourceAccountEntity
 import com.xjw.qalbum.data.db.entity.QqOriginEntity
 import com.xjw.qalbum.data.db.entity.QqOriginPathEntity
 import com.xjw.qalbum.data.db.entity.QqReadMarkEntity
+import com.xjw.qalbum.data.db.entity.QqPreviewCheckEntity
 import com.xjw.qalbum.data.db.entity.ImageQqOriginEntity
 import com.xjw.qalbum.data.db.entity.QqSourceFacetCacheEntity
 import com.xjw.qalbum.data.db.entity.QqSourceCacheEntity
@@ -51,6 +52,7 @@ import com.xjw.qalbum.data.db.entity.QuarantineEntity
         QqSourceMemberEntity::class,
         QqAutoArchiveEntity::class,
         QqReadMarkEntity::class,
+        QqPreviewCheckEntity::class,
     ],
     version = AppDatabase.VERSION,
     exportSchema = true,
@@ -249,6 +251,19 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v23 → v24：记下发送图片缓存的核对结果（自己发图时 QQ 另存、之后不再读取的 chatimg 预览），
+         * 「发送图片缓存」列表与图库合并显示据此判断；下次读取聊天来源时补上。
+         */
+        val MIGRATION_23_24 = object : Migration(23, 24) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `qq_preview_checks` (`path` TEXT NOT NULL, `size` INTEGER NOT NULL, " +
+                        "`raw_path` TEXT, `checked_at` INTEGER NOT NULL, PRIMARY KEY(`path`))",
+                )
+            }
+        }
+
         private val LEGACY_TABLES_V20 = listOf(
             "ocr_fts", "ocr_text", "image_tags", "tags", "ai_analysis", "image_embeddings",
             "dedup_exclusions", "cleanup_candidates", "cleanup_batches",
@@ -283,7 +298,7 @@ abstract class AppDatabase : RoomDatabase() {
         const val DB_NAME = "qalbum.db"
 
         /** 当前数据库版本（启动时据此判断要不要显示升级进度） */
-        const val VERSION = 23
+        const val VERSION = 24
 
         /** v1 → v2：Phase 3 增加 Room FTS4 OCR 索引。 */
         val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -822,7 +837,7 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8,
             MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14,
             MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20,
-            MIGRATION_20_21, MIGRATION_21_22, MIGRATION_22_23,
+            MIGRATION_20_21, MIGRATION_21_22, MIGRATION_22_23, MIGRATION_23_24,
         )
 
         /** 每个迁移开始时报告升级到哪一版（升级弹窗里显示），具体步骤由迁移自己细报 */

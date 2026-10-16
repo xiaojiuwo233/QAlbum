@@ -1,6 +1,7 @@
 package com.xjw.qalbum.qq
 
 import android.content.Context
+import android.os.ParcelFileDescriptor
 import android.database.sqlite.SQLiteDatabaseCorruptException
 import androidx.room.withTransaction
 import com.xjw.qalbum.data.db.AppDatabase
@@ -211,6 +212,17 @@ class QqSourceRepository(
                         if ("+" !in rows || entries.isEmpty()) break
                     }
                     dao.reconcileLinks()
+                    // 自己发的图多出的 chatimg 预览按 MD5 关联不上，按同一次发送的原图补上来源
+                    stage = "sent_previews"
+                    val label = "关联自己发的图的预览"
+                    _progress.value = QqSourceProgress(label)
+                    val ops = bound
+                    QqSentPreviewLinker(db) { path ->
+                        ops.callWithTimeout(onAbandoned = { it?.close() }) { it.openRead(path) }
+                            ?.let(ParcelFileDescriptor::AutoCloseInputStream)
+                    }.link(accounts.map { opaqueKey(it.key, "sender", it.uid) }) { done, total ->
+                        _progress.value = QqSourceProgress(label, done.toLong(), total.toLong())
+                    }
                 }
                 // 个别解析不了的消息（多是没缓存内容的合并转发）和 QQ 库里本来就坏的几行每次都一样，不算没读完；
                 // 只有账号读取失败、消息表没读完才算

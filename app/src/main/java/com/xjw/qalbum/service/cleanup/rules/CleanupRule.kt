@@ -77,7 +77,7 @@ sealed class CleanupRule(val id: String) {
             """i.source_type = 'chatraw' AND i.status = 'active' AND i.is_protected = 0
                 AND i.is_animated = 0 AND i.mime <> 'image/gif' AND i.size >= $SLIM_MIN_BYTES
                 AND EXISTS (SELECT 1 FROM images p WHERE p.variant_group = i.variant_group
-                    AND p.source_type = 'chatimg' AND p.status = 'active')
+                    AND p.source_type = 'chatimg' AND p.status = 'active' AND NOT ${sentPreview("p")})
                 AND NOT $STICKER_MESSAGE""",
             option, now,
         )
@@ -186,6 +186,20 @@ sealed class CleanupRule(val id: String) {
         }
     }
 
+    /**
+     * 发送图片缓存：自己发图时 QQ 另存到 chatimg 的预览（按它自己内容的 MD5 命名，消息里没有），QQ 之后不会再读。
+     * 读取聊天来源时逐个核对（见 QqSentPreviewLinker），只删这一个文件。
+     */
+    data object SentPreviews : CleanupRule("sent_previews") {
+        override val title = "发送图片缓存"
+        override val description = "自己发图时 QQ 另存的一份预览，之后不会再用，删了不影响聊天里的图片。"
+        override val scope = RuleScope.FILE
+        override val trashNote = "只删这份缓存，原图和缩略图保留。"
+        override fun where(option: Int, now: Long) = SqlPart(
+            "i.source_type = 'chatimg' AND i.status = 'active' AND i.is_protected = 0 AND ${sentPreview("i")}",
+        )
+    }
+
     /** 按时间清理选中的一段时间：整张图 [from, until) */
     data class TimeRange(val from: Long, val until: Long, val label: String) : CleanupRule("range:$from:$until:$label") {
         override val title get() = label
@@ -208,7 +222,11 @@ sealed class CleanupRule(val id: String) {
         val listed: List<CleanupRule> by lazy { listOf(Thumbnails, SlimOriginals, CompressOriginals, Stickers, OldPictures) }
 
         /** 按聊天的规则（需要 Root 读取聊天来源），清理页单独一组 */
-        val chat: List<CleanupRule> by lazy { listOf(GroupOld, DeletedChats) }
+        val chat: List<CleanupRule> by lazy { listOf(SentPreviews, GroupOld, DeletedChats) }
+
+        /** [row] 这一行是核对过的发送图片缓存（文件没变过） */
+        fun sentPreview(row: String) = """EXISTS (SELECT 1 FROM qq_preview_checks k
+            WHERE k.path = $row.path AND k.size = $row.size AND k.raw_path IS NOT NULL)"""
 
         /** 最近一次完整读取聊天来源的开始时间（没有过为 0） */
         private const val COMPLETE_READ = "(SELECT complete_read_at FROM qq_source_cache WHERE id = 1)"

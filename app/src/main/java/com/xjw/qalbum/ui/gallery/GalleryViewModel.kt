@@ -175,8 +175,6 @@ class GalleryViewModel(
             .flatMapLatest { statuses -> imageRepository.archiveTimelinePager(statuses, refreshGate).withDateHeaders(archiveDateBucketCounts) }
             .cachedIn(viewModelScope)
 
-    val archiveCount: Flow<Int> = archiveStatuses.flatMapLatest { imageRepository.observeArchiveCount(it) }
-
     /** 归档的图片也在图库中显示（关闭时只在归档页出现） */
     val archiveVisible: StateFlow<Boolean> = settings.archiveVisible
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
@@ -265,7 +263,9 @@ class GalleryViewModel(
 sealed class GalleryTimelineItem {
     /** 分类标题：[key] 唯一且稳定（供 Paging/LazyGrid 复用判定），[label] 为展示文案，[section] 为它覆盖的范围 */
     data class Header(val key: String, val label: String, val section: TimelineSection) : GalleryTimelineItem()
-    data class Photo(val image: ImageEntity) : GalleryTimelineItem()
+
+    /** [tag] 由建列表的页面附带（如回收站里这组图的信息），网格本身不读它 */
+    data class Photo(val image: ImageEntity, val tag: Any? = null) : GalleryTimelineItem()
 }
 
 /** 按大小分组时取哪个大小：文件自身，或合并显示时的整组合计 */
@@ -280,49 +280,62 @@ internal val StackedSize: (ImageEntity) -> Long = { it.variantBytes }
 internal fun Flow<PagingData<ImageEntity>>.withDateHeaders(
     bucketCounts: Flow<Map<Long, Int>?>,
 ): Flow<PagingData<GalleryTimelineItem>> =
-    flowMap { pagingData: PagingData<ImageEntity> ->
-        val counts = bucketCounts.filterNotNull().first()
-        pagingData
-            .pagingMap { image: ImageEntity -> GalleryTimelineItem.Photo(image) as GalleryTimelineItem }
-            .insertSeparators { before: GalleryTimelineItem?, after: GalleryTimelineItem? ->
-                val afterPhoto = after as? GalleryTimelineItem.Photo ?: return@insertSeparators null
-                val beforePhoto = before as? GalleryTimelineItem.Photo
-                val afterKey = dayKey(afterPhoto.image.mtime)
-                if (beforePhoto == null || dayKey(beforePhoto.image.mtime) != afterKey) {
-                    GalleryTimelineItem.Header(
-                        key = "d-$afterKey",
-                        label = headerLabel(dayLabel(afterPhoto.image.mtime), counts[afterKey]),
-                        section = daySection(afterPhoto.image.mtime),
-                    )
-                } else {
-                    null
-                }
-            }
-    }
+    flowMap { data -> data.pagingMap { GalleryTimelineItem.Photo(it) } }.withDayHeaders(bucketCounts) { it.image.mtime }
 
 internal fun Flow<PagingData<ImageEntity>>.withSizeHeaders(
     bucketCounts: Flow<Map<Long, Int>?>,
     sizeOf: (ImageEntity) -> Long = FileSize,
 ): Flow<PagingData<GalleryTimelineItem>> =
-    flowMap { pagingData: PagingData<ImageEntity> ->
-        val counts = bucketCounts.filterNotNull().first()
-        pagingData
-            .pagingMap { image: ImageEntity -> GalleryTimelineItem.Photo(image) as GalleryTimelineItem }
-            .insertSeparators { before: GalleryTimelineItem?, after: GalleryTimelineItem? ->
-                val afterPhoto = after as? GalleryTimelineItem.Photo ?: return@insertSeparators null
-                val beforePhoto = before as? GalleryTimelineItem.Photo
-                val afterKey = sizeBucketId(sizeOf(afterPhoto.image))
-                if (beforePhoto == null || sizeBucketId(sizeOf(beforePhoto.image)) != afterKey) {
-                    GalleryTimelineItem.Header(
-                        key = "s-$afterKey",
-                        label = headerLabel(sizeBucketLabel(sizeOf(afterPhoto.image)), counts[afterKey]),
-                        section = sizeBucketSection(afterKey),
-                    )
-                } else {
-                    null
-                }
-            }
+    flowMap { data -> data.pagingMap { GalleryTimelineItem.Photo(it) } }.withSizeBuckets(bucketCounts) { sizeOf(it.image) }
+
+/** 按 [timeOf] 所在的本地日期插入分组标题（带当天张数，[note] 可在后面附一句，如回收站的到期天数） */
+internal fun Flow<PagingData<GalleryTimelineItem.Photo>>.withDayHeaders(
+    bucketCounts: Flow<Map<Long, Int>?>,
+    note: (GalleryTimelineItem.Photo) -> String? = { null },
+    timeOf: (GalleryTimelineItem.Photo) -> Long,
+): Flow<PagingData<GalleryTimelineItem>> =
+    flowMap { pagingData: PagingData<GalleryTimelineItem.Photo> ->
+        val counts = HeaderCounts(bucketCounts)
+        pagingData.insertSeparators<GalleryTimelineItem.Photo, GalleryTimelineItem> { before, after ->
+            if (after == null) return@insertSeparators null
+            val time = timeOf(after)
+            val key = dayKey(time)
+            if (before != null && dayKey(timeOf(before)) == key) return@insertSeparators null
+            val label = headerLabel(dayLabel(time), counts.get()[key])
+            GalleryTimelineItem.Header(
+                key = "d-$key",
+                // 全角括号自带留白，后面的「·」不再空格
+                label = label + note(after)?.let { if (label.endsWith("）")) "· $it" else " · $it" }.orEmpty(),
+                section = daySection(time),
+            )
+        }
     }
+
+/** 按 [sizeOf] 的大小区间插入分组标题（与 [sizeBucketId] 同一套分组） */
+internal fun Flow<PagingData<GalleryTimelineItem.Photo>>.withSizeBuckets(
+    bucketCounts: Flow<Map<Long, Int>?>,
+    sizeOf: (GalleryTimelineItem.Photo) -> Long,
+): Flow<PagingData<GalleryTimelineItem>> =
+    flowMap { pagingData: PagingData<GalleryTimelineItem.Photo> ->
+        val counts = HeaderCounts(bucketCounts)
+        pagingData.insertSeparators<GalleryTimelineItem.Photo, GalleryTimelineItem> { before, after ->
+            if (after == null) return@insertSeparators null
+            val size = sizeOf(after)
+            val key = sizeBucketId(size)
+            if (before != null && sizeBucketId(sizeOf(before)) == key) return@insertSeparators null
+            GalleryTimelineItem.Header(key = "s-$key", label = headerLabel(sizeBucketLabel(size), counts.get()[key]), section = sizeBucketSection(key))
+        }
+    }
+
+/**
+ * 一代分页数据的分组计数：插第一个标题时才取。批量操作期间网格关着闸门（见 RefreshGate），新一代要等闸门打开、
+ * 数据真正加载时才插标题，这时再取计数，标题上的张数才与网格一致。
+ */
+private class HeaderCounts(private val source: Flow<Map<Long, Int>?>) {
+    private var counts: Map<Long, Int>? = null
+
+    suspend fun get(): Map<Long, Int> = counts ?: source.filterNotNull().first().also { counts = it }
+}
 
 private fun headerLabel(label: String, count: Int?): String =
     if (count == null) label else "$label（$count）"

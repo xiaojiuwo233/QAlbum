@@ -193,6 +193,32 @@ class CleanupRuleQueryTest {
     }
 
     @Test
+    fun sentPreviewsAreListedAndNeverCountAsTheVisiblePreview() = runBlocking {
+        // 自己发的图：原图 + 发图时另存的预览（按它自己内容的 MD5 命名，在另一个家族里）
+        val (_, sentRaw) = family()
+        val raw = insert(sentRaw, "chatraw", "active", 2 * mb, age = 100)
+        val previewPath = family()[0]
+        val preview = insert(previewPath, "chatimg", "active", 150_000, age = 100)
+        db.openHelper.writableDatabase.execSQL(
+            "INSERT INTO qq_preview_checks(path, size, raw_path, checked_at) VALUES(?, 150000, ?, 1)", arrayOf(previewPath, sentRaw),
+        )
+        com.xjw.qalbum.qq.QqSentPreviewLinker.mergeFamilies(db)
+        // 收到的图：原图 + QQ 显示用的预览图
+        val (img, receivedRaw) = family()
+        val shown = insert(img, "chatimg", "active", 200_000, age = 100)
+        val received = insert(receivedRaw, "chatraw", "active", 2 * mb, age = 100)
+
+        assertEquals(setOf(preview), ids(CleanupRule.SentPreviews))
+        assertEquals(RuleStats(1, 150_000), stats(CleanupRule.SentPreviews))
+        // 发送图片缓存 QQ 不会再读：自己发的原图不能靠它「瘦身」
+        assertEquals(setOf(received), ids(CleanupRule.SlimOriginals, 90))
+        // 图库里并进原图那一家：原图代表整张图（2 个版本），预览隐藏
+        assertEquals(2, db.query("SELECT variant_count FROM images WHERE id = $raw", emptyArray()).use { it.moveToFirst(); it.getInt(0) })
+        assertEquals(1, db.query("SELECT variant_hidden FROM images WHERE id = $preview", emptyArray()).use { it.moveToFirst(); it.getInt(0) })
+        assertFalse(shown in ids(CleanupRule.SentPreviews))
+    }
+
+    @Test
     fun gifMessagesJoinTheStickerRuleAndLeaveSlimOriginals() = runBlocking {
         // 看着像照片、但聊天记录里是 GIF 的图（比如单帧动图）
         val (img, raw) = family()

@@ -8,7 +8,6 @@ import com.xjw.qalbum.data.db.DatabaseOpener
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.data.repository.ImageRepository
 import com.xjw.qalbum.service.cleanup.ArchiveManager
-import com.xjw.qalbum.service.cleanup.CleanupController
 import com.xjw.qalbum.service.cleanup.CompressDemo
 import com.xjw.qalbum.service.cleanup.CompressionCoordinator
 import com.xjw.qalbum.service.cleanup.QuarantineManager
@@ -84,12 +83,14 @@ val appModule = module {
     single { ScanTransportFactory(accessManager = get(), fileOpsClient = get()) }
     single {
         val archive = get<ArchiveManager>()
+        val database = get<AppDatabase>()
         ScanPipeline(
             db = get(),
             imageDao = get(),
             dirSnapshotDao = get(),
             transportFactory = get(),
-            afterScan = { archive.sync(); archive.applyAutoArchive() },
+            // 扫描结束：归档跟上、自动归档名单、发送图片缓存并回原图那一家
+            afterScan = { archive.sync(); archive.applyAutoArchive(); com.xjw.qalbum.qq.QqSentPreviewLinker.mergeFamilies(database) },
         )
     }
     single { ImageSizeBackfill(imageDao = get(), transportFactory = get(), tasks = get(), appScope = get()) }
@@ -112,7 +113,6 @@ val appModule = module {
     single { ArchiveManager(db = get(), settings = get(), appScope = get()) }
     single { com.xjw.qalbum.service.indexer.PictureVariantIndexer(db = get(), settings = get()) }
     single { ImageFileManager(context = get(), accessManager = get(), imageDao = get()) }
-    single { CleanupController(quarantineManager = get(), cleanupDao = get()) }
     single { OriginalCompressor(context = get(), db = get(), accessManager = get(), fileOpsClient = get(), settings = get()) }
     single { CleanupRunner(quarantine = get(), compressor = get(), tasks = get(), appScope = get()) }
     // 定时清理（每周，设置里选规则）
@@ -179,10 +179,17 @@ val appModule = module {
     viewModel {
         com.xjw.qalbum.ui.cleanup.CleanupViewModel(
             db = get(),
-            cleanupController = get(),
             runner = get(),
-            compressor = get(),
             imageRepository = get(),
+            archive = get(),
+            settings = get(),
+        )
+    }
+    viewModel {
+        com.xjw.qalbum.ui.cleanup.RecycleBinViewModel(
+            db = get(),
+            quarantine = get(),
+            compressor = get(),
             archive = get(),
             settings = get(),
             tasks = get(),

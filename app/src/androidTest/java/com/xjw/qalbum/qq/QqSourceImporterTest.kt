@@ -160,6 +160,58 @@ class QqSourceImporterTest {
         assertEquals(0, scalar("SELECT COUNT(*) FROM images WHERE is_protected = 0"))
     }
 
+    @Test
+    fun previewsOfSelfSentPicturesFollowTheirOriginal() = runBlocking {
+        val sent = now - 30 * day
+        // 自己发的图：消息里记的是原图的 MD5；预览按它自己内容的 MD5 命名，按 MD5 关联不上
+        val photo = picture(1)
+        val raw = image(QqCachePaths.relativePaths(hex(photo))[1], "chatraw", sent, 1000, 750)
+        val previewBytes = ByteArray(4096) { (it * 7).toByte() }
+        val previewPath = QqCachePaths.relativePaths(md5Of(previewBytes))[0]
+        val preview = image(previewPath, "chatimg", sent + 300, 720, 540)
+        // 同一时刻收到的别人的图，和一张文件名与内容对不上的 chatimg：都不能被当成预览
+        val received = picture(2)
+        image(QqCachePaths.relativePaths(hex(received))[1], "chatraw", sent + 100, 1000, 750)
+        val strangerPath = QqCachePaths.relativePaths(hex(picture(3)))[0]
+        val stranger = image(strangerPath, "chatimg", sent + 500, 720, 540)
+        message("group_msg_table", 1, account.uid, 1001, sent, element(photo, picType = 1000))
+        message("group_msg_table", 2, "u_alice", 1001, sent, element(received, picType = 1000))
+        val read = now - day
+        import(read)
+
+        // 这张图按消息 MD5 命名的预览图（QQ 显示用的）：不算，也不用读
+        val shown = image(QqCachePaths.relativePaths(hex(photo))[0], "chatimg", sent + 400, 720, 540)
+        val contents = mapOf("$root/$previewPath" to previewBytes, "$root/$strangerPath" to ByteArray(4096) { 1 })
+        val opened = mutableListOf<String>()
+        val linker = QqSentPreviewLinker(db) { path -> opened += path; contents[path]?.inputStream() }
+        assertEquals(1, linker.link(listOf(opaqueKey(account.key, "sender", account.uid))))
+        assertTrue("$root/${QqCachePaths.relativePaths(hex(photo))[0]}" !in opened)
+        assertEquals(1, scalar("SELECT COUNT(*) FROM image_qq_origins WHERE image_id = $preview"))
+        assertEquals(0, scalar("SELECT COUNT(*) FROM image_qq_origins WHERE image_id = $stranger"))
+        assertEquals(
+            scalar("SELECT COUNT(*) FROM image_qq_origins l JOIN image_qq_origins r ON r.origin_id = l.origin_id WHERE l.image_id = $preview AND r.image_id = $raw"),
+            1,
+        )
+        // 图库里并进原图那一家（不再多出一张），「发送图片缓存」只列它
+        assertEquals(scalarLong("SELECT variant_group FROM images WHERE id = $raw"), scalarLong("SELECT variant_group FROM images WHERE id = $preview"))
+        assertEquals(1, scalar("SELECT variant_hidden FROM images WHERE id = $preview"))
+        assertEquals(setOf(preview), ids(CleanupRule.SentPreviews, 0))
+        assertTrue(shown !in ids(CleanupRule.SentPreviews, 0))
+        // 消息还在：预览不算「聊天记录已删除」；对不上的那张照算
+        db.qqSourceDao().setCompleteReadAt(read)
+        val deleted = ids(CleanupRule.DeletedChats, 0)
+        assertTrue(preview !in deleted && raw !in deleted)
+        assertTrue(stranger in deleted)
+        // 再读一次不会重复核对
+        opened.clear()
+        assertEquals(0, linker.link(listOf(opaqueKey(account.key, "sender", account.uid))))
+        assertTrue(opened.isEmpty())
+        // 预览被重新入库（家族键按路径重算）后，扫描结束时并回原图那一家
+        db.openHelper.writableDatabase.execSQL("UPDATE images SET variant_group = ${QqCachePaths.familyKey("$root/$previewPath")} WHERE id = $preview")
+        QqSentPreviewLinker.mergeFamilies(db)
+        assertEquals(scalarLong("SELECT variant_group FROM images WHERE id = $raw"), scalarLong("SELECT variant_group FROM images WHERE id = $preview"))
+    }
+
     // ---- 只读副本 ----
 
     private fun messages(block: (SQLiteDatabase) -> Unit) {
@@ -234,10 +286,28 @@ class QqSourceImporterTest {
         return ids.first()
     }
 
+    /** 单个缓存文件入库，返回 id */
+    private suspend fun image(relative: String, type: String, mtime: Long, width: Int, height: Int): Long {
+        val path = "$root/$relative"
+        return db.imageDao().insert(
+            ImageEntity(
+                path = path, filename = path.substringAfterLast('/'), parentDir = path.substringBeforeLast('/'),
+                sourceType = type, cacheKey = path.substringAfterLast('/'), variantGroup = QqCachePaths.familyKey(path),
+                size = 100_000, mtime = mtime, firstSeen = mtime, lastSeen = mtime,
+                mime = "image/jpeg", width = width, height = height, isAnimated = false, status = "active",
+            ),
+        )
+    }
+
+    private fun md5Of(bytes: ByteArray): String =
+        java.security.MessageDigest.getInstance("MD5").digest(bytes).joinToString("") { "%02x".format(it) }
+
     private suspend fun ids(rule: CleanupRule, option: Int): Set<Long> =
         db.cleanupRuleDao().ids(RuleSql.idsAfter(rule.where(option, now), 0, 1_000)).toSet()
 
     private fun conversationKey() = opaqueKey(account.key, "conversation", "2", "1001")
 
     private fun scalar(sql: String): Int = db.query(sql, emptyArray()).use { it.moveToFirst(); it.getInt(0) }
+
+    private fun scalarLong(sql: String): Long = db.query(sql, emptyArray()).use { it.moveToFirst(); it.getLong(0) }
 }

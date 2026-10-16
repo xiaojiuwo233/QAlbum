@@ -30,6 +30,18 @@ class AppDatabaseMigrationTest {
     }
 
     @Test
+    fun migrate23To24_addsSentPreviewChecks() {
+        val name = "migration-23-24"
+        helper.createDatabase(name, 23).close()
+        helper.runMigrationsAndValidate(name, 24, true, AppDatabase.MIGRATION_23_24).use { db ->
+            // 核对结果：是发送图片缓存的记着同一次发送的原图，不是的为空
+            db.execSQL("INSERT INTO qq_preview_checks(path, size, raw_path, checked_at) VALUES('/chatimg/a', 10, '/chatraw/b', 1)")
+            db.execSQL("INSERT INTO qq_preview_checks(path, size, raw_path, checked_at) VALUES('/chatimg/c', 20, NULL, 1)")
+            assertEquals(1L, scalarLong(db, "SELECT COUNT(*) FROM qq_preview_checks WHERE raw_path IS NOT NULL"))
+        }
+    }
+
+    @Test
     fun migrate22To23_addsReadStateAutoArchiveAndReadMarks() {
         val name = "migration-22-23"
         helper.createDatabase(name, 22).use { db ->

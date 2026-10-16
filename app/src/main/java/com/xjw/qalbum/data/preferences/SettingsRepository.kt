@@ -210,6 +210,13 @@ class SettingsRepository(
         ds.edit { it[Keys.CLEANUP_RULE_SORT] = sort.name }
     }
 
+    /** 回收站的排序（日期按移入回收站的时间） */
+    val recycleBinSort: Flow<SourceSort> = prefsData.map { SourceSort.fromName(it[Keys.RECYCLE_BIN_SORT]) }
+
+    suspend fun setRecycleBinSort(sort: SourceSort) {
+        ds.edit { it[Keys.RECYCLE_BIN_SORT] = sort.name }
+    }
+
     /** QQ 来源分类列表的排序 */
     val qqSourceFacetOrder: Flow<SourceFacetOrder> = prefsData.map { SourceFacetOrder.fromName(it[Keys.QQ_SOURCE_FACET_ORDER]) }
 
@@ -359,6 +366,7 @@ class SettingsRepository(
         val VARIANT_INDEX_VERSION = intPreferencesKey("variant_index_version")
         val QQ_SOURCE_SORT = stringPreferencesKey("qq_source_sort")
         val CLEANUP_RULE_SORT = stringPreferencesKey("cleanup_rule_sort")
+        val RECYCLE_BIN_SORT = stringPreferencesKey("recycle_bin_sort")
         val SCHEDULED_CLEANUP = stringSetPreferencesKey("scheduled_cleanup_rules")
         val SCHEDULED_CLEANUP_LAST = stringPreferencesKey("scheduled_cleanup_last")
         val QQ_SOURCE_FACET_ORDER = stringPreferencesKey("qq_source_facet_order")

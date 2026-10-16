@@ -41,14 +41,13 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
-import androidx.compose.material3.LargeFlexibleTopAppBar
+import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.MaterialShapes
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.toShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -63,7 +62,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.paging.LoadState
@@ -119,7 +117,6 @@ fun RulePreviewScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
-    val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
 
     var selected by rememberSaveable(rule.id, stateSaver = SelectedSaver) { mutableStateOf(setOf<Long>()) }
     var confirmTrash by rememberSaveable { mutableStateOf(false) }
@@ -156,8 +153,8 @@ fun RulePreviewScreen(
 
     val topEnter = MaterialTheme.motionScheme.defaultEffectsSpec<Float>()
     val topExit = MaterialTheme.motionScheme.fastEffectsSpec<Float>()
+    // 顶栏固定为小顶栏：进入多选时高度不变，网格不跳，长按后拖动连选的位置才对得上
     Scaffold(
-        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
             AnimatedContent(
                 targetState = selecting,
@@ -177,7 +174,7 @@ fun RulePreviewScreen(
                         },
                     )
                 } else {
-                    LargeFlexibleTopAppBar(
+                    TopAppBar(
                         title = { Text(rule.title) },
                         subtitle = {
                             Text(
@@ -194,7 +191,6 @@ fun RulePreviewScreen(
                                 Icon(Icons.Outlined.SelectAll, contentDescription = "全选")
                             }
                         },
-                        scrollBehavior = scrollBehavior,
                     )
                 }
             }

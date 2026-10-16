@@ -43,7 +43,12 @@ import com.xjw.qalbum.ui.imageloading.ImageEntityModel
  * 底部版本条：同一张图的原图 / 预览图 / 缩略图（类似相册的图集），点选切换显示，标出各自大小与合计。
  */
 @Composable
-internal fun VariantStrip(variants: List<ImageEntity>, currentId: Long, onSelect: (Long) -> Unit) {
+internal fun VariantStrip(
+    variants: List<ImageEntity>,
+    currentId: Long,
+    onSelect: (Long) -> Unit,
+    modelOf: (ImageEntity) -> Any = { ImageEntityModel(it) },
+) {
     Surface(
         shape = MaterialTheme.shapes.extraLarge,
         color = ViewerChromeColor,
@@ -64,7 +69,7 @@ internal fun VariantStrip(variants: List<ImageEntity>, currentId: Long, onSelect
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
             ) {
                 variants.forEach { variant ->
-                    VariantThumb(variant, selected = variant.id == currentId, onClick = { onSelect(variant.id) })
+                    VariantThumb(variant, modelOf(variant), selected = variant.id == currentId, onClick = { onSelect(variant.id) })
                 }
             }
         }
@@ -72,7 +77,7 @@ internal fun VariantStrip(variants: List<ImageEntity>, currentId: Long, onSelect
 }
 
 @Composable
-private fun VariantThumb(image: ImageEntity, selected: Boolean, onClick: () -> Unit) {
+private fun VariantThumb(image: ImageEntity, model: Any, selected: Boolean, onClick: () -> Unit) {
     val context = LocalContext.current
     val border by animateColorAsState(
         if (selected) Color.White else Color.Transparent,
@@ -89,7 +94,7 @@ private fun VariantThumb(image: ImageEntity, selected: Boolean, onClick: () -> U
             .padding(horizontal = 6.dp, vertical = 4.dp),
     ) {
         AsyncImage(
-            model = ImageRequest.Builder(context).data(ImageEntityModel(image)).crossfade(true).build(),
+            model = ImageRequest.Builder(context).data(model).crossfade(true).build(),
             contentDescription = variantLabel(image),
             contentScale = ContentScale.Crop,
             modifier = Modifier

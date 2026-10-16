@@ -41,6 +41,7 @@ import androidx.compose.material.icons.outlined.GifBox
 import androidx.compose.material.icons.outlined.Groups
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Inventory2
+import androidx.compose.material.icons.outlined.Outbox
 import androidx.compose.material.icons.outlined.PhotoSizeSelectLarge
 import androidx.compose.material.icons.outlined.PhotoSizeSelectSmall
 import androidx.compose.material.icons.outlined.SpeakerNotesOff
@@ -182,7 +183,6 @@ fun CleanupScreen(
             )
             CleanupPage.BIN -> CleanupRecycleBinScreen(
                 contentPadding = WindowInsets.navigationBars.asPaddingValues(),
-                viewModel = viewModel,
                 onBack = back,
             )
             else -> CleanupMainScreen(
@@ -232,7 +232,6 @@ private fun CleanupMainScreen(
         topBar = {
             LargeFlexibleTopAppBar(
                 title = { Text("清理") },
-                subtitle = { Text("先归档要留的，再批量清理") },
                 scrollBehavior = scrollBehavior,
             )
         },
@@ -309,12 +308,12 @@ private fun CleanupMainScreen(
                         )
                     }
                     item("bin") { position ->
-                        val backups = if (backupStats.count > 0) "；压缩前的原图 ${formatCountExact(backupStats.count)} 张" else ""
+                        val backups = if (backupStats.count > 0) " · 原图备份 ${formatCountExact(backupStats.count)} 张" else ""
                         SegmentedNavigationItem(
                             position = position,
                             icon = Icons.Outlined.Inventory2,
                             title = "回收站",
-                            subtitle = "${formatCountExact(quarantineStats.count)} 项 · ${formatBytes(quarantineStats.bytes)}，到期自动删除$backups",
+                            subtitle = "${formatCountExact(quarantineStats.count)} 张 · ${formatBytes(quarantineStats.bytes)}$backups",
                             onClick = onOpenRecycleBin,
                         )
                     }
@@ -354,6 +353,7 @@ internal fun ruleIcon(rule: CleanupRule): ImageVector = when (rule) {
     CleanupRule.OldPictures -> Icons.Outlined.History
     CleanupRule.GroupOld -> Icons.Outlined.Groups
     CleanupRule.DeletedChats -> Icons.Outlined.SpeakerNotesOff
+    CleanupRule.SentPreviews -> Icons.Outlined.Outbox
     is CleanupRule.TimeRange -> Icons.Outlined.CalendarMonth
 }
 

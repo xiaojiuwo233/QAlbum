@@ -18,6 +18,8 @@ import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.fileops.BoundFileOps
 import com.xjw.qalbum.fileops.FileOpsClient
 import com.xjw.qalbum.qq.QqSourceScope
+import com.xjw.qalbum.service.cleanup.LinkedPictureOperations.RestoreOutcome
+import com.xjw.qalbum.service.cleanup.LinkedPictureOperations.RestoreResult
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -189,18 +191,78 @@ class QuarantineManager(
 
     /** 从回收站恢复；从归档里删除的图恢复后回到归档（按设置重新隐藏） */
     suspend fun restore(quarantineId: Long): Boolean =
-        restoreRecord(quarantineId).also { restored -> if (restored) runCatching { archive.sync() } }
+        (restoreRecord(quarantineId).outcome == RestoreOutcome.RESTORED).also { restored -> if (restored) runCatching { archive.sync() } }
 
-    private suspend fun restoreRecord(quarantineId: Long): Boolean = withContext(Dispatchers.IO) {
-        val record = cleanupDao.getQuarantineById(quarantineId) ?: return@withContext false
-        if (record.state != STATE_READY) return@withContext false
+    /**
+     * 批量恢复的结果：恢复了的组里全部图片的 id、恢复了的组（回收站记录 id，每组一条）、原位置已经有文件没有恢复的组
+     * （回收站记录 id）
+     */
+    data class RestoreReport(
+        val restored: List<Long> = emptyList(),
+        val groups: List<Long> = emptyList(),
+        val occupied: List<Long> = emptyList(),
+    )
+
+    /**
+     * 批量恢复（[quarantineIds] 每组一条，整组恢复）。原位置已经有文件（多是 QQ 又下载了一份）的组默认不动、记在
+     * [RestoreReport.occupied] 里；[keepExisting] 时用现有的文件，其余照常送回。期间一直占着特权服务的绑定，
+     * 不会每组重新连一次；归档最后同步一次。
+     */
+    suspend fun restoreAll(
+        quarantineIds: List<Long>, keepExisting: Boolean = false, onProgress: (done: Int, total: Int) -> Unit = { _, _ -> },
+    ): RestoreReport = withContext(Dispatchers.IO) {
+        val restored = ArrayList<Long>()
+        val groups = ArrayList<Long>()
+        val occupied = ArrayList<Long>()
+        val adopted = ArrayList<Long>()
         val provider = accessManager.current()
-        if (!provider.isAvailable()) return@withContext false
+        if (!provider.isAvailable()) return@withContext RestoreReport()
+        val keep = fileOpsClient.bind(provider.getAccessMode())
+        try {
+            quarantineIds.forEachIndexed { index, id ->
+                ensureActive()
+                val record = cleanupDao.getQuarantineById(id)
+                if (record != null) {
+                    val members = record.groupId?.let { cleanupDao.getQuarantineGroup(it) } ?: listOf(record)
+                    val result = restoreRecord(id, keepExisting)
+                    when (result.outcome) {
+                        RestoreOutcome.RESTORED -> {
+                            restored += members.map { it.imageId }
+                            groups += id
+                            adopted += result.archive
+                        }
+                        RestoreOutcome.OCCUPIED -> occupied += id
+                        RestoreOutcome.FAILED -> Unit
+                    }
+                }
+                onProgress(index + 1, quarantineIds.size)
+            }
+        } finally {
+            keep?.close()
+            // 接替了归档过的旧记录的新图接着归档
+            if (adopted.isNotEmpty()) runCatching { archive.archive(adopted) }
+            if (restored.isNotEmpty()) runCatching { archive.sync() }
+        }
+        RestoreReport(restored, groups, occupied)
+    }
+
+    private suspend fun restoreRecord(quarantineId: Long, keepExisting: Boolean = false): RestoreResult = withContext(Dispatchers.IO) {
+        val failed = RestoreResult(RestoreOutcome.FAILED)
+        val record = cleanupDao.getQuarantineById(quarantineId) ?: return@withContext failed
+        if (record.state != STATE_READY) return@withContext failed
+        val provider = accessManager.current()
+        if (!provider.isAvailable()) return@withContext failed
         if (record.groupId != null) {
-            val bound=fileOpsClient.bind(provider.getAccessMode())?:return@withContext false
-            try { return@withContext linkedOperations(bound,provider).restore(cleanupDao.getQuarantineGroup(record.groupId)) }
+            val bound = fileOpsClient.bind(provider.getAccessMode()) ?: return@withContext failed
+            try { return@withContext linkedOperations(bound, provider).restore(cleanupDao.getQuarantineGroup(record.groupId), keepExisting) }
             finally { bound.close() }
         }
+        RestoreResult(if (restoreLegacy(record, provider)) RestoreOutcome.RESTORED else RestoreOutcome.FAILED)
+    }
+
+    /** 旧版的单条记录（没有组）：原位置被占用时恢复到同目录下不冲突的文件名 */
+    private suspend fun restoreLegacy(record: QuarantineEntity, provider: FileAccessProvider): Boolean = withContext(Dispatchers.IO) {
+        val quarantineId = record.id
         val image = imageDao.getById(record.imageId) ?: return@withContext false
         if (!inFlight.add(image.id)) return@withContext false
         try {

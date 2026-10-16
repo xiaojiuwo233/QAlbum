@@ -140,7 +140,6 @@ fun QqSourcesScreen(
         topBar = {
             LargeFlexibleTopAppBar(
                 title = { Text("聊天来源") },
-                subtitle = { Text("按群聊、私聊和发送人整理 QQ 图片") },
                 navigationIcon = { BackButton(onBack) },
                 actions = {
                     IconButton(
