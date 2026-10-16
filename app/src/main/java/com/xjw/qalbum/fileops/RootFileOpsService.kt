@@ -50,5 +50,7 @@ class RootFileOpsService : RootService() {
         override fun qqDatabaseState(userId: Int, account: String): String = QqReadAccess.state(userId, account)
         override fun openQqDatabaseRead(userId: Int, account: String, name: String): ParcelFileDescriptor =
             QqReadAccess.openRead(userId, account, name)
+        override fun pinQqDatabase(userId: Int, account: String, name: String): Int = QqReadAccess.pin(userId, account, name)
+        override fun unpinQqDatabase(handle: Int) = QqReadAccess.unpin(handle)
     }
 }

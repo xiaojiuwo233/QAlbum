@@ -49,16 +49,45 @@ data class QqCipherHeader(val random: String, val hmac: String, val kdf: String)
     }
 }
 
-data class QqPictureElement(val elementId: String, val md5s: Set<String>, val paths: Set<String>)
+/**
+ * 消息里的一张图：[picType] 为消息记录的图片类型（1000 JPG、1001 PNG、2000 GIF 等，0 = 没有），
+ * [picSubType] 为子类型（0 普通图片，1–5、7–15 为 QQ 按表情显示的各类；没有这个字段为 -1），
+ * [original] 为以「原图」发送。
+ */
+data class QqPictureElement(
+    val elementId: String,
+    val md5s: Set<String>,
+    val paths: Set<String>,
+    val picType: Int = 0,
+    val picSubType: Int = -1,
+    val original: Boolean = false,
+)
 internal data class QqDecodedElements(val pictures: List<QqPictureElement>, val hasForward: Boolean)
 
 /** 只读取图片消息段和转发类型标记；正文、链接、文件、视频均不进入来源索引。 */
 object QqPictureCodec {
     const val MAX_MESSAGE_BYTES = 1024 * 1024
 
+    /** PicElement 的图片类型与「原图」标记（9.2.50 字段描述与公开解码资料一致） */
+    const val PIC_TYPE_FIELD = 45416
+    const val ORIGINAL_FIELD = 45418
+
+    /**
+     * 图片子类型（表情等）。真机日志（5 万个图片段）里 45003 的取值只有 0 / 1 / 2 / 7 / 11 / 13，正好落在 QQ
+     * 判断表情的集合（1–5、7–15）里，且与摘要「[动画表情]」高度重合；同一段里可能出现不止一次，取非 0 的值。
+     */
+    const val PIC_SUB_TYPE_FIELD = 45003
+
+    /** 图片摘要：表情为「[动画表情]」（普通图片为空），没有子类型时也据此认作表情 */
+    const val SUMMARY_FIELD = 45815
+    private val STICKER_SUMMARY = "[动画表情]".toByteArray()
+
+    /** 解析规则的版本：子类型等新读出的字段要重新完整读取一次，旧来源才补得上 */
+    const val PARSE_VERSION = 2
+
     fun decode(blob: ByteArray): List<QqPictureElement> = decodeElements(blob).pictures
 
-    internal fun decodeElements(blob: ByteArray): QqDecodedElements {
+    internal fun decodeElements(blob: ByteArray, stats: QqPictureFieldStats? = null): QqDecodedElements {
         require(blob.size <= MAX_MESSAGE_BYTES) { "消息段过大" }
         val input = CodedInputStream.newInstance(blob)
         val pictures = mutableListOf<QqPictureElement>()
@@ -68,7 +97,7 @@ object QqPictureCodec {
             if (tag == 0) break
             // 9.2.66 实测是重复 40800 消息段；旧版资料中也有 48000，均直接包含 MsgElement。
             if (WireFormat.getTagFieldNumber(tag) in setOf(40800, 48000) && WireFormat.getTagWireType(tag) == 2) {
-                val element = decodeElementInfo(input.readByteArray())
+                val element = decodeElementInfo(input.readByteArray(), stats = stats)
                 element.picture?.let(pictures::add)
                 hasForward = hasForward || element.hasForward
             } else if (!input.skipField(tag)) break
@@ -81,20 +110,46 @@ object QqPictureCodec {
 
     private data class ElementInfo(val hasForward: Boolean, val picture: QqPictureElement?)
 
-    private fun decodeElementInfo(bytes: ByteArray, offset: Int = 0, length: Int = bytes.size): ElementInfo {
+    private fun decodeElementInfo(
+        bytes: ByteArray,
+        offset: Int = 0,
+        length: Int = bytes.size,
+        stats: QqPictureFieldStats? = null,
+    ): ElementInfo {
         val input = CodedInputStream.newInstance(bytes, offset, length)
         var type = 0
         var id = ""
         val md5s = linkedSetOf<String>()
         val paths = linkedSetOf<String>()
         var forwardApp = false
+        var picType = 0
+        var picSubType = -1
+        var original = false
+        var stickerSummary = false
+        // 诊断统计（只在 stats 要的时候收集，见 QqPictureFieldStats）
+        val varints = if (stats?.wants() == true) ArrayList<Pair<Int, Long>>() else null
+        val blobs = if (varints != null) ArrayList<Pair<Int, ByteArray>>() else null
         while (!input.isAtEnd) {
             val tag = input.readTag()
             if (tag == 0) break
             val field = WireFormat.getTagFieldNumber(tag)
+            val wire = WireFormat.getTagWireType(tag)
             when {
-                field == 45001 && WireFormat.getTagWireType(tag) == 0 -> id = input.readUInt64().toString()
-                field == 45002 && WireFormat.getTagWireType(tag) == 0 -> type = input.readInt32()
+                field == 45001 && wire == 0 -> id = input.readUInt64().toString()
+                field == 45002 && wire == 0 -> type = input.readInt32()
+                wire == 0 && (field == PIC_TYPE_FIELD || field == ORIGINAL_FIELD || field == PIC_SUB_TYPE_FIELD ||
+                    (varints != null && field in DIAGNOSTIC_FIELDS)) -> {
+                    val value = input.readInt64()
+                    if (field == PIC_TYPE_FIELD) picType = value.toInt()
+                    if (field == ORIGINAL_FIELD) original = value != 0L
+                    if (field == PIC_SUB_TYPE_FIELD && picSubType <= 0) picSubType = value.toInt()
+                    varints?.add(field to value)
+                }
+                field == SUMMARY_FIELD && wire == 2 -> {
+                    val bytes = input.readByteArray()
+                    if (bytes.contentEquals(STICKER_SUMMARY)) stickerSummary = true
+                    blobs?.add(field to bytes)
+                }
                 (field == 45406 || field == 45424) && WireFormat.getTagWireType(tag) == 2 -> {
                     decodeMd5(input.readByteArray())?.let(md5s::add)
                 }
@@ -107,11 +162,19 @@ object QqPictureCodec {
                         app?.content == "com.tencent.multimsg"
                     } catch (_: IllegalArgumentException) { false }
                 }
+                blobs != null && wire == 2 && field in DIAGNOSTIC_FIELDS -> blobs += field to input.readByteArray()
                 else -> if (!input.skipField(tag)) break
             }
         }
-        return ElementInfo(type == 16 || (type == 10 && forwardApp), if (type == 2 && md5s.isNotEmpty()) QqPictureElement(id, md5s, paths) else null)
+        if (type == 2 && varints != null && blobs != null) stats?.record(picType, varints, blobs)
+        // 子类型没标表情、摘要却是「[动画表情]」的，也按表情算
+        if (stickerSummary && picSubType <= 0) picSubType = 1
+        val picture = if (type == 2 && md5s.isNotEmpty()) QqPictureElement(id, md5s, paths, picType, picSubType, original) else null
+        return ElementInfo(type == 16 || (type == 10 && forwardApp), picture)
     }
+
+    /** 诊断统计看的字段：图片段里除消息段 ID / 类型、MD5、路径之外的 45xxx 字段 */
+    private val DIAGNOSTIC_FIELDS = 45003..45999
 
     private fun decodeMd5(bytes: ByteArray): String? {
         if (bytes.size == 16) return bytes.joinToString("") { "%02x".format(it) }

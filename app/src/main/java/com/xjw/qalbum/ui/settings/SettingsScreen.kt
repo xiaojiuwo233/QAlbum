@@ -114,7 +114,7 @@ enum class SettingsCategory(
     val group: SettingsGroup,
 ) {
     SCAN("settings_scan", "扫描", "图片目录与扫描方式", Icons.Outlined.Storage, SettingsGroup.DATA),
-    CLEANUP("settings_cleanup", "清理", "回收站与原图压缩", Icons.Outlined.CleaningServices, SettingsGroup.DATA),
+    CLEANUP("settings_cleanup", "清理", "回收站、原图压缩与定时清理", Icons.Outlined.CleaningServices, SettingsGroup.DATA),
     PERSONALIZATION("settings_personalization", "外观与导出", "取色、图库显示、动效与导出目录", Icons.Outlined.Palette, SettingsGroup.SYSTEM),
     ACCESS("settings_access", "权限与访问", "Shizuku / Root 授权与连通性", Icons.Outlined.Security, SettingsGroup.SYSTEM),
     LOGS("settings_logs", "日志", "运行日志、崩溃记录与导出", Icons.AutoMirrored.Outlined.Article, SettingsGroup.SYSTEM),
@@ -343,6 +343,9 @@ fun CleanupSettingsScreen(
     val quality by viewModel.compressQuality.collectAsState()
     val compare by viewModel.compressCompare.collectAsState()
     val demo by viewModel.compressDemoResult.collectAsState()
+    val scheduled by viewModel.scheduledCleanup.collectAsState()
+    val scheduledRules by viewModel.scheduledRules.collectAsState()
+    val scheduledLast by viewModel.scheduledCleanupLast.collectAsState()
 
     SettingsDetailScaffold(SettingsCategory.CLEANUP, onBack, sharedScope, animatedScope) { notify ->
         SegmentedGroup(header = "回收站") {
@@ -413,6 +416,27 @@ fun CleanupSettingsScreen(
                     checked = keepOriginal,
                     onCheckedChange = viewModel::setCompressKeepOriginal,
                 )
+            }
+        }
+        SegmentedGroup(header = "定时清理") {
+            item("scheduled-info") { position ->
+                SegmentedCard(position) {
+                    SettingsBlurb(
+                        "每周自动把选中规则的图移入回收站，参数用规则页上选的。" +
+                            (scheduledLast?.let { "\n上次：$it" } ?: ""),
+                    )
+                }
+            }
+            scheduledRules.forEach { (rule, option) ->
+                item("scheduled-${rule.id}") { position ->
+                    SegmentedSwitchItem(
+                        position = position,
+                        title = rule.title,
+                        subtitle = option.ifBlank { null },
+                        checked = rule.id in scheduled,
+                        onCheckedChange = { on -> viewModel.setScheduledCleanup(rule.id, on) },
+                    )
+                }
             }
         }
     }

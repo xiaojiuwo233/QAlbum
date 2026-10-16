@@ -35,6 +35,14 @@ data class QqOriginEntity(
     @ColumnInfo(name = "member_name") val memberName: String,
     @ColumnInfo(name = "message_time") val messageTime: Long,
     val md5: String,
+    /** 最近一次读取来源时见到这条消息的时间；早于最近一次完整读取（qq_source_cache.complete_read_at）说明消息已删 */
+    @ColumnInfo(name = "seen_at", defaultValue = "0") val seenAt: Long = 0,
+    /** 消息里记录的图片类型（1000 JPG、1001 PNG、2000 GIF 等），0 = 没读到 */
+    @ColumnInfo(name = "pic_type", defaultValue = "0") val picType: Int = 0,
+    /** 图片子类型：0 普通图片，1–5、7–15 为表情（QQ 按表情显示的各类）；没读到为 -1 */
+    @ColumnInfo(name = "pic_sub_type", defaultValue = "-1") val picSubType: Int = -1,
+    /** 以「原图」发送 */
+    @ColumnInfo(name = "sent_original", defaultValue = "0") val sentOriginal: Boolean = false,
 )
 
 @Entity(
@@ -124,7 +132,10 @@ data class QqSourceMemberEntity(
     @ColumnInfo(name = "latest_time") val latestTime: Long,
 )
 
-/** 全部已关联图片的汇总；[dirty] 为真时触发器暂停增量维护，等待整体重建 */
+/**
+ * 全部已关联图片的汇总；[dirty] 为真时触发器暂停增量维护，等待整体重建。
+ * [completeReadAt] 是最近一次完整读取（所有账号、没有读不了的记录）的开始时间，0 = 还没有过。
+ */
 @Entity(tableName = "qq_source_cache")
 data class QqSourceCacheEntity(
     @PrimaryKey val id: Int = 1,
@@ -133,4 +144,37 @@ data class QqSourceCacheEntity(
     @ColumnInfo(name = "image_bytes") val imageBytes: Long = 0,
     @ColumnInfo(name = "thumb_count") val thumbCount: Int = 0,
     @ColumnInfo(name = "thumb_bytes") val thumbBytes: Long = 0,
+    @ColumnInfo(name = "complete_read_at", defaultValue = "0") val completeReadAt: Long = 0,
+)
+
+/**
+ * 自动归档名单：这个会话（可限定其中一个成员）或这个发送人以后的新图也自动归档。
+ * 键为 '' 表示不限；清除来源索引不影响名单（重新读取后键不变）。[label] 是加入时的名称，列表里显示。
+ */
+@Entity(tableName = "qq_auto_archive", primaryKeys = ["conversation_key", "sender_key"])
+data class QqAutoArchiveEntity(
+    @ColumnInfo(name = "conversation_key") val conversationKey: String,
+    @ColumnInfo(name = "sender_key") val senderKey: String,
+    val label: String,
+    @ColumnInfo(name = "created_at") val createdAt: Long,
+)
+
+/**
+ * 读取水位：每个账号的每张消息表读到的最大 rowid。下次读取只解析之后的新消息（增量），
+ * [fullReadAt] 是这张表最近一次从头读完的时间，超过一周（或手动「完整读取」）再从头读一次，
+ * 用来发现 QQ 里删掉的消息。清除来源索引时随账号级联删除。
+ */
+@Entity(
+    tableName = "qq_read_marks",
+    primaryKeys = ["account_key", "table_name"],
+    foreignKeys = [ForeignKey(
+        entity = QqSourceAccountEntity::class,
+        parentColumns = ["account_key"], childColumns = ["account_key"], onDelete = ForeignKey.CASCADE,
+    )],
+)
+data class QqReadMarkEntity(
+    @ColumnInfo(name = "account_key") val accountKey: String,
+    @ColumnInfo(name = "table_name") val tableName: String,
+    @ColumnInfo(name = "max_rowid") val maxRowid: Long,
+    @ColumnInfo(name = "full_read_at") val fullReadAt: Long,
 )

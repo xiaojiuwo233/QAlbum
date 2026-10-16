@@ -30,6 +30,31 @@ class AppDatabaseMigrationTest {
     }
 
     @Test
+    fun migrate22To23_addsReadStateAutoArchiveAndReadMarks() {
+        val name = "migration-22-23"
+        helper.createDatabase(name, 22).use { db ->
+            db.execSQL("INSERT INTO qq_source_accounts(account_key, display_name, imported_at, picture_count) VALUES('a', '账号', 1, 1)")
+            db.execSQL(
+                """INSERT INTO qq_origins(id, account_key, conversation_key, conversation_name, chat_type, sender_key, sender_name,
+                    member_name, message_time, md5) VALUES('o1', 'a', 'g', '群', 2, 's', '人', '', 1000, '${"0".repeat(32)}')""",
+            )
+            db.execSQL("INSERT OR IGNORE INTO qq_source_cache(id, dirty, image_count, image_bytes, thumb_count, thumb_bytes) VALUES(1, 0, 0, 0, 0, 0)")
+        }
+        helper.runMigrationsAndValidate(name, 23, true, AppDatabase.MIGRATION_22_23).use { db ->
+            // 以前读到的来源：没记读取时间、图片属性未知，下次读取时补上
+            assertEquals(1L, scalarLong(db, "SELECT COUNT(*) FROM qq_origins WHERE seen_at = 0 AND pic_type = 0 AND pic_sub_type = -1 AND sent_original = 0"))
+            assertEquals(0L, scalarLong(db, "SELECT complete_read_at FROM qq_source_cache WHERE id = 1"))
+            db.execSQL("INSERT INTO qq_auto_archive(conversation_key, sender_key, label, created_at) VALUES('g', '', '群', 1)")
+            db.execSQL("INSERT INTO qq_read_marks(account_key, table_name, max_rowid, full_read_at) VALUES('a', 'group_msg_table', 10, 1)")
+            // 清除来源索引（删账号）时读取水位一起删，自动归档名单保留
+            db.execSQL("PRAGMA foreign_keys = ON")
+            db.execSQL("DELETE FROM qq_source_accounts")
+            assertEquals(0L, scalarLong(db, "SELECT COUNT(*) FROM qq_read_marks"))
+            assertEquals(1L, scalarLong(db, "SELECT COUNT(*) FROM qq_auto_archive"))
+        }
+    }
+
+    @Test
     fun migrate21To22_addsOriginalFormatToCompressions() {
         val name = "migration-21-22"
         helper.createDatabase(name, 21).use { db ->

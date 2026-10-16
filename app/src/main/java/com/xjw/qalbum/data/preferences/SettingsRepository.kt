@@ -10,6 +10,7 @@ import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.xjw.qalbum.domain.model.AccessMode
 import com.xjw.qalbum.domain.model.GallerySort
@@ -81,6 +82,20 @@ class SettingsRepository(
         ds.edit { it[Keys.QQ_SOURCES_COMPLETE] = complete }
     }
 
+    /** 上次完整读取聊天来源时的解析规则版本（QqPictureCodec.PARSE_VERSION）；旧了要重新完整读取一次 */
+    val qqParseVersion: Flow<Int> = prefsData.map { it[Keys.QQ_PARSE_VERSION] ?: 0 }
+
+    suspend fun setQqParseVersion(version: Int) {
+        ds.edit { it[Keys.QQ_PARSE_VERSION] = version }
+    }
+
+    /** 每天在充电时自动读取聊天来源里的新消息（Root），默认关闭 */
+    val qqAutoRefresh: Flow<Boolean> = prefsData.map { it[Keys.QQ_AUTO_REFRESH] ?: false }
+
+    suspend fun setQqAutoRefresh(enabled: Boolean) {
+        ds.edit { it[Keys.QQ_AUTO_REFRESH] = enabled }
+    }
+
     suspend fun setChatpicPath(path: String) {
         // 规范化 + 拒绝空值：root="" 会让扫描把根前缀算成 "/"，全部目录快照被判「消失」，
         // 后台增量扫描随即把 200 万行批量标记 missing（图库瞬间清空），因此空串绝不落盘
@@ -107,6 +122,23 @@ class SettingsRepository(
     }
 
     private fun ruleParamKey(ruleId: String) = intPreferencesKey("cleanup_rule_$ruleId")
+
+    /** 定时清理：每周自动把这些规则（规则 id）命中的图移入回收站，各用当前参数；默认都不选 */
+    val scheduledCleanupRules: Flow<Set<String>> = prefsData.map { it[Keys.SCHEDULED_CLEANUP] ?: emptySet() }
+
+    suspend fun setScheduledCleanupRule(ruleId: String, enabled: Boolean) {
+        ds.edit { prefs ->
+            val current = prefs[Keys.SCHEDULED_CLEANUP] ?: emptySet()
+            prefs[Keys.SCHEDULED_CLEANUP] = if (enabled) current + ruleId else current - ruleId
+        }
+    }
+
+    /** 上次定时清理的结果（设置页显示），没跑过为 null */
+    val scheduledCleanupLast: Flow<String?> = prefsData.map { it[Keys.SCHEDULED_CLEANUP_LAST] }
+
+    suspend fun setScheduledCleanupLast(text: String) {
+        ds.edit { it[Keys.SCHEDULED_CLEANUP_LAST] = text }
+    }
 
     /** 原图压缩后的长边上限（像素）；0 = 不缩小分辨率，只重新编码 */
     val compressMaxSide: Flow<Int> = prefsData.map { it[Keys.COMPRESS_MAX_SIDE] ?: DEFAULT_COMPRESS_MAX_SIDE }
@@ -308,6 +340,8 @@ class SettingsRepository(
         val ACCESS_MODE = stringPreferencesKey("access_mode")
         val CHATPIC_PATH = stringPreferencesKey("chatpic_path")
         val QQ_SOURCES_COMPLETE = booleanPreferencesKey("qq_sources_complete")
+        val QQ_AUTO_REFRESH = booleanPreferencesKey("qq_auto_refresh")
+        val QQ_PARSE_VERSION = intPreferencesKey("qq_parse_version")
 
         val QUARANTINE_DAYS = intPreferencesKey("quarantine_days")
         val COMPRESS_MAX_SIDE = intPreferencesKey("compress_max_side")
@@ -325,6 +359,8 @@ class SettingsRepository(
         val VARIANT_INDEX_VERSION = intPreferencesKey("variant_index_version")
         val QQ_SOURCE_SORT = stringPreferencesKey("qq_source_sort")
         val CLEANUP_RULE_SORT = stringPreferencesKey("cleanup_rule_sort")
+        val SCHEDULED_CLEANUP = stringSetPreferencesKey("scheduled_cleanup_rules")
+        val SCHEDULED_CLEANUP_LAST = stringPreferencesKey("scheduled_cleanup_last")
         val QQ_SOURCE_FACET_ORDER = stringPreferencesKey("qq_source_facet_order")
 
         val DYNAMIC_COLOR = booleanPreferencesKey("dynamic_color")

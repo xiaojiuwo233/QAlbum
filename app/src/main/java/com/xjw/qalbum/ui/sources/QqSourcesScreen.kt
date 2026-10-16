@@ -18,16 +18,20 @@ import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Archive
 import androidx.compose.material.icons.outlined.ArrowDropDown
 import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.PhotoLibrary
@@ -35,11 +39,13 @@ import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.SearchOff
 import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material.icons.outlined.WarningAmber
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ButtonGroupDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledTonalButton
@@ -74,6 +80,7 @@ import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.xjw.qalbum.data.db.dao.QqSourceSummary
+import com.xjw.qalbum.data.db.entity.QqAutoArchiveEntity
 import com.xjw.qalbum.data.db.entity.QqSourceAccountEntity
 import com.xjw.qalbum.domain.model.SourceFacetOrder
 import com.xjw.qalbum.qq.QqSourceProgress
@@ -115,6 +122,9 @@ fun QqSourcesScreen(
     val scope = rememberCoroutineScope()
     var menuOpen by remember { mutableStateOf(false) }
     var clearConfirm by remember { mutableStateOf(false) }
+    var showAutoArchive by remember { mutableStateOf(false) }
+    val autoArchive by viewModel.autoArchive.collectAsState()
+    val autoRefresh by viewModel.autoRefresh.collectAsState()
     val listState = rememberLazyListState()
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
 
@@ -143,6 +153,20 @@ fun QqSourcesScreen(
                             Icon(Icons.Outlined.MoreVert, contentDescription = "更多")
                         }
                         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                            DropdownMenuItem(
+                                text = { Text("完整读取") },
+                                enabled = progress == null,
+                                onClick = { menuOpen = false; viewModel.refreshFull() },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("每天自动读取新消息") },
+                                trailingIcon = { Checkbox(checked = autoRefresh, onCheckedChange = null) },
+                                onClick = { menuOpen = false; viewModel.setAutoRefresh(!autoRefresh) },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("自动归档名单" + if (autoArchive.isNotEmpty()) "（${autoArchive.size}）" else "") },
+                                onClick = { menuOpen = false; showAutoArchive = true },
+                            )
                             DropdownMenuItem(
                                 text = { Text("清除来源索引") },
                                 enabled = progress == null && !accounts.isNullOrEmpty(),
@@ -230,6 +254,10 @@ fun QqSourcesScreen(
         }
     }
 
+    if (showAutoArchive) {
+        AutoArchiveDialog(entries = autoArchive, onRemove = viewModel::removeAutoArchive, onDismiss = { showAutoArchive = false })
+    }
+
     if (clearConfirm) {
         ConfirmDialog(
             title = "清除来源索引？",
@@ -240,6 +268,33 @@ fun QqSourcesScreen(
             onDismiss = { clearConfirm = false },
         )
     }
+}
+
+/** 自动归档名单：这些群 / 人以后的新图在读取来源和扫描后自动归档；移出名单不影响已经归档的图 */
+@Composable
+private fun AutoArchiveDialog(entries: List<QqAutoArchiveEntity>, onRemove: (QqAutoArchiveEntity) -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Outlined.Archive, contentDescription = null) },
+        title = { Text("自动归档名单") },
+        text = {
+            if (entries.isEmpty()) {
+                Text("还没有。在群或人的页面里「归档」时勾选「以后的新图也自动归档」。")
+            } else {
+                LazyColumn(Modifier.heightIn(max = 360.dp)) {
+                    items(entries, key = { it.conversationKey + "\u0000" + it.senderKey }) { entry ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(entry.label.ifBlank { "已清除的来源" }, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+                            IconButton(onClick = { onRemove(entry) }, shapes = IconButtonDefaults.shapes()) {
+                                Icon(Icons.Outlined.Close, contentDescription = "移出名单")
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } },
+    )
 }
 
 @Composable

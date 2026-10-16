@@ -38,10 +38,12 @@ import androidx.compose.material.icons.outlined.CleaningServices
 import androidx.compose.material.icons.outlined.Compress
 import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material.icons.outlined.GifBox
+import androidx.compose.material.icons.outlined.Groups
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Inventory2
 import androidx.compose.material.icons.outlined.PhotoSizeSelectLarge
 import androidx.compose.material.icons.outlined.PhotoSizeSelectSmall
+import androidx.compose.material.icons.outlined.SpeakerNotesOff
 import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
@@ -216,6 +218,8 @@ private fun CleanupMainScreen(
     val storage by viewModel.storage.collectAsState()
     val archived by viewModel.archivedCount.collectAsState()
     val rules by viewModel.rules.collectAsState()
+    val chatRules by viewModel.chatRules.collectAsState()
+    val sources by viewModel.sources.collectAsState()
     val running by viewModel.running.collectAsState()
     val quarantineStats by viewModel.quarantineStats.collectAsState()
     val backupStats by viewModel.backupStats.collectAsState()
@@ -267,16 +271,7 @@ private fun CleanupMainScreen(
                 }
             }
             StaggeredEntrance(2) {
-                SegmentedGroup(header = "更多") {
-                    item("time") { position ->
-                        SegmentedNavigationItem(
-                            position = position,
-                            icon = Icons.Outlined.CalendarMonth,
-                            title = "按时间清理",
-                            subtitle = "按月查看占用，整段清理",
-                            onClick = onOpenTime,
-                        )
-                    }
+                SegmentedGroup(header = "按聊天") {
                     item("sources") { position ->
                         SegmentedNavigationItem(
                             position = position,
@@ -285,6 +280,32 @@ private fun CleanupMainScreen(
                             subtitle = if (rootMode) "按群聊、私聊和发送人清理"
                             else "按群聊、私聊和发送人清理（需要 Root）",
                             onClick = onOpenSources,
+                        )
+                    }
+                    chatRules.forEach { card ->
+                        item(card.rule.id) { position ->
+                            // 没有 Root 或还没读取来源时先去来源页
+                            val blocked = chatRuleBlocker(card.rule, rootMode, sources)
+                            SegmentedNavigationItem(
+                                position = position,
+                                icon = ruleIcon(card.rule),
+                                title = card.rule.title,
+                                subtitle = blocked ?: ruleSubtitle(card, quality),
+                                onClick = { if (blocked != null) onOpenSources() else onOpenRule(card.rule) },
+                            )
+                        }
+                    }
+                }
+            }
+            StaggeredEntrance(3) {
+                SegmentedGroup(header = "更多") {
+                    item("time") { position ->
+                        SegmentedNavigationItem(
+                            position = position,
+                            icon = Icons.Outlined.CalendarMonth,
+                            title = "按时间清理",
+                            subtitle = "按月查看占用，整段清理",
+                            onClick = onOpenTime,
                         )
                     }
                     item("bin") { position ->
@@ -331,7 +352,19 @@ internal fun ruleIcon(rule: CleanupRule): ImageVector = when (rule) {
     CleanupRule.CompressOriginals -> Icons.Outlined.Compress
     CleanupRule.Stickers -> Icons.Outlined.GifBox
     CleanupRule.OldPictures -> Icons.Outlined.History
+    CleanupRule.GroupOld -> Icons.Outlined.Groups
+    CleanupRule.DeletedChats -> Icons.Outlined.SpeakerNotesOff
     is CleanupRule.TimeRange -> Icons.Outlined.CalendarMonth
+}
+
+/**
+ * 按聊天的规则还不能用时的说明（null = 可以用）。读过来源就能用（之后切回 Shizuku 也行，清理只需要文件访问）；
+ * 「聊天记录已删除」还要完整读取过一次。
+ */
+internal fun chatRuleBlocker(rule: CleanupRule, rootMode: Boolean, sources: SourcesState): String? = when {
+    !sources.read -> if (rootMode) "先读取一次聊天来源" else "需要 Root 读取聊天记录"
+    rule == CleanupRule.DeletedChats && sources.completeReadAt <= 0 -> "需要完整读取一次聊天来源"
+    else -> null
 }
 
 /** 存储概览：缓存总大小 + 原图 / 预览图 / 缩略图占比条 + 已归档数 */

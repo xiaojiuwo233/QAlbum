@@ -17,6 +17,7 @@ import com.xjw.qalbum.data.db.dao.QqScopeOrder
 import com.xjw.qalbum.data.db.dao.QqScopeSql
 import com.xjw.qalbum.data.db.dao.QqSourceFacet
 import com.xjw.qalbum.data.db.entity.ImageEntity
+import com.xjw.qalbum.data.db.entity.QqAutoArchiveEntity
 import com.xjw.qalbum.data.paging.RefreshGate
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.data.repository.ImageRepository
@@ -33,6 +34,7 @@ import com.xjw.qalbum.ui.common.formatCountExact
 import com.xjw.qalbum.ui.components.ScrollDirectory
 import com.xjw.qalbum.ui.gallery.FileSize
 import com.xjw.qalbum.service.cleanup.PictureDeleteOptions
+import com.xjw.qalbum.service.cleanup.rules.CleanupRule
 import com.xjw.qalbum.ui.gallery.GalleryTimelineItem
 import com.xjw.qalbum.ui.gallery.StackedSize
 import com.xjw.qalbum.ui.gallery.dateDirectory
@@ -58,7 +60,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.xjw.qalbum.service.work.BackgroundTasks
 
-/** 按来源范围整体清理前的确认状态：[counts] 为 null 表示正在统计 */
+/**
+ * 按来源范围整体清理前的确认状态：[counts] 为 null 表示正在统计；[olderThanMonths] 只清理几个月前的（0 不限），
+ * [now] 固定为打开弹窗的时刻，统计与执行用同一个截止时间。
+ */
 data class QqTrashConfirmation(
     val scope: QqSourceScope,
     val ids: QqScopeIds,
@@ -66,7 +71,12 @@ data class QqTrashConfirmation(
     val includeShared: Boolean = false,
     val contents: Set<QqContent> = setOf(QqContent.IMAGES, QqContent.THUMBNAILS),
     val linkedVersions: Boolean = true,
-)
+    val olderThanMonths: Int = 0,
+    val now: Long = System.currentTimeMillis(),
+) {
+    /** 文件时间的截止点（null 不限） */
+    val before: Long? get() = olderThanMonths.takeIf { it > 0 }?.let { CleanupRule.monthsBefore(now, it) }
+}
 
 /** 分类查找结果：外层 null = 仍在读取；[facet] 为 null = 没有这个分类（或统计尚未整理出来） */
 data class FacetLookup(val facet: QqSourceFacet?)
@@ -403,7 +413,7 @@ class QqSourceBrowseViewModel(
             val counts = if (request.contents.isEmpty()) {
                 QqSourceCounts(0, 0, 0, 0, 0, 0)
             } else {
-                dao.queryCounts(QqScopeSql.counts(request.ids, request.contents, request.includeShared))
+                dao.queryCounts(QqScopeSql.counts(request.ids, request.contents, request.includeShared, request.before))
             }
             // 世代号拒绝过期查询；值相等判断弹窗是否仍对应同一请求
             if (generation == countsGeneration && confirmation.value == request) confirmation.value = request.copy(counts = counts)
@@ -418,7 +428,7 @@ class QqSourceBrowseViewModel(
         val request = confirmation.value ?: return
         if (request.counts == null) return
         confirmation.value = null
-        repository.trash(request.scope, request.includeShared, request.linkedVersions, request.contents)
+        repository.trash(request.scope, request.includeShared, request.linkedVersions, request.contents, request.before)
     }
 
     fun acknowledgeRepositoryMessage() = repository.acknowledgeMessage()
@@ -426,6 +436,11 @@ class QqSourceBrowseViewModel(
     // ---- 按范围整体归档：这里（或当前筛选）的全部图片与缩略图，共用的也一起 ----
 
     val archiveRequest = MutableStateFlow<QqArchiveRequest?>(null)
+
+    /** 当前范围在不在自动归档名单里（以后的新图也自动归档） */
+    val autoArchived: StateFlow<Boolean> = combine(dao.observeAutoArchive(), scope) { entries, current ->
+        entries.any { it.conversationKey == current.groupKey.orEmpty() && it.senderKey == current.senderKey.orEmpty() }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     /** 归档的图片也在图库中显示（关闭时归档后从这里消失） */
     val archiveVisible: StateFlow<Boolean> = settings.archiveVisible
@@ -437,7 +452,7 @@ class QqSourceBrowseViewModel(
         archiveRequest.value = QqArchiveRequest(ids, counts = null)
         viewModelScope.launch {
             val counts = archive.scopeCounts(ids)
-            if (archiveRequest.value?.ids == ids) archiveRequest.value = QqArchiveRequest(ids, counts)
+            archiveRequest.value?.takeIf { it.ids == ids }?.let { archiveRequest.value = it.copy(counts = counts) }
         }
     }
 
@@ -445,20 +460,43 @@ class QqSourceBrowseViewModel(
         archiveRequest.value = null
     }
 
-    fun confirmScopeArchive() {
+    /** 归档弹窗里的「以后的新图也自动归档」 */
+    fun setScopeArchiveAuto(auto: Boolean) {
+        archiveRequest.value = archiveRequest.value?.copy(auto = auto)
+    }
+
+    /** 把当前范围移出自动归档名单（已经归档的图不变） */
+    fun stopAutoArchive() {
+        val current = scope.value
+        appScope.launch {
+            dao.removeAutoArchive(current.groupKey.orEmpty(), current.senderKey.orEmpty())
+            _message.value = "已停止自动归档，已归档的图不变"
+        }
+    }
+
+    /** [label] 为名单里显示的名称（如「群名 · 成员」） */
+    fun confirmScopeArchive(label: String) {
         val request = archiveRequest.value ?: return
         if (request.counts == null) return
         archiveRequest.value = null
+        val current = scope.value
         appScope.launch {
+            if (request.auto) {
+                dao.addAutoArchive(QqAutoArchiveEntity(current.groupKey.orEmpty(), current.senderKey.orEmpty(), label, System.currentTimeMillis()))
+            }
             val done = withDeleteProgress("正在归档…") { progress -> archive.archiveScope(request.ids, progress) }
-            _message.value = "已归档 ${formatCountExact(done)} 张" +
-                if (settings.archiveVisible.first()) "，不会被清理" else "，不会被清理，之后只在「图库 → 归档」里显示"
+            _message.value = when {
+                done == 0 && request.auto -> "以后这里的新图会自动归档"
+                else -> "已归档 ${formatCountExact(done)} 张" +
+                    (if (settings.archiveVisible.first()) "，不会被清理" else "，不会被清理，之后只在「图库 → 归档」里显示") +
+                    (if (request.auto) "；以后的新图也会自动归档" else "")
+            }
         }
     }
 }
 
-/** 按范围归档前的确认状态：[counts] 为 null 表示正在统计 */
-data class QqArchiveRequest(val ids: QqScopeIds, val counts: QqArchiveCounts?)
+/** 按范围归档前的确认状态：[counts] 为 null 表示正在统计；[auto] 以后的新图也自动归档 */
+data class QqArchiveRequest(val ids: QqScopeIds, val counts: QqArchiveCounts?, val auto: Boolean = false)
 
 /** 删除结果文案：归档的图片会被跳过，文件访问未就绪时一张也删不掉，两种情况都要说清楚 */
 internal fun removalMessage(action: String, done: Int, total: Int): String = when {

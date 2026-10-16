@@ -12,9 +12,11 @@ import androidx.sqlite.db.SimpleSQLiteQuery
 import androidx.sqlite.db.SupportSQLiteQuery
 import com.xjw.qalbum.data.db.SizeBucketSql
 import com.xjw.qalbum.data.db.entity.ImageEntity
+import com.xjw.qalbum.data.db.entity.QqAutoArchiveEntity
 import com.xjw.qalbum.data.db.entity.QqImageContextEntity
 import com.xjw.qalbum.data.db.entity.QqOriginEntity
 import com.xjw.qalbum.data.db.entity.QqOriginPathEntity
+import com.xjw.qalbum.data.db.entity.QqReadMarkEntity
 import com.xjw.qalbum.data.db.entity.QqSourceAccountEntity
 import com.xjw.qalbum.domain.model.TimelineSection
 import kotlinx.coroutines.flow.Flow
@@ -70,12 +72,15 @@ data class QqSourceSummary(
 )
 
 data class QqFacetKindCount(val kind: Int, val chatType: Int, val count: Int)
+data class QqSeenSummary(val total: Int, val stale: Int)
 data class QqPicturePathEdge(val originId: String, val path: String)
 data class QqPictureContext(val conversationKey: String, val senderKey: String)
 data class QqPathContext(val path: String, val conversationKey: String, val senderKey: String)
 data class QqOriginDetails(
     val conversationName: String, val senderName: String, val memberName: String,
     val chatType: Int, val messageTime: Long, val messageCount: Int, val accountName: String,
+    /** 有消息是以「原图」发送的 */
+    val sentOriginal: Boolean = false,
 )
 
 /** 浏览页内容：图片（chatimg / chatraw 等）或 QQ 缩略图（chatthumb） */
@@ -229,6 +234,22 @@ interface QqSourceDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertPaths(paths: List<QqOriginPathEntity>)
 
+    /** 这次读取又见到了这些消息：记下读取时间，顺带补上 v23 以前没有的图片属性 */
+    @Query("""UPDATE qq_origins SET seen_at = :seenAt, pic_type = :picType, pic_sub_type = :picSubType,
+        sent_original = :original WHERE id IN (:ids)""")
+    suspend fun markSeen(ids: List<String>, seenAt: Long, picType: Int, picSubType: Int, original: Boolean)
+
+    /** 完整读取（所有账号、没有读不了的记录）成功后记下这次读取的开始时间 */
+    @Query("UPDATE qq_source_cache SET complete_read_at = :at WHERE id = 1")
+    suspend fun setCompleteReadAt(at: Long)
+
+    @Query("SELECT COALESCE((SELECT complete_read_at FROM qq_source_cache WHERE id = 1), 0)")
+    fun observeCompleteReadAt(): Flow<Long>
+
+    /** 诊断：来源总数与这次读取没再见到的（完整读取后即消息已删） */
+    @Query("SELECT COUNT(*) AS total, COALESCE(SUM(seen_at < :readStart), 0) AS stale FROM qq_origins")
+    suspend fun seenSummary(readStart: Long): QqSeenSummary
+
     @Query("""UPDATE qq_origins SET conversation_name = :name
         WHERE account_key = :accountKey AND conversation_key = :key AND :name <> ''""")
     suspend fun updateConversationName(accountKey: String, key: String, name: String)
@@ -271,7 +292,8 @@ interface QqSourceDao {
 
     @Query("""SELECT MAX(o.conversation_name) AS conversationName, MAX(o.sender_name) AS senderName,
         MAX(o.member_name) AS memberName, o.chat_type AS chatType,
-        MAX(o.message_time) AS messageTime, COUNT(*) AS messageCount, MAX(a.display_name) AS accountName
+        MAX(o.message_time) AS messageTime, COUNT(*) AS messageCount, MAX(a.display_name) AS accountName,
+        MAX(o.sent_original) AS sentOriginal
         FROM image_qq_origins link JOIN qq_origins o ON o.id = link.origin_id
         JOIN qq_source_accounts a ON a.account_key = o.account_key WHERE link.image_id = :imageId
         GROUP BY o.conversation_key, o.sender_key ORDER BY messageTime DESC""")
@@ -279,6 +301,40 @@ interface QqSourceDao {
 
     @Query("DELETE FROM qq_source_accounts")
     suspend fun clear()
+
+    /** 账号的图片来源总数（增量读取后也是全部，不只是这次新读到的） */
+    @Query("SELECT COUNT(*) FROM qq_origins WHERE account_key = :accountKey")
+    suspend fun originCount(accountKey: String): Int
+
+    // ---- 读取水位（增量读取） ----
+
+    @Query("SELECT * FROM qq_read_marks WHERE account_key = :accountKey")
+    suspend fun readMarks(accountKey: String): List<QqReadMarkEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun putReadMarks(marks: List<QqReadMarkEntity>)
+
+    /** 这次没读完整的表去掉水位，下次从头读 */
+    @Query("DELETE FROM qq_read_marks WHERE account_key = :accountKey AND table_name IN (:tables)")
+    suspend fun deleteReadMarks(accountKey: String, tables: Collection<String>)
+
+    /** 读取过来源（有水位）的账号数；后台自动读取只在读过一次之后进行 */
+    @Query("SELECT COUNT(DISTINCT account_key) FROM qq_read_marks")
+    suspend fun markedAccounts(): Int
+
+    // ---- 自动归档名单（键为 '' 表示不限） ----
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun addAutoArchive(entry: QqAutoArchiveEntity)
+
+    @Query("DELETE FROM qq_auto_archive WHERE conversation_key = :conversationKey AND sender_key = :senderKey")
+    suspend fun removeAutoArchive(conversationKey: String, senderKey: String)
+
+    @Query("SELECT * FROM qq_auto_archive ORDER BY created_at DESC")
+    fun observeAutoArchive(): Flow<List<QqAutoArchiveEntity>>
+
+    @Query("SELECT * FROM qq_auto_archive")
+    suspend fun autoArchiveEntries(): List<QqAutoArchiveEntity>
 }
 
 /** 排序：日期 / 大小 × 降序 / 升序（与 SourceSort 的顺序一致）；合并显示时大小按整组合计 */
@@ -398,9 +454,13 @@ object QqScopeSql {
 
     private const val PROTECTED = "i.is_protected = 1"
 
-    /** 按范围清理前的统计：共用与归档（受保护）的图片分别计数 */
-    fun counts(ids: QqScopeIds, set: Set<QqContent>, includeShared: Boolean): SupportSQLiteQuery {
-        val (w, whereArgs) = where(ids, set)
+    /** 只清理文件时间早于 [before] 的（null 不限） */
+    private fun olderThan(where: Pair<String, List<Any>>, before: Long?): Pair<String, List<Any>> =
+        if (before == null) where else "${where.first} AND +i.mtime < ?" to where.second + before
+
+    /** 按范围清理前的统计：共用与归档（受保护）的图片分别计数；[before] 见 [olderThan] */
+    fun counts(ids: QqScopeIds, set: Set<QqContent>, includeShared: Boolean, before: Long? = null): SupportSQLiteQuery {
+        val (w, whereArgs) = olderThan(where(ids, set), before)
         val (sharedSql, sharedArgs) = shared(ids)
         val removable = "(NOT $PROTECTED AND (${if (includeShared) 1 else 0} OR NOT $sharedSql))"
         val sql = """SELECT COUNT(*) AS total, COALESCE(SUM(i.size), 0) AS totalBytes,
@@ -445,8 +505,9 @@ object QqScopeSql {
         afterId: Long,
         maxId: Long,
         limit: Int,
+        before: Long? = null,
     ): SupportSQLiteQuery {
-        val (w, whereArgs) = where(ids, set)
+        val (w, whereArgs) = olderThan(where(ids, set), before)
         val (sharedSql, sharedArgs) = shared(ids)
         val sharedFilter = if (includeShared) "" else " AND NOT $sharedSql"
         return query(

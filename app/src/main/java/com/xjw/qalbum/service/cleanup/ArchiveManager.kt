@@ -90,6 +90,23 @@ class ArchiveManager(
             done
         }
 
+    /**
+     * 自动归档名单：名单里每个范围（会话 / 发送人，或会话里的某个成员）还没归档的图片与缩略图一并归档。
+     * 读取来源（统计整理完）和每次扫描结束后执行；分类还没整理出来的范围先跳过，下次再补。返回归档的张数。
+     */
+    suspend fun applyAutoArchive(): Int = withContext(Dispatchers.IO) {
+        val sources = db.qqSourceDao()
+        var total = 0
+        for (entry in sources.autoArchiveEntries()) {
+            val conversation = if (entry.conversationKey.isEmpty()) null else sources.facetId(0, entry.conversationKey) ?: continue
+            val sender = if (entry.senderKey.isEmpty()) null else sources.facetId(1, entry.senderKey) ?: continue
+            if (conversation == null && sender == null) continue
+            total += archiveScope(QqScopeIds(conversation, sender))
+        }
+        if (total > 0) Timber.i("Auto archive: %d rows", total)
+        total
+    }
+
     companion object {
         private const val SCOPE_PAGE = 400
 

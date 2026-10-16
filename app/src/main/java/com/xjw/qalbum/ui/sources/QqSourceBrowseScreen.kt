@@ -165,6 +165,7 @@ fun QqSourceBrowseScreen(
     val progress by viewModel.progress.collectAsState()
     val deleteProgress by viewModel.deleteProgress.collectAsState()
     val archiveRequest by viewModel.archiveRequest.collectAsState()
+    val autoArchived by viewModel.autoArchived.collectAsState()
     val archiveVisible by viewModel.archiveVisible.collectAsState()
     val message by viewModel.message.collectAsState()
     val repositoryMessage by viewModel.repositoryMessage.collectAsState()
@@ -295,6 +296,13 @@ fun QqSourceBrowseScreen(
                                             enabled = progress == null && deleteProgress == null && base != null,
                                             onClick = { menuOpen = false; viewModel.requestScopeTrash() },
                                         )
+                                        if (autoArchived) {
+                                            DropdownMenuItem(
+                                                text = { Text("停止自动归档") },
+                                                leadingIcon = { Icon(Icons.Outlined.Unarchive, contentDescription = null) },
+                                                onClick = { menuOpen = false; viewModel.stopAutoArchive() },
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -477,12 +485,15 @@ fun QqSourceBrowseScreen(
     }
 
     archiveRequest?.let { request ->
+        val filterName = filter?.let { facetDisplayName(it, if (target.kind == SourceKind.SENDER) SourceKind.CONVERSATION else SourceKind.SENDER) }
         ScopeArchiveDialog(
             counts = request.counts,
             title = title,
-            filterName = filter?.let { facetDisplayName(it, if (target.kind == SourceKind.SENDER) SourceKind.CONVERSATION else SourceKind.SENDER) },
+            filterName = filterName,
             hidden = !archiveVisible,
-            onConfirm = viewModel::confirmScopeArchive,
+            auto = request.auto,
+            onAutoChange = viewModel::setScopeArchiveAuto,
+            onConfirm = { viewModel.confirmScopeArchive(if (filterName != null) "$title · $filterName" else title) },
             onDismiss = viewModel::dismissScopeArchive,
         )
     }
@@ -794,13 +805,15 @@ private fun FilterSheet(
  * 按范围整体移入回收站的确认：选择清理图片 / 缩略图，是否包含共用图片、是否连带同一张图的其他缓存版本。
  * 数字直接查库得出；逐个文件的核对放到后台执行时，不在弹窗里等待。
  */
-/** 按范围整体归档的确认：共用的图片照样归档，同一张图的其他版本一起 */
+/** 按范围整体归档的确认：共用的图片照样归档，同一张图的其他版本一起；[auto] 以后的新图也自动归档 */
 @Composable
 private fun ScopeArchiveDialog(
     counts: QqArchiveCounts?,
     title: String,
     filterName: String?,
     hidden: Boolean,
+    auto: Boolean,
+    onAutoChange: (Boolean) -> Unit,
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -827,6 +840,7 @@ private fun ScopeArchiveDialog(
                     )
                     if (counts.shared > 0) InfoLine("其中 ${formatCountExact(counts.shared)} 张其他聊天也在用，一并归档")
                 }
+                OptionRow(checked = auto, label = "以后的新图也自动归档", onChange = onAutoChange)
                 Text(
                     "原图、预览图、缩略图一起归档，不会被清理" +
                         if (hidden) "，之后只在「图库 → 归档」里显示。" else "。",
@@ -837,7 +851,7 @@ private fun ScopeArchiveDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = onConfirm, enabled = counts != null && counts.images + counts.thumbs > 0) {
+            TextButton(onClick = onConfirm, enabled = counts != null && (counts.images + counts.thumbs > 0 || auto)) {
                 Text(if (counts == null) "统计中…" else "归档")
             }
         },
@@ -878,6 +892,18 @@ private fun ScopeTrashDialog(
                         },
                         onChange = { on -> onChange { it.copy(contents = if (on) it.contents + option else it.contents - option) } },
                     )
+                }
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    TRASH_AGE_OPTIONS.forEach { (months, label) ->
+                        FilterChip(
+                            selected = request.olderThanMonths == months,
+                            onClick = { onChange { it.copy(olderThanMonths = months) } },
+                            label = { Text(label) },
+                        )
+                    }
                 }
                 OptionRow(
                     checked = request.includeShared,
@@ -921,6 +947,9 @@ private fun ScopeTrashDialog(
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
 }
+
+/** 按范围清理的时间筛选（按文件时间，与网格的日期分组一致）：几个月前 → 标签 */
+private val TRASH_AGE_OPTIONS = listOf(0 to "全部", 1 to "1 个月前", 3 to "3 个月前", 6 to "半年前", 12 to "1 年前")
 
 @Composable
 private fun OptionRow(checked: Boolean, label: String, onChange: (Boolean) -> Unit) {

@@ -7,6 +7,9 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.xjw.qalbum.data.db.AppDatabase
 import com.xjw.qalbum.data.db.dao.RuleStats
 import com.xjw.qalbum.data.db.entity.ImageEntity
+import com.xjw.qalbum.data.db.entity.QqOriginEntity
+import com.xjw.qalbum.data.db.entity.QqOriginPathEntity
+import com.xjw.qalbum.data.db.entity.QqSourceAccountEntity
 import com.xjw.qalbum.data.db.entity.computeDateBucket
 import com.xjw.qalbum.qq.QqCachePaths
 import com.xjw.qalbum.service.cleanup.rules.CleanupRule
@@ -16,6 +19,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -29,6 +34,7 @@ class CleanupRuleQueryTest {
     private val day = 24L * 60 * 60 * 1000
     private val mb = 1_048_576L
     private var families = 0
+    private var origins = 0
     private lateinit var db: AppDatabase
 
     @Before
@@ -143,6 +149,77 @@ class CleanupRuleQueryTest {
         val dayStart = now - 43 * day
         assertEquals(listOf(thumbs[2]), dao.ids(RuleSql.idsBetween(part, dayStart, dayStart + 1)))
         assertEquals(5, dao.observeBuckets(RuleSql.buckets(part)).first().sumOf { it.count })
+    }
+
+    @Test
+    fun groupOldNeedsEveryMessageToBeAnOldGroupMessage() = runBlocking {
+        val (img, raw) = family()
+        insert(img, "chatimg", "active", 200_000)
+        val oldGroup = insert(raw, "chatraw", "active", 2 * mb)
+        origin(listOf(img, raw), chatType = 2, daysAgo = 120)
+        // 私聊里也发过、最近又有人在群里发、只在转发里、没有聊天来源、已归档：都不算
+        val alsoPrivate = family()[0].let { path -> insert(path, "chatimg", "active", 200_000).also { origin(listOf(path), 2, 120); origin(listOf(path), 1, 200) } }
+        val resent = family()[0].let { path -> insert(path, "chatimg", "active", 200_000).also { origin(listOf(path), 2, 120); origin(listOf(path), 2, 10) } }
+        family()[0].let { path -> insert(path, "chatimg", "active", 200_000); origin(listOf(path), 3, 200) }
+        insert(family()[0], "chatimg", "active", 200_000)
+        family()[0].let { path -> insert(path, "chatimg", "active", 200_000, archived = true); origin(listOf(path), 2, 200) }
+        db.qqSourceDao().reconcileLinks()
+
+        assertEquals(setOf(oldGroup), ids(CleanupRule.GroupOld, 3))
+        assertEquals(emptySet<Long>(), ids(CleanupRule.GroupOld, 6))
+        // 整张图：预览图被原图代表，大小两个版本合计
+        assertEquals(RuleStats(1, 2 * mb + 200_000), stats(CleanupRule.GroupOld, 3))
+        assertFalse(alsoPrivate in ids(CleanupRule.GroupOld, 1))
+        assertFalse(resent in ids(CleanupRule.GroupOld, 1))
+    }
+
+    @Test
+    fun deletedChatsUseTheLastCompleteRead() = runBlocking {
+        val read = now - 5 * day
+        val live = family()[0].let { path -> insert(path, "chatimg", "active", 100_000, age = 30).also { origin(listOf(path), 2, 60, seenAt = read) } }
+        val gone = family()[0].let { path -> insert(path, "chatimg", "active", 100_000, age = 30).also { origin(listOf(path), 2, 60, seenAt = read - 10 * day) } }
+        val neverLinked = insert(family()[0], "chatimg", "active", 100_000, age = 30)
+        // 读取之后才扫描到的、已归档的：不算
+        insert(family()[0], "chatimg", "active", 100_000, age = 1)
+        family()[0].let { path -> insert(path, "chatimg", "active", 100_000, age = 30, archived = true); origin(listOf(path), 2, 60, seenAt = 0) }
+        db.qqSourceDao().reconcileLinks()
+
+        // 还没完整读取过：什么都不算
+        assertEquals(emptySet<Long>(), ids(CleanupRule.DeletedChats, 0))
+        db.qqSourceDao().setCompleteReadAt(read)
+        assertEquals(setOf(gone, neverLinked), ids(CleanupRule.DeletedChats, 0))
+        assertEquals(setOf(gone), ids(CleanupRule.DeletedChats, 1))
+        assertFalse(live in ids(CleanupRule.DeletedChats, 0))
+    }
+
+    @Test
+    fun gifMessagesJoinTheStickerRuleAndLeaveSlimOriginals() = runBlocking {
+        // 看着像照片、但聊天记录里是 GIF 的图（比如单帧动图）
+        val (img, raw) = family()
+        insert(img, "chatimg", "active", 200_000, age = 100)
+        val gif = insert(raw, "chatraw", "active", 2 * mb, age = 100)
+        origin(listOf(img, raw), 2, 100, picType = 2000)
+        val (img2, raw2) = family()
+        insert(img2, "chatimg", "active", 200_000, age = 100)
+        val photo = insert(raw2, "chatraw", "active", 2 * mb, age = 100)
+        origin(listOf(img2, raw2), 2, 100, picType = 1000)
+        db.qqSourceDao().reconcileLinks()
+
+        val stickers = ids(CleanupRule.Stickers)
+        assertTrue(gif in stickers)
+        assertFalse(photo in stickers)
+        assertEquals(setOf(photo), ids(CleanupRule.SlimOriginals, 90))
+    }
+
+    /** 一条聊天来源（消息），关联到 [paths]；[daysAgo] 天前发的，[seenAt] 为最近一次读取时见到的时间 */
+    private suspend fun origin(paths: List<String>, chatType: Int, daysAgo: Int, seenAt: Long = now, picType: Int = 0): String {
+        val sources = db.qqSourceDao()
+        sources.putAccount(QqSourceAccountEntity("account", "账号", now, 0))
+        val id = "origin-${++origins}"
+        sources.insertOrigins(listOf(QqOriginEntity(id, "account", "conversation-$chatType", "", chatType, "sender", "", "",
+            now - daysAgo * day, "%032x".format(origins), seenAt, picType)))
+        sources.insertPaths(paths.map { QqOriginPathEntity(it, id) })
+        return id
     }
 
     private suspend fun ids(rule: CleanupRule, option: Int = rule.defaultOption): Set<Long> =

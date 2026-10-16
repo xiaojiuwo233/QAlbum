@@ -103,6 +103,8 @@ class PictureBatchDeleteTest {
         override fun qqAccountCatalog(userId: Int): String = ""
         override fun qqDatabaseState(userId: Int, account: String): String = ""
         override fun openQqDatabaseRead(userId: Int, account: String, name: String): ParcelFileDescriptor? = null
+        override fun pinQqDatabase(userId: Int, account: String, name: String): Int = 0
+        override fun unpinQqDatabase(handle: Int) = Unit
         override fun statFiles(paths: Array<String>): Array<String> = InProcessFileOps.statFiles(paths)
         override fun moveFilesChecked(sources: Array<String>, targets: Array<String>, stamps: Array<String>): BooleanArray = BooleanArray(sources.size)
         override fun deleteFilesChecked(paths: Array<String>, stamps: Array<String>): BooleanArray = InProcessFileOps.deleteFilesChecked(paths, stamps)

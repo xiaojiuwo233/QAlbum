@@ -8,6 +8,7 @@ import androidx.work.WorkManager
 import coil3.ImageLoader
 import coil3.SingletonImageLoader
 import com.xjw.qalbum.data.db.DatabaseOpener
+import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.di.appModule
 import com.xjw.qalbum.log.AppLog
 import com.xjw.qalbum.log.CrashHandler
@@ -19,10 +20,14 @@ import com.xjw.qalbum.service.cleanup.QuarantineManager
 import com.xjw.qalbum.service.indexer.ImageSizeBackfill
 import com.xjw.qalbum.service.indexer.PictureVariantIndexer
 import com.xjw.qalbum.worker.IncrementalScanWorker
+import com.xjw.qalbum.worker.QqSourceRefreshWorker
 import com.xjw.qalbum.worker.QuarantinePurgeWorker
+import com.xjw.qalbum.worker.ScheduledCleanupWorker
 import com.xjw.qalbum.service.work.TaskForegroundService
 import com.topjohnwu.superuser.Shell
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import java.util.concurrent.TimeUnit
 import org.koin.android.ext.android.get
@@ -110,6 +115,18 @@ class App : Application(), Configuration.Provider {
                 TimeUnit.HOURS,
             ).build(),
         )
+
+        // - 定时清理：设置里选了规则才每周跑一次，全部取消即撤掉排程
+        val settings = get<SettingsRepository>()
+        get<CoroutineScope>().launch {
+            settings.scheduledCleanupRules.map { it.isNotEmpty() }.distinctUntilChanged().collect { enabled ->
+                ScheduledCleanupWorker.schedule(this@App, enabled)
+            }
+        }
+        // - 聊天来源：打开「每天自动读取」后每天充电时读一次新消息
+        get<CoroutineScope>().launch {
+            settings.qqAutoRefresh.distinctUntilChanged().collect { enabled -> QqSourceRefreshWorker.schedule(this@App, enabled) }
+        }
 
         // 把 Koin 注入的 ImageLoader 安装为 Coil 全局单例，
         // 这样 Compose 内的 AsyncImage 不需要显式传 ImageLoader 也能用到自定义 Fetcher

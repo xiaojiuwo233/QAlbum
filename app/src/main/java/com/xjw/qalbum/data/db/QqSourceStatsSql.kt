@@ -210,6 +210,6 @@ object QqSourceStatsSql {
         "DELETE FROM qq_source_members",
         "DELETE FROM qq_source_facets",
         ENSURE_CACHE_ROW,
-        "UPDATE qq_source_cache SET dirty = 0, image_count = 0, image_bytes = 0, thumb_count = 0, thumb_bytes = 0 WHERE id = 1",
+        "UPDATE qq_source_cache SET dirty = 0, image_count = 0, image_bytes = 0, thumb_count = 0, thumb_bytes = 0, complete_read_at = 0 WHERE id = 1",
     )
 }

@@ -79,6 +79,9 @@ data class StorageOverview(
 /** 清理页上的一条规则：当前参数与命中统计（统计还没出来时为 null） */
 data class RuleCard(val rule: CleanupRule, val option: Int, val stats: RuleStats?)
 
+/** 聊天来源的状态：读取过没有，最近一次完整读取的开始时间（0 = 没有过，「聊天记录已删除」要用） */
+data class SourcesState(val read: Boolean = false, val completeReadAt: Long = 0)
+
 /** 按时间清理的一个月 */
 data class MonthBucket(val year: Int, val month: Int, val count: Int, val bytes: Long, val from: Long, val until: Long) {
     val label: String get() = "$year 年 $month 月"
@@ -129,6 +132,16 @@ class CleanupViewModel(
 
     val rules: StateFlow<List<RuleCard>> = combine(CleanupRule.listed.map(::cardFlow)) { it.toList() }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CleanupRule.listed.map { RuleCard(it, it.defaultOption, null) })
+
+    /** 按聊天的规则（群聊旧图、聊天记录已删除）：没读取过来源时命中为 0 */
+    val chatRules: StateFlow<List<RuleCard>> = combine(CleanupRule.chat.map(::cardFlow)) { it.toList() }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CleanupRule.chat.map { RuleCard(it, it.defaultOption, null) })
+
+    val sources: StateFlow<SourcesState> = combine(
+        db.qqSourceDao().observeAccounts(),
+        db.qqSourceDao().observeCompleteReadAt(),
+    ) { accounts, completeReadAt -> SourcesState(accounts.isNotEmpty(), completeReadAt) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SourcesState())
 
     private fun cardFlow(rule: CleanupRule): Flow<RuleCard> =
         settings.cleanupRuleParam(rule.id)

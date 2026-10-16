@@ -89,7 +89,7 @@ val appModule = module {
             imageDao = get(),
             dirSnapshotDao = get(),
             transportFactory = get(),
-            afterScan = { archive.sync() },
+            afterScan = { archive.sync(); archive.applyAutoArchive() },
         )
     }
     single { ImageSizeBackfill(imageDao = get(), transportFactory = get(), tasks = get(), appScope = get()) }
@@ -115,12 +115,21 @@ val appModule = module {
     single { CleanupController(quarantineManager = get(), cleanupDao = get()) }
     single { OriginalCompressor(context = get(), db = get(), accessManager = get(), fileOpsClient = get(), settings = get()) }
     single { CleanupRunner(quarantine = get(), compressor = get(), tasks = get(), appScope = get()) }
+    // 定时清理（每周，设置里选规则）
+    single {
+        val runner = get<CleanupRunner>()
+        val quarantine = get<QuarantineManager>()
+        com.xjw.qalbum.service.cleanup.rules.ScheduledCleanup(
+            settings = get(), db = get(), accessError = quarantine::fileAccessError, trash = runner::trashNow,
+        )
+    }
     // 压缩的统一入口（先对比再替换）与设置页的质量演示
     single { CompressionCoordinator(db = get(), compressor = get(), runner = get(), settings = get(), tasks = get(), appScope = get()) }
     single { CompressDemo(context = get()) }
     single {
         QqSourceRepository(
             context = get(), db = get(), settings = get(), client = get(), quarantine = get(), appScope = get(), tasks = get(),
+            archive = get(),
         )
     }
 

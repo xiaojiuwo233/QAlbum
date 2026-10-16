@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.xjw.qalbum.data.db.dao.QqFacetKindCount
 import com.xjw.qalbum.data.db.dao.QqSourceFacet
 import com.xjw.qalbum.data.db.dao.QqSourceSummary
+import com.xjw.qalbum.data.db.entity.QqAutoArchiveEntity
 import com.xjw.qalbum.data.db.entity.QqSourceAccountEntity
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.domain.model.SourceFacetOrder
@@ -95,7 +96,31 @@ class QqSourcesViewModel(
         viewModelScope.launch { settings.setQqSourceFacetOrder(next) }
     }
 
-    fun refresh() = repository.refresh()
+    /** 自动归档名单（以后的新图也自动归档的群 / 人） */
+    val autoArchive: StateFlow<List<QqAutoArchiveEntity>> = repository.dao.observeAutoArchive()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    fun removeAutoArchive(entry: QqAutoArchiveEntity) {
+        viewModelScope.launch { repository.dao.removeAutoArchive(entry.conversationKey, entry.senderKey) }
+    }
+
+    /** 每天在充电时自动读取新消息 */
+    val autoRefresh: StateFlow<Boolean> = settings.qqAutoRefresh
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    fun setAutoRefresh(enabled: Boolean) {
+        viewModelScope.launch { settings.setQqAutoRefresh(enabled) }
+    }
+
+    /** 读取新消息（超过一周的会从头读） */
+    fun refresh() {
+        repository.refresh()
+    }
+
+    /** 从头完整读取一次（发现 QQ 里删掉的消息） */
+    fun refreshFull() {
+        repository.refresh(full = true)
+    }
     fun cancel() = repository.cancel()
     fun clearIndex() = repository.clear()
     fun acknowledgeMessage() = repository.acknowledgeMessage()

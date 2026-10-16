@@ -63,6 +63,25 @@ class CleanupRunner(
         }
     }
 
+    /**
+     * 定时清理用：排在前面的任务之后，把 [ids] 移入回收站，做完才返回移入的张数（结果不弹提示，由调用方汇总）。
+     * 没有文件访问时返回 0。
+     */
+    suspend fun trashNow(ids: List<Long>, title: String, linkedVersions: Boolean): Int {
+        if (ids.isEmpty()) return 0
+        val options = PictureDeleteOptions(linkedVersions = linkedVersions, includeShared = true)
+        return queue.withLock {
+            current = currentCoroutineContext()[Job]
+            try {
+                run(null, "定时清理：$title", RuleAction.TRASH, ids, announce = false) { page, _ ->
+                    Step(done = quarantine.quarantinePictures(page, options, title).selectedProcessed)
+                }
+            } finally {
+                current = null
+            }
+        }
+    }
+
     /** 停止正在跑的任务（排队的照常进行） */
     fun cancel() {
         current?.cancel()
@@ -82,7 +101,7 @@ class CleanupRunner(
             queue.withLock {
                 current = currentCoroutineContext()[Job]
                 try {
-                    run(ruleId, title, action, ids, process)
+                    run(ruleId, title, action, ids, process = process)
                 } finally {
                     current = null
                 }
@@ -90,13 +109,15 @@ class CleanupRunner(
         }
     }
 
+    /** 执行一个任务，返回成功处理的张数；[announce] 为假时不发结果文案 */
     private suspend fun run(
         ruleId: String?,
         title: String,
         action: RuleAction,
         ids: List<Long>,
+        announce: Boolean = true,
         process: suspend (page: List<Long>, progress: (Int) -> Unit) -> Step,
-    ): Unit = tasks.track<Unit>(title) { handle ->
+    ): Int = tasks.track(title) { handle ->
         val total = ids.size
         var processed = 0
         var done = 0
@@ -111,8 +132,8 @@ class CleanupRunner(
                 currentCoroutineContext().ensureActive()
                 // 没有文件访问（未授权、Shizuku 中途断开）：停下说明原因，不把整批记成「未处理」
                 quarantine.fileAccessError()?.let { error ->
-                    _results.tryEmit(if (processed == 0) error else resultText(action, done, processed, saved, stopped = true) + "；$error")
-                    return@track
+                    if (announce) _results.tryEmit(if (processed == 0) error else resultText(action, done, processed, saved, stopped = true) + "；$error")
+                    return@track done
                 }
                 val base = processed
                 val step = process(page) { n -> report(base + n) }
@@ -121,16 +142,17 @@ class CleanupRunner(
                 processed = base + page.size
                 report(processed)
             }
-            _results.tryEmit(resultText(action, done, processed, saved, stopped = false))
+            if (announce) _results.tryEmit(resultText(action, done, processed, saved, stopped = false))
         } catch (e: CancellationException) {
-            _results.tryEmit(resultText(action, done, processed, saved, stopped = true))
+            if (announce) _results.tryEmit(resultText(action, done, processed, saved, stopped = true))
             throw e
         } catch (e: Exception) {
             Timber.e(e, "CleanupRunner: $title failed")
-            _results.tryEmit("${title}未完成：${e.message ?: e.javaClass.simpleName}")
+            if (announce) _results.tryEmit("${title}未完成：${e.message ?: e.javaClass.simpleName}")
         } finally {
             _running.value = null
         }
+        done
     }
 
     private fun progressText(action: RuleAction, done: Int, total: Int): String {

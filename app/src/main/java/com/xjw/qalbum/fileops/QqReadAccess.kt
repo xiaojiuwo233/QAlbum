@@ -11,6 +11,10 @@ import org.json.JSONObject
 import java.io.File
 import java.io.FileInputStream
 import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 /** Root 侧只有目录枚举、lstat 和 O_RDONLY；SQLCipher 永远在普通应用进程读取私有副本。 */
 internal object QqReadAccess {
@@ -85,10 +89,61 @@ internal object QqReadAccess {
         return result.toString()
     }
 
+    // ---- 读取期间暂停 QQ 的 checkpoint（见 WalCheckpointPin） ----
+
+    private val pins = ConcurrentHashMap<Int, Pair<String, WalCheckpointPin>>()
+    private val nextPin = AtomicInteger(1)
+    private val expiry by lazy { Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "qq-pin-expiry").apply { isDaemon = true } } }
+
+    /**
+     * QQ 在运行且 [name] 有 `-shm` 时，对它加共享锁暂停 checkpoint，返回句柄（> 0）；QQ 没在运行、没有 `-shm`
+     * 时返回 0（不需要）；一直拿不到锁返回 -1。句柄 10 分钟后自动释放，防止客户端没来得及释放。
+     */
+    fun pin(userId: Int, account: String, name: String): Int = try {
+        pinChecked(userId, account, name)
+    } catch (e: Exception) {
+        // 加不上锁不影响读取（客户端按状态核对、重试），只是不能保证一次成功
+        -1
+    }
+
+    private fun pinChecked(userId: Int, account: String, name: String): Int {
+        require(name in databases)
+        val shm = source(userId, account, "$name-shm")
+        if (!shm.isFile || !qqRunning()) return 0
+        // 同一个文件上次没释放的先放掉（同一进程内 fcntl 锁不能重叠）
+        pins.entries.filter { it.value.first == shm.path }.forEach { unpin(it.key) }
+        val pin = WalCheckpointPin.acquire(shm, PIN_TIMEOUT_MS) ?: return -1
+        val handle = nextPin.getAndIncrement()
+        pins[handle] = shm.path to pin
+        expiry.schedule({ unpin(handle) }, PIN_LIFETIME_MINUTES, TimeUnit.MINUTES)
+        return handle
+    }
+
+    fun unpin(handle: Int) {
+        pins.remove(handle)?.second?.close()
+    }
+
+    /** 有 QQ 的进程（主进程或 :MSF 等子进程）在运行 */
+    private fun qqRunning(): Boolean = File("/proc").listFiles()?.any { dir ->
+        if (!dir.name.all(Char::isDigit)) return@any false
+        val name = runCatching { File(dir, "cmdline").readBytes() }.getOrNull()
+            ?.let { String(it).substringBefore('\u0000') } ?: return@any false
+        name == QQ_PACKAGE || name.startsWith("$QQ_PACKAGE:")
+    } == true
+
+    private const val QQ_PACKAGE = "com.tencent.mobileqq"
+    private const val PIN_TIMEOUT_MS = 10_000L
+    private const val PIN_LIFETIME_MINUTES = 10L
+
     fun openRead(userId: Int, account: String, name: String): ParcelFileDescriptor {
         require(!name.endsWith("-shm"))
         val file = source(userId, account, name)
-        val fd = Os.open(file.path, OsConstants.O_RDONLY or OsConstants.O_NOFOLLOW, 0)
+        // ErrnoException 是受检异常，穿过 binder 会让服务进程崩溃；换成能回传给客户端的异常（如 WAL 刚被删掉）
+        val fd = try {
+            Os.open(file.path, OsConstants.O_RDONLY or OsConstants.O_NOFOLLOW, 0)
+        } catch (e: ErrnoException) {
+            throw IllegalStateException("QQ 数据库文件无法打开：errno=${e.errno}")
+        }
         return try {
             require(OsConstants.S_ISREG(Os.fstat(fd).st_mode))
             ParcelFileDescriptor.dup(fd)

@@ -7,9 +7,7 @@ import com.xjw.qalbum.fileops.BoundFileOps
 import com.xjw.qalbum.fileops.FileOpsClient
 import com.xjw.qalbum.domain.model.AccessMode
 import com.topjohnwu.superuser.Shell
-import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.ensureActive
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -46,74 +44,47 @@ internal class QqSnapshotReader(context: Context, private val client: FileOpsCli
         }
     }
 
+    /**
+     * 复制这个账号的数据库成私有副本（见 [QqSnapshotCopier]：QQ 在运行时先暂停它的 checkpoint，
+     * 主库不变、WAL 可以继续增长；不一致就按库重试）。失败时删掉已复制的部分。
+     */
     suspend fun snapshot(bound: BoundFileOps, account: QqAccount, onProgress: (Long, Long) -> Unit): QqDatabaseSnapshot {
-        repeat(3) { attempt ->
-            currentCoroutineContext().ensureActive()
-            val directory = File(root, UUID.randomUUID().toString()).apply { check(mkdir()) }
-            var beforeState: String? = null
-            try {
-                beforeState = bound.callWithTimeout { it.qqDatabaseState(userId, account.key) }
-                val before = JSONObject(beforeState)
-                val names = before.keys().asSequence().filter { !it.endsWith("-shm") && !before.isNull(it) }.sorted().toList()
-                check("nt_msg.db" in names) { "QQ 消息数据库不存在" }
-                val total = names.sumOf { before.getJSONObject(it).getLong("size") }
-                check(total > 0 && root.usableSpace > total + 32L * 1024 * 1024) { "空间不足，无法创建 QQ 只读副本" }
-                var done = 0L
-                val copies = mutableMapOf<String, QqCopiedDatabase>()
-                for (name in names) {
-                    currentCoroutineContext().ensureActive()
-                    val fd = bound.callWithTimeout(onAbandoned = { it.close() }) { it.openQqDatabaseRead(userId, account.key, name) }
-                    val output = File(directory, name)
-                    ParcelFileDescriptor.AutoCloseInputStream(fd).use { input ->
-                        val originalSize = before.getJSONObject(name).getLong("size")
-                        val isDatabase = name.endsWith(".db")
-                        if (isDatabase) {
-                            val header = ByteArray(QqCipherHeader.SIZE)
-                            input.readExactly(header)
-                            copies[name] = QqCopiedDatabase(output, QqCipherHeader.decode(header))
-                            done += header.size
+        val directory = File(root, UUID.randomUUID().toString()).apply { check(mkdir()) }
+        try {
+            val source = object : QqSnapshotCopier.Source {
+                override suspend fun states(): Map<String, QqSnapshotCopier.FileState> {
+                    val json = JSONObject(bound.callWithTimeout { it.qqDatabaseState(userId, account.key) })
+                    return buildMap {
+                        json.keys().forEach { name ->
+                            if (name.endsWith("-shm") || json.isNull(name)) return@forEach
+                            val state = json.getJSONObject(name)
+                            put(name, QqSnapshotCopier.FileState(state.getLong("size"), state.toString()))
                         }
-                        var remaining = originalSize - if (isDatabase) QqCipherHeader.SIZE else 0
-                        check(remaining >= 0) { "QQ 数据库文件不完整" }
-                        output.outputStream().use { stream ->
-                            val buffer = ByteArray(128 * 1024)
-                            while (remaining > 0) {
-                                currentCoroutineContext().ensureActive()
-                                val count = input.read(buffer, 0, minOf(remaining, buffer.size.toLong()).toInt())
-                                check(count > 0) { "QQ 数据库在读取期间发生变化" }
-                                stream.write(buffer, 0, count)
-                                remaining -= count
-                                done += count
-                                onProgress(done, total)
-                            }
-                        }
-                        check(input.read() == -1) { "QQ 数据库在读取期间发生变化" }
                     }
                 }
-                val after = JSONObject(bound.callWithTimeout { it.qqDatabaseState(userId, account.key) })
-                val stable = before.keys().asSequence().all { name -> before.opt(name)?.toString() == after.opt(name)?.toString() }
-                if (stable) return QqDatabaseSnapshot(directory, copies)
-            } catch (t: Throwable) {
-                directory.deleteRecursively()
-                if (t is CancellationException) throw t
-                // WAL 轮换可能让读取在 stat 复核前就失败；此时仍只丢弃副本并重试。
-                if (attempt < 2 && beforeState != null) {
-                    val current = runCatching { bound.callWithTimeout { it.qqDatabaseState(userId, account.key) } }.getOrNull()
-                    if (current != null && current != beforeState) return@repeat
-                }
-                throw t
-            }
-            directory.deleteRecursively()
-        }
-        error("QQ 数据库正在更新，请稍后重试；原有来源索引仍保留")
-    }
 
-    private fun InputStream.readExactly(bytes: ByteArray) {
-        var offset = 0
-        while (offset < bytes.size) {
-            val n = read(bytes, offset, bytes.size - offset)
-            check(n > 0) { "QQ 数据库文件头不完整" }
-            offset += n
+                override suspend fun open(name: String): InputStream = ParcelFileDescriptor.AutoCloseInputStream(
+                    bound.callWithTimeout(onAbandoned = { it.close() }) { it.openQqDatabaseRead(userId, account.key, name) },
+                )
+
+                override suspend fun pin(name: String): Int = try {
+                    bound.callWithTimeout { it.pinQqDatabase(userId, account.key, name) }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    // 加不上锁照样复制：按状态核对、不一致就重试
+                    -1
+                }
+
+                override suspend fun unpin(handle: Int) {
+                    bound.callWithTimeout { it.unpinQqDatabase(handle) }
+                }
+            }
+            val copies = QqSnapshotCopier(source, directory, onProgress).copyAll(root.usableSpace)
+            return QqDatabaseSnapshot(directory, copies)
+        } catch (t: Throwable) {
+            directory.deleteRecursively()
+            throw t
         }
     }
 }

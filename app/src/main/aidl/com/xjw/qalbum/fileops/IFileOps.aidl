@@ -65,4 +65,10 @@ interface IFileOps {
     int writeFileChecked(String target, in ParcelFileDescriptor content, long mtimeMs) = 15;
     // 修正属主：与所在目录属主不同的文件改成目录的属主，改不了就放开读写。每个路径 0 无需修改、1 已修正、2 失败。
     int[] repairOwnership(in String[] paths) = 16;
+
+    // 读取 QQ 数据库期间暂停它的 checkpoint（仅 Root）：QQ 在运行时对 name-shm 的 checkpoint 锁与 DMS 字节加共享锁，
+    // 不写任何内容；QQ 的 checkpoint 得到 BUSY，写入照常进 WAL，复制期间主库文件不变。
+    // 返回句柄（> 0）；0 = 不需要（QQ 没在运行或没有 -shm）；-1 = 一直拿不到锁。句柄 10 分钟后自动释放。
+    int pinQqDatabase(int userId, String account, String name) = 17;
+    void unpinQqDatabase(int handle) = 18;
 }

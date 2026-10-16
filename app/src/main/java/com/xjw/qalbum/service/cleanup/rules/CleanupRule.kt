@@ -77,7 +77,8 @@ sealed class CleanupRule(val id: String) {
             """i.source_type = 'chatraw' AND i.status = 'active' AND i.is_protected = 0
                 AND i.is_animated = 0 AND i.mime <> 'image/gif' AND i.size >= $SLIM_MIN_BYTES
                 AND EXISTS (SELECT 1 FROM images p WHERE p.variant_group = i.variant_group
-                    AND p.source_type = 'chatimg' AND p.status = 'active')""",
+                    AND p.source_type = 'chatimg' AND p.status = 'active')
+                AND NOT $STICKER_MESSAGE""",
             option, now,
         )
     }
@@ -115,7 +116,7 @@ sealed class CleanupRule(val id: String) {
         override fun where(option: Int, now: Long) = SqlPart(
             """$PICTURE AND (i.is_animated = 1 OR (i.width > 0 AND i.height > 0
                 AND MAX(i.width, i.height) <= 512 AND MIN(i.width, i.height) * 5 >= MAX(i.width, i.height) * 4
-                AND i.size <= 204800))""",
+                AND i.size <= 204800) OR $STICKER_MESSAGE)""",
         )
     }
 
@@ -140,6 +141,51 @@ sealed class CleanupRule(val id: String) {
         }
     }
 
+    /**
+     * 群聊旧图：有聊天来源、且每条关联消息都是群聊并早于 N 个月的整张图。一个 NOT EXISTS 同时排除了
+     * 私聊或转发里也有的、以及最近又被人发过的。
+     */
+    data object GroupOld : CleanupRule("group_old") {
+        override val title = "群聊旧图"
+        override val description = "只在群里出现过、最近一次被发也在这之前的图，原图、预览图、缩略图一起删。" +
+            "私聊或转发里也有的不算。"
+        override val scope = RuleScope.PICTURE
+        override val compressible = true
+        override val options = listOf(1, 3, 6, 12).map { RuleOption(it, monthsLabel(it), monthsLabel(it)) }
+        override val defaultOption = 3
+        override fun where(option: Int, now: Long) = SqlPart(
+            """$PICTURE AND EXISTS (SELECT 1 FROM image_qq_origins l WHERE l.image_id = i.id)
+                AND NOT EXISTS (SELECT 1 FROM image_qq_origins l CROSS JOIN qq_origins o ON o.id = l.origin_id
+                    WHERE l.image_id = i.id AND (o.chat_type <> 2 OR o.message_time >= ?))""",
+            listOf(monthsBefore(now, option.coerceAtLeast(1))),
+        )
+    }
+
+    /**
+     * 聊天记录已删除：最近一次完整读取（qq_source_cache.complete_read_at）时已经找不到对应消息的整张图。
+     * 只算那次读取前就扫描到的文件；还没完整读取过时 complete_read_at = 0，什么都不命中。
+     * 参数 0 = 全部（含从来没关联上消息的），1 = 只算以前关联过、后来消息被删的。
+     */
+    data object DeletedChats : CleanupRule("deleted_chats") {
+        override val title = "聊天记录已删除"
+        override val description = "聊天记录删了、缓存还在的图，原图、预览图、缩略图一起删。" +
+            "以最近一次完整读取为准，频道等没读取的聊天里的图也会算进来。"
+        override val scope = RuleScope.PICTURE
+        override val options = listOf(
+            RuleOption(0, "全部", "全部"),
+            RuleOption(1, "读取后才删的", "读取后才删的"),
+        )
+        override val defaultOption = 0
+        override fun where(option: Int, now: Long): SqlPart {
+            val linked = if (option == 1) " AND EXISTS (SELECT 1 FROM image_qq_origins l WHERE l.image_id = i.id)" else ""
+            return SqlPart(
+                """$PICTURE AND i.first_seen < $COMPLETE_READ$linked
+                    AND NOT EXISTS (SELECT 1 FROM image_qq_origins l CROSS JOIN qq_origins o ON o.id = l.origin_id
+                        WHERE l.image_id = i.id AND o.seen_at >= $COMPLETE_READ)""",
+            )
+        }
+    }
+
     /** 按时间清理选中的一段时间：整张图 [from, until) */
     data class TimeRange(val from: Long, val until: Long, val label: String) : CleanupRule("range:$from:$until:$label") {
         override val title get() = label
@@ -161,7 +207,20 @@ sealed class CleanupRule(val id: String) {
          */
         val listed: List<CleanupRule> by lazy { listOf(Thumbnails, SlimOriginals, CompressOriginals, Stickers, OldPictures) }
 
-        fun byId(id: String): CleanupRule? = listed.firstOrNull { it.id == id } ?: id.takeIf { it.startsWith("range:") }?.let {
+        /** 按聊天的规则（需要 Root 读取聊天来源），清理页单独一组 */
+        val chat: List<CleanupRule> by lazy { listOf(GroupOld, DeletedChats) }
+
+        /** 最近一次完整读取聊天来源的开始时间（没有过为 0） */
+        private const val COMPLETE_READ = "(SELECT complete_read_at FROM qq_source_cache WHERE id = 1)"
+
+        /**
+         * 聊天记录里是动图或表情的图：消息的图片类型是 GIF（2000），或子类型属于表情（QQ 按表情显示的
+         * 1–5、7–15，摘要为「[动画表情]」的也记成表情）。没读来源时恒为假。
+         */
+        private const val STICKER_MESSAGE = """EXISTS (SELECT 1 FROM image_qq_origins l CROSS JOIN qq_origins o ON o.id = l.origin_id
+            WHERE l.image_id = i.id AND (o.pic_type = 2000 OR o.pic_sub_type IN (1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15)))"""
+
+        fun byId(id: String): CleanupRule? = (listed + chat).firstOrNull { it.id == id } ?: id.takeIf { it.startsWith("range:") }?.let {
             val parts = it.split(':')
             val from = parts.getOrNull(1)?.toLongOrNull() ?: return null
             val until = parts.getOrNull(2)?.toLongOrNull() ?: return null
@@ -170,7 +229,20 @@ sealed class CleanupRule(val id: String) {
 
         private fun days(vararg values: Int) = values.map { RuleOption(it, "$it 天前", "$it 天前") }
 
+        private fun monthsLabel(months: Int) = when (months) {
+            6 -> "半年前"
+            12 -> "1 年前"
+            else -> "$months 个月前"
+        }
+
         private fun olderThan(base: String, days: Int, now: Long): SqlPart =
             if (days <= 0) SqlPart(base) else SqlPart("$base AND i.mtime < ?", listOf(now - days * DAY_MS))
+
+        /** [months] 个月前那天的零点（本地时区）；按聊天清理的时间筛选与群聊旧图共用 */
+        fun monthsBefore(now: Long, months: Int): Long {
+            val zone = ZoneId.systemDefault()
+            return Instant.ofEpochMilli(now).atZone(zone).toLocalDate()
+                .minusMonths(months.toLong()).atStartOfDay(zone).toInstant().toEpochMilli()
+        }
     }
 }

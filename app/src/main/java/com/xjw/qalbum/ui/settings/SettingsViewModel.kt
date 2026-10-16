@@ -7,6 +7,8 @@ import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.domain.model.AccessMode
 import com.xjw.qalbum.domain.model.ScanProgress
 import com.xjw.qalbum.service.cleanup.CompressDemo
+import com.xjw.qalbum.service.cleanup.rules.CleanupRule
+import com.xjw.qalbum.service.cleanup.rules.ScheduledCleanup
 import com.xjw.qalbum.service.indexer.ScanController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -14,6 +16,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -171,6 +174,30 @@ class SettingsViewModel(
     val compressDemoResult: StateFlow<CompressDemo.Result?> = settings.compressQuality
         .mapLatest { compressDemo.render(it) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    // ---- 定时清理 ----
+
+    /** 每周自动执行的规则 id */
+    val scheduledCleanup: StateFlow<Set<String>> = settings.scheduledCleanupRules
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptySet())
+
+    /** 上次定时清理的结果（没跑过为 null） */
+    val scheduledCleanupLast: StateFlow<String?> = settings.scheduledCleanupLast
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    /** 能定时执行的规则与它们当前的参数（如「30 天前」） */
+    val scheduledRules: StateFlow<List<Pair<CleanupRule, String>>> = combine(
+        ScheduledCleanup.eligible.map { rule ->
+            settings.cleanupRuleParam(rule.id).map { value ->
+                rule to (rule.option(value ?: rule.defaultOption) ?: rule.option(rule.defaultOption))?.subtitle.orEmpty()
+            }
+        },
+    ) { it.toList() }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ScheduledCleanup.eligible.map { it to "" })
+
+    fun setScheduledCleanup(ruleId: String, enabled: Boolean) {
+        persist { settings.setScheduledCleanupRule(ruleId, enabled) }
+    }
 
     companion object {
         /** 设置写串行锁（公平）：见 [persist]；跨页面 ViewModel 实例共用，防先后两页的写乱序覆盖 */

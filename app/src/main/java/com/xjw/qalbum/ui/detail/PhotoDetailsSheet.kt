@@ -211,6 +211,7 @@ private fun OriginCard(origin: QqOriginDetails, position: SegmentPosition, showA
         if (origin.memberName.isNotBlank() && origin.memberName != origin.senderName) InfoRow("群名片", origin.memberName)
         if (showAccount) InfoRow("账号", origin.accountName)
         InfoRow("发送时间", formatDateTimeSeconds(origin.messageTime))
+        if (origin.sentOriginal) InfoRow("发送方式", "原图")
         if (origin.messageCount > 1) InfoRow("出现次数", "${origin.messageCount} 条消息")
     }
 }
