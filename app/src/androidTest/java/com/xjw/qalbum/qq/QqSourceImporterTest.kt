@@ -7,6 +7,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.google.protobuf.CodedOutputStream
 import com.xjw.qalbum.data.db.AppDatabase
+import com.xjw.qalbum.data.db.QqSourceStatsSql
 import com.xjw.qalbum.data.db.dao.QqContent
 import com.xjw.qalbum.data.db.dao.QqScopeIds
 import com.xjw.qalbum.data.db.dao.QqScopeSql
@@ -26,6 +27,7 @@ import net.zetetic.database.sqlcipher.SQLiteDatabase
 import net.zetetic.database.sqlcipher.SQLiteDatabaseHook
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -137,6 +139,60 @@ class QqSourceImporterTest {
     }
 
     @Test
+    fun incrementalReadsKeepSourceStatsInStepWithAFullRebuild() = runBlocking {
+        val old = now - 100 * day
+        val (photo, shared, later, fresh, scanned) = (1..5).map(::picture)
+        listOf(photo, shared, later).forEach { images(it, old) }
+        images(fresh, now)
+        message("group_msg_table", 1, "u_alice", 1001, old, element(photo, picType = 1000))
+        message("group_msg_table", 2, "u_bob", 1001, old, element(shared, picType = 1000))
+        message("c2c_msg_table", 3, "u_carol", 0, old, element(shared, picType = 1000), peer = "u_carol")
+        val first = import(now - 2 * day)
+        QqSourceStatsBuilder(db).rebuild {}
+        val dao = db.qqSourceDao()
+        assertFalse(dao.cacheDirty())
+
+        // 新消息：Alice 改了昵称又发了一张以前的图，新群 1002 里 Dave 发了新图，Bob 发了一张读取时还没下载的图
+        message("group_msg_table", 4, "u_alice", 1001, now, element(later, picType = 1000), nickname = "Alice 新昵称")
+        message("group_msg_table", 5, "u_dave", 1002, now, element(fresh, picType = 1001))
+        message("group_msg_table", 6, "u_bob", 1002, now, element(scanned, picType = 1000))
+        val baseline = dao.readBaseline()
+        val second = import(now, startAfter = first.marks, link = false)
+        assertEquals(setOf(1 to opaqueKey(account.key, "sender", "u_alice")), second.renamed)
+        // 改名标的脏在导入时撤掉了：其间扫描入库的图照常由触发器计入
+        assertFalse(dao.cacheDirty())
+        images(scanned, now)
+        dao.reconcileLinksAfter(baseline.paths)
+        assertTrue(QqSourceStatsBuilder(db).applyNew(baseline, second.renamed))
+        val incremental = sourceStats()
+        assertTrue(incremental.contains("Alice 新昵称"))
+
+        // 与清空后整体重建的结果一致
+        QqSourceStatsSql.clearDerived.forEach(db.openHelper.writableDatabase::execSQL)
+        dao.markDirty()
+        QqSourceStatsBuilder(db).rebuild {}
+        assertEquals(sourceStats(), incremental)
+    }
+
+    @Test
+    fun knownMessagesOnlyRefreshTheirReadTimeAndUnchangedNamesAreNotRewritten() = runBlocking {
+        val photo = picture(1)
+        images(photo, now - day)
+        message("group_msg_table", 1, "u_alice", 1001, now - day, element(photo, picType = 1000))
+        val first = import(now - day)
+        val paths = scalar("SELECT COUNT(*) FROM qq_origin_paths")
+        assertTrue(paths > 0)
+        // 已有来源的路径不再登记：删掉一条后从头再读，它还是不在；解析规则更新后从头读时补上
+        db.openHelper.writableDatabase.execSQL("DELETE FROM qq_origin_paths WHERE rowid = (SELECT MAX(rowid) FROM qq_origin_paths)")
+        val again = import(now)
+        assertEquals(paths - 1, scalar("SELECT COUNT(*) FROM qq_origin_paths"))
+        assertEquals(1, scalar("SELECT COUNT(*) FROM qq_origins WHERE seen_at = $now"))
+        assertTrue(again.renamed.isEmpty() && first.renamed.isEmpty())
+        importWith(now + 1, allPaths = true)
+        assertEquals(paths, scalar("SELECT COUNT(*) FROM qq_origin_paths"))
+    }
+
+    @Test
     fun autoArchiveCatchesNewPicturesOfListedChats() = runBlocking {
         val first = picture(1)
         images(first, now - 30 * day)
@@ -233,19 +289,50 @@ class QqSourceImporterTest {
         ).use(block)
     }
 
-    private suspend fun import(readStart: Long, startAfter: Map<String, Long> = emptyMap()): QqImportResult {
+    /** 读取一次；[link] 时像读取结束那样把来源与已入库的图片关联起来 */
+    private suspend fun import(readStart: Long, startAfter: Map<String, Long> = emptyMap(), link: Boolean = true): QqImportResult =
+        importWith(readStart, startAfter).also { if (link) db.qqSourceDao().reconcileLinks() }
+
+    private suspend fun importWith(readStart: Long, startAfter: Map<String, Long> = emptyMap(), allPaths: Boolean = false): QqImportResult {
         val snapshot = QqDatabaseSnapshot(directory, mapOf("nt_msg.db" to QqCopiedDatabase(File(directory, "nt_msg.db"), header)))
-        return QqSourceImporter(db).import(snapshot, account, 1, root, readStart, startAfter) { _, _ -> }
+        return QqSourceImporter(db).import(snapshot, account, 1, root, readStart, startAfter, allPaths) { _, _ -> }
     }
 
-    private fun message(table: String, id: Long, sender: String, group: Long, time: Long, vararg elements: ByteArray, peer: String = "") {
+    private fun message(
+        table: String, id: Long, sender: String, group: Long, time: Long, vararg elements: ByteArray,
+        peer: String = "", nickname: String = sender.removePrefix("u_"),
+    ) {
         val content = encode { out -> elements.forEach { out.writeByteArray(40800, it) } }
         messages {
             it.execSQL(
                 "INSERT INTO $table VALUES (?, ?, ?, 0, ?, 0, ?, '', ?, 2, ?, NULL)",
-                arrayOf(id, sender, peer, group, time / 1000, sender.removePrefix("u_"), content),
+                arrayOf(id, sender, peer, group, time / 1000, nickname, content),
             )
         }
+    }
+
+    /** 来源统计的全部结果（分类按键、搜索文本按词比较，与分类 id 的分配顺序无关） */
+    private fun sourceStats(): String {
+        val keys = mutableMapOf<Long, String>()
+        val facets = db.query("SELECT id, kind, `key`, name, search_text, chat_type, image_count, image_bytes, thumb_count, thumb_bytes, latest_time FROM qq_source_facets", emptyArray()).use { c ->
+            buildList {
+                while (c.moveToNext()) {
+                    keys[c.getLong(0)] = "${c.getInt(1)}:${c.getString(2)}"
+                    val words = c.getString(4).split(' ', ',').filter { it.isNotEmpty() }.sorted()
+                    add("${keys[c.getLong(0)]} ${c.getString(3)} $words ${(5..10).map { c.getLong(it) }}")
+                }
+            }.sorted()
+        }
+        val contexts = db.query("SELECT image_id, conversation_id, sender_id FROM qq_image_contexts", emptyArray()).use { c ->
+            buildList { while (c.moveToNext()) add("${c.getLong(0)} ${keys[c.getLong(1)]} ${keys[c.getLong(2)]}") }.sorted()
+        }
+        val members = db.query("SELECT conversation_id, sender_id, card, latest_time FROM qq_source_members", emptyArray()).use { c ->
+            buildList { while (c.moveToNext()) add("${keys[c.getLong(0)]} ${keys[c.getLong(1)]} ${c.getString(2)} ${c.getLong(3)}") }.sorted()
+        }
+        val cache = db.query("SELECT image_count, image_bytes, thumb_count, thumb_bytes, dirty FROM qq_source_cache", emptyArray()).use { c ->
+            c.moveToFirst(); (0..4).map { c.getLong(it) }
+        }
+        return listOf(facets, contexts, members, cache).joinToString("\n")
     }
 
     // ---- 图片与消息内容 ----

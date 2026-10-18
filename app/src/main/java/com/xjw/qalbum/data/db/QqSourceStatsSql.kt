@@ -8,8 +8,9 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  * 统计分两类：图片（status = active 且不是 chatthumb）与 QQ 缩略图（chatthumb，status = thumbnail_trash）。
  * - 缓存未标脏（qq_source_cache.dirty = 0）时，images 的新增 / 状态 / 大小 / 路径变化由触发器
  *   增量更新 qq_image_contexts、各分类计数与汇总；单张删除只改动这张图涉及的几行。
- * - 导入新的聊天来源、名称变化或清除索引后标脏，触发器暂停，由 [rebuildNames]、[contextsInRange]、
- *   [recount] 分段重建（每段一个短事务，不长时间占住写锁）。
+ * - 读取聊天来源后由 [applyNew] 增量更新：只处理读取前最大 rowid 之后新增的来源与关联，名称只重算涉及的会话与发送人。
+ * - 清除索引、升级等标脏后，触发器暂停，由 [rebuildNames]、[contextsInRange]、[recount] 分段重建
+ *   （每段一个短事务，不长时间占住写锁）。
  *
  * 纯 SQL 便于迁移测试直接在 [SupportSQLiteDatabase] 上执行同一套语句。
  */
@@ -203,6 +204,122 @@ object QqSourceStatsSql {
                 AND i.id IN (SELECT image_id FROM qq_image_contexts))
             WHERE id = 1""",
     )
+
+    /** 增量更新前建好要重算名称的会话（0）/ 发送人（1）列表，改了名的用 [TOUCH] 放进去 */
+    val prepareTouched: List<String> = listOf(
+        "DROP TABLE IF EXISTS temp.qq_touched",
+        "CREATE TEMP TABLE qq_touched(kind INTEGER NOT NULL, `key` TEXT NOT NULL, PRIMARY KEY(kind, `key`))",
+    )
+
+    const val TOUCH = "INSERT OR IGNORE INTO temp.qq_touched(kind, `key`) VALUES(?, ?)"
+
+    /**
+     * 读取来源后的增量更新（与 [prepareTouched] 在同一事务里执行，缓存未标脏时）：[origins] / [links] 是读取前
+     * qq_origins / image_qq_origins 的最大 rowid。
+     * 1. 新来源涉及的会话与发送人，按它们的全部来源重算名称、搜索文本、最近时间与群名片（口径同 [rebuildNames]）；
+     * 2. 新关联投影成（图片, 会话, 发送人），图片第一次出现在某个会话 / 发送人里才计入它的统计，第一次有来源才计入汇总。
+     * 结果与整体重建一致，只是不必把几十万条来源与关联都过一遍。
+     */
+    fun applyNew(db: SupportSQLiteDatabase, origins: Long, links: Long) {
+        db.execSQL("INSERT OR IGNORE INTO temp.qq_touched SELECT 0, conversation_key FROM qq_origins WHERE rowid > ?", arrayOf<Any>(origins))
+        db.execSQL("INSERT OR IGNORE INTO temp.qq_touched SELECT 1, sender_key FROM qq_origins WHERE rowid > ?", arrayOf<Any>(origins))
+        touchedNames.forEach(db::execSQL)
+        db.execSQL(NEW_CONTEXTS, arrayOf<Any>(links))
+        newCounts.forEach(db::execSQL)
+    }
+
+    private const val PAIRS_OF_TOUCHED = """SELECT conversation_key, sender_key, MAX(account_key), MAX(chat_type),
+        MAX(conversation_name), MAX(sender_name), MAX(member_name), MAX(message_time) FROM qq_origins"""
+
+    private fun touchedSource(kind: Int) = "SELECT 1 FROM temp.qq_touched t WHERE t.kind = $kind AND t.`key` ="
+
+    private val touchedNames: List<String> = listOf(
+        "DROP TABLE IF EXISTS temp.qq_pairs",
+        """CREATE TEMP TABLE qq_pairs(conversation_key TEXT NOT NULL, sender_key TEXT NOT NULL,
+            account_key TEXT NOT NULL, chat_type INTEGER NOT NULL, conversation_name TEXT NOT NULL,
+            sender_name TEXT NOT NULL, member_name TEXT NOT NULL, latest INTEGER NOT NULL,
+            PRIMARY KEY(conversation_key, sender_key))""",
+        // 涉及的会话、发送人的全部来源（一对会话 / 发送人两边都涉及时两条结果相同，后一条忽略）
+        """INSERT OR IGNORE INTO temp.qq_pairs $PAIRS_OF_TOUCHED
+            WHERE conversation_key IN (SELECT `key` FROM temp.qq_touched WHERE kind = 0) GROUP BY conversation_key, sender_key""",
+        """INSERT OR IGNORE INTO temp.qq_pairs $PAIRS_OF_TOUCHED
+            WHERE sender_key IN (SELECT `key` FROM temp.qq_touched WHERE kind = 1) GROUP BY conversation_key, sender_key""",
+        "DROP TABLE IF EXISTS temp.qq_facet_src",
+        """CREATE TEMP TABLE qq_facet_src(kind INTEGER NOT NULL, `key` TEXT NOT NULL, name TEXT NOT NULL,
+            search_text TEXT NOT NULL, account_key TEXT NOT NULL, chat_type INTEGER NOT NULL, latest INTEGER NOT NULL,
+            PRIMARY KEY(kind, `key`))""",
+        """INSERT INTO temp.qq_facet_src SELECT 0, conversation_key, MAX(conversation_name), MAX(conversation_name),
+            MAX(account_key), MAX(chat_type), MAX(latest) FROM temp.qq_pairs p
+            WHERE EXISTS (${touchedSource(0)} p.conversation_key) GROUP BY conversation_key""",
+        """INSERT INTO temp.qq_facet_src SELECT 1, sender_key, MAX(sender_name),
+            COALESCE(GROUP_CONCAT(DISTINCT NULLIF(sender_name, '')), '') || ' ' ||
+            COALESCE(GROUP_CONCAT(DISTINCT NULLIF(member_name, '')), ''),
+            MAX(account_key), 0, MAX(latest) FROM temp.qq_pairs p
+            WHERE EXISTS (${touchedSource(1)} p.sender_key) GROUP BY sender_key""",
+        """INSERT OR IGNORE INTO qq_source_facets(kind, `key`, name, search_text, account_key, chat_type,
+            image_count, image_bytes, thumb_count, thumb_bytes, latest_time)
+            SELECT kind, `key`, name, search_text, account_key, chat_type, 0, 0, 0, 0, latest FROM temp.qq_facet_src""",
+        """UPDATE qq_source_facets SET
+            name = (SELECT s.name FROM temp.qq_facet_src s WHERE s.kind = qq_source_facets.kind AND s.`key` = qq_source_facets.`key`),
+            search_text = (SELECT s.search_text FROM temp.qq_facet_src s WHERE s.kind = qq_source_facets.kind AND s.`key` = qq_source_facets.`key`),
+            chat_type = (SELECT s.chat_type FROM temp.qq_facet_src s WHERE s.kind = qq_source_facets.kind AND s.`key` = qq_source_facets.`key`),
+            latest_time = (SELECT s.latest FROM temp.qq_facet_src s WHERE s.kind = qq_source_facets.kind AND s.`key` = qq_source_facets.`key`)
+            WHERE EXISTS (SELECT 1 FROM temp.qq_facet_src s WHERE s.kind = qq_source_facets.kind AND s.`key` = qq_source_facets.`key`)""",
+        """INSERT OR REPLACE INTO qq_source_members(conversation_id, sender_id, card, latest_time)
+            SELECT cf.id, sf.id, p.member_name, p.latest FROM temp.qq_pairs p
+            CROSS JOIN qq_source_facets cf ON cf.kind = 0 AND cf.`key` = p.conversation_key
+            CROSS JOIN qq_source_facets sf ON sf.kind = 1 AND sf.`key` = p.sender_key""",
+        "DROP TABLE temp.qq_facet_src",
+        "DROP TABLE temp.qq_pairs",
+        "DROP TABLE temp.qq_touched",
+        "DROP TABLE IF EXISTS temp.qq_new_contexts",
+        """CREATE TEMP TABLE qq_new_contexts(image_id INTEGER NOT NULL, conversation_id INTEGER NOT NULL,
+            sender_id INTEGER NOT NULL, PRIMARY KEY(image_id, conversation_id, sender_id))""",
+    )
+
+    private const val NEW_CONTEXTS = """INSERT OR IGNORE INTO temp.qq_new_contexts SELECT l.image_id, cf.id, sf.id
+        FROM image_qq_origins l
+        CROSS JOIN qq_origins o ON o.id = l.origin_id
+        CROSS JOIN qq_source_facets cf ON cf.kind = 0 AND cf.`key` = o.conversation_key
+        CROSS JOIN qq_source_facets sf ON sf.kind = 1 AND sf.`key` = o.sender_key
+        WHERE l.rowid > ?
+          AND NOT EXISTS (SELECT 1 FROM qq_image_contexts c
+              WHERE c.image_id = l.image_id AND c.conversation_id = cf.id AND c.sender_id = sf.id)"""
+
+    /** 新计入的张数或大小，图片按当前状态算（与 [recount] 同样用 + 号避开索引） */
+    private fun added(kind: (String) -> String, bytes: Boolean, from: String, where: String) =
+        "(SELECT " + (if (bytes) "COALESCE(SUM(i.size), 0)" else "COUNT(*)") + " FROM $from WHERE $where AND ${kind("i")})"
+
+    private fun plainImg(row: String) = "(+$row.status = 'active' AND +$row.source_type <> 'chatthumb')"
+    private fun plainThumb(row: String) = "(+$row.source_type = 'chatthumb' AND +$row.status = 'thumbnail_trash')"
+
+    private val newCounts: List<String> = run {
+        val facetFrom = "temp.qq_new_facet_images x CROSS JOIN images i ON i.id = x.image_id"
+        val facetWhere = "x.fid = qq_source_facets.id"
+        val cacheFrom = "images i"
+        val cacheWhere = """i.id IN (SELECT image_id FROM temp.qq_new_contexts)
+            AND NOT EXISTS (SELECT 1 FROM qq_image_contexts c WHERE c.image_id = i.id)"""
+        fun additions(from: String, where: String) = listOf(
+            "image_count = image_count + " + added(::plainImg, false, from, where),
+            "image_bytes = image_bytes + " + added(::plainImg, true, from, where),
+            "thumb_count = thumb_count + " + added(::plainThumb, false, from, where),
+            "thumb_bytes = thumb_bytes + " + added(::plainThumb, true, from, where),
+        ).joinToString(",\n")
+        listOf(
+            "DROP TABLE IF EXISTS temp.qq_new_facet_images",
+            "CREATE TEMP TABLE qq_new_facet_images(fid INTEGER NOT NULL, image_id INTEGER NOT NULL, PRIMARY KEY(fid, image_id))",
+            """INSERT OR IGNORE INTO temp.qq_new_facet_images SELECT n.conversation_id, n.image_id FROM temp.qq_new_contexts n
+                WHERE NOT EXISTS (SELECT 1 FROM qq_image_contexts c WHERE c.image_id = n.image_id AND c.conversation_id = n.conversation_id)""",
+            """INSERT OR IGNORE INTO temp.qq_new_facet_images SELECT n.sender_id, n.image_id FROM temp.qq_new_contexts n
+                WHERE NOT EXISTS (SELECT 1 FROM qq_image_contexts c WHERE c.image_id = n.image_id AND c.sender_id = n.sender_id)""",
+            "UPDATE qq_source_facets SET ${additions(facetFrom, facetWhere)} WHERE id IN (SELECT fid FROM temp.qq_new_facet_images)",
+            "UPDATE qq_source_cache SET ${additions(cacheFrom, cacheWhere)} WHERE id = 1",
+            """INSERT OR IGNORE INTO qq_image_contexts(image_id, conversation_id, sender_id)
+                SELECT image_id, conversation_id, sender_id FROM temp.qq_new_contexts""",
+            "DROP TABLE temp.qq_new_facet_images",
+            "DROP TABLE temp.qq_new_contexts",
+        )
+    }
 
     /** 清除来源索引后的空状态（账号级联删除了来源与分类） */
     val clearDerived: List<String> = listOf(

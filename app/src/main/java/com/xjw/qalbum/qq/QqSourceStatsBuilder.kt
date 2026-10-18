@@ -4,11 +4,12 @@ import androidx.room.withTransaction
 import androidx.sqlite.db.SimpleSQLiteQuery
 import com.xjw.qalbum.data.db.AppDatabase
 import com.xjw.qalbum.data.db.QqSourceStatsSql
+import com.xjw.qalbum.data.db.dao.QqReadBaseline
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 
 /**
- * 来源统计的整体重建（仅在导入新来源、名称变化、升级后执行；日常删图由触发器增量维护）。
+ * 来源统计的整体重建（第一次读取、升级、清除索引后执行；日常删图由触发器、读取来源由 [applyNew] 增量维护）。
  *
  * 分三段、每段一个短事务，期间其他写入（删图、扫描）可以插队：
  * 1. 一次遍历消息来源，补齐分类、刷新名称与群名片；
@@ -41,6 +42,19 @@ internal class QqSourceStatsBuilder(private val db: AppDatabase) {
             QqSourceStatsSql.contextsInRange(sql, maxId, Long.MAX_VALUE)
             QqSourceStatsSql.recount.forEach(sql::execSQL)
         }
+    }
+
+    /**
+     * 读取来源后的增量更新（见 QqSourceStatsSql.applyNew）：[baseline] 之后新增的来源与关联计入统计，
+     * [renamed] 里改了名的会话（0）/ 发送人（1）重算名称。缓存已标脏（等整体重建）时什么也不做，返回 false。
+     */
+    suspend fun applyNew(baseline: QqReadBaseline, renamed: Set<Pair<Int, String>>): Boolean = db.withTransaction {
+        if (db.qqSourceDao().cacheDirty()) return@withTransaction false
+        val sql = db.openHelper.writableDatabase
+        QqSourceStatsSql.prepareTouched.forEach(sql::execSQL)
+        renamed.forEach { (kind, key) -> sql.execSQL(QqSourceStatsSql.TOUCH, arrayOf<Any>(kind, key)) }
+        QqSourceStatsSql.applyNew(sql, baseline.origins, baseline.links)
+        true
     }
 
     private companion object {

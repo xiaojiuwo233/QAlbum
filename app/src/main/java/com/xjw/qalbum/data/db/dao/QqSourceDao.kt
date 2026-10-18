@@ -74,6 +74,9 @@ data class QqSourceSummary(
 
 data class QqFacetKindCount(val kind: Int, val chatType: Int, val count: Int)
 data class QqSeenSummary(val total: Int, val stale: Int)
+
+/** 读取前来源、路径、关联三张表的最大 rowid：之后写入的行 rowid 都比它大（见 QqSourceRepository） */
+data class QqReadBaseline(val origins: Long, val paths: Long, val links: Long)
 data class QqImageMd5(val imageId: Long, val md5: String)
 data class QqPreviewFamilyMove(val id: Long, val fromGroup: Long?, val toGroup: Long)
 
@@ -151,6 +154,13 @@ interface QqSourceDao {
 
     @Query("UPDATE qq_source_cache SET dirty = 1 WHERE id = 1")
     suspend fun markDirty()
+
+    @Query("SELECT COALESCE((SELECT dirty FROM qq_source_cache WHERE id = 1), 1)")
+    suspend fun cacheDirty(): Boolean
+
+    /** 只在同一事务里撤销自己刚标的脏（改名、改账号名称：统计由读取后的增量更新补上） */
+    @Query("UPDATE qq_source_cache SET dirty = 0 WHERE id = 1")
+    suspend fun markClean()
 
     @Query("""SELECT image_count AS imageCount, image_bytes AS imageBytes, thumb_count AS thumbCount,
         thumb_bytes AS thumbBytes, dirty FROM qq_source_cache WHERE id = 1""")
@@ -245,8 +255,13 @@ interface QqSourceDao {
     @Upsert
     suspend fun putAccount(account: QqSourceAccountEntity)
 
+    /** 账号还没有时先建上（来源引用它）；名称与张数读完再写 */
     @Insert(onConflict = OnConflictStrategy.IGNORE)
-    suspend fun insertOrigins(origins: List<QqOriginEntity>)
+    suspend fun addAccount(account: QqSourceAccountEntity)
+
+    /** 返回每条的 rowid，已有的（以前读过的消息）为 -1 */
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertOrigins(origins: List<QqOriginEntity>): List<Long>
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertPaths(paths: List<QqOriginPathEntity>)
@@ -267,13 +282,14 @@ interface QqSourceDao {
     @Query("SELECT COUNT(*) AS total, COALESCE(SUM(seen_at < :readStart), 0) AS stale FROM qq_origins")
     suspend fun seenSummary(readStart: Long): QqSeenSummary
 
+    /** 只改名字变了的行（大群有几十万条来源，原样重写会很慢）；返回改了几行 */
     @Query("""UPDATE qq_origins SET conversation_name = :name
-        WHERE account_key = :accountKey AND conversation_key = :key AND :name <> ''""")
-    suspend fun updateConversationName(accountKey: String, key: String, name: String)
+        WHERE account_key = :accountKey AND conversation_key = :key AND :name <> '' AND conversation_name <> :name""")
+    suspend fun updateConversationName(accountKey: String, key: String, name: String): Int
 
     @Query("""UPDATE qq_origins SET sender_name = :name
-        WHERE account_key = :accountKey AND sender_key = :key AND :name <> ''""")
-    suspend fun updateSenderName(accountKey: String, key: String, name: String)
+        WHERE account_key = :accountKey AND sender_key = :key AND :name <> '' AND sender_name <> :name""")
+    suspend fun updateSenderName(accountKey: String, key: String, name: String): Int
 
     /**
      * 仅给实际已入库、且符合 QQ 家族命名的别名版本（`Cache_xxx.jpg` / `.png` / `.gif` 等，见 QqCachePaths.ALIAS_EXTENSIONS）
@@ -303,6 +319,24 @@ interface QqSourceDao {
     suspend fun reconcileLinks() {
         registerIndexedAliasPaths()
         linkOriginPaths()
+    }
+
+    @Query("""SELECT COALESCE((SELECT MAX(rowid) FROM qq_origins), 0) AS origins,
+        COALESCE((SELECT MAX(rowid) FROM qq_origin_paths), 0) AS paths,
+        COALESCE((SELECT MAX(rowid) FROM image_qq_origins), 0) AS links""")
+    suspend fun readBaseline(): QqReadBaseline
+
+    /** 读取后补关联：只看 [afterRowid] 之后登记的路径（按路径找已入库的图），不必把全部图片与路径对一遍 */
+    @Query("""INSERT OR IGNORE INTO image_qq_origins(image_id, origin_id)
+        SELECT i.id, p.origin_id FROM qq_origin_paths p CROSS JOIN images i ON i.path = p.path
+        WHERE p.rowid > :afterRowid AND i.status NOT IN ('deleted', 'quarantined')""")
+    suspend fun linkPathsAfter(afterRowid: Long)
+
+    /** 读取来源后的关联：带后缀的别名沿用同名文件的来源，再给 [pathRowid] 之后登记的路径补关联 */
+    @Transaction
+    suspend fun reconcileLinksAfter(pathRowid: Long) {
+        registerIndexedAliasPaths()
+        linkPathsAfter(pathRowid)
     }
 
     @Query("""INSERT OR IGNORE INTO qq_origin_paths(path, origin_id)

@@ -59,6 +59,7 @@ internal class QqSnapshotCopier(
 
     private suspend fun copyDatabase(name: String, progress: (Long) -> Unit): QqCopiedDatabase {
         val wal = "$name-wal"
+        val started = System.currentTimeMillis()
         var handle = source.pin(name)
         try {
             repeat(attempts) { attempt ->
@@ -79,8 +80,9 @@ internal class QqSnapshotCopier(
                 val walKept = isWalHeader(walBefore) && walBefore.contentEquals(walAfter)
                 val mainKept = source.states()[name] == main
                 if (header != null && walCopied && (walKept || mainKept)) {
-                    Timber.i("QQ snapshot copied: database=%s attempt=%d pinned=%s bytes=%d walKept=%s mainKept=%s",
-                        name, attempt + 1, handle > 0, main.size, walKept, mainKept)
+                    Timber.i("QQ snapshot copied: database=%s attempt=%d pinned=%s bytes=%d wal=%d walKept=%s mainKept=%s ms=%d",
+                        name, attempt + 1, handle > 0, main.size, File(directory, wal).length(), walKept, mainKept,
+                        System.currentTimeMillis() - started)
                     return QqCopiedDatabase(File(directory, name), header)
                 }
                 Timber.i("QQ snapshot retry: database=%s attempt=%d pinned=%s complete=%s walCopied=%s walKept=%s mainKept=%s",

@@ -25,6 +25,8 @@ internal data class QqMessageReadStats(
 
 /**
  * 只读副本：先枚举有限数量的 rowid，再读这些记录，避免 CursorWindow 隐式扫描整张表。
+ * 表里有坏页（QQ 库本来就坏的几页）时，从索引里按行号顺序取接下来的一批绕过去，过了坏页再回到按表顺序读：
+ * 记录仍按行号顺序读（顺着文件读，不在几 GB 的副本里来回跳），也不必把整张表的行号一次取出来。
  * [fieldStats] 不为空时顺带统计图片段的字段分布（诊断日志用）。
  */
 internal class QqMessageReader(private val database: SQLiteDatabase, private val fieldStats: QqPictureFieldStats? = null) {
@@ -106,38 +108,32 @@ internal class QqMessageReader(private val database: SQLiteDatabase, private val
             consume(batch.rows, stats)
         }
 
-        suspend fun recoverAfter(afterId: Long?): QqMessageReadStats {
-            // 普通索引也存 rowid：覆盖索引可避开消息表的坏页，仍只枚举图片定位所需的行号。
+        // 普通索引也存 rowid：从可读的覆盖索引里取 [afterId] 之后的 [limit] 个行号（按行号排好）；没有可用的索引返回 null
+        suspend fun indexedAfter(afterId: Long?, limit: Int): List<Long>? {
             for (index in coveringIndexes(table)) {
                 currentCoroutineContext().ensureActive()
-                var delivered = false
                 try {
                     val where = if (afterId == null) "" else " WHERE rowid > ?"
                     val args = afterId?.let { arrayOf(it.toString()) } ?: emptyArray<String>()
-                    val sql = "SELECT rowid FROM $table INDEXED BY ${quote(index)}$where"
+                    val sql = "SELECT rowid FROM $table INDEXED BY ${quote(index)}$where ORDER BY rowid LIMIT $limit"
                     val covering = database.rawQuery("EXPLAIN QUERY PLAN $sql", args).use { plan ->
                         var found = false
                         while (plan.moveToNext()) if (plan.getString(3).contains("COVERING INDEX", true)) found = true
                         found
                     }
                     if (!covering) continue
-                    database.rawQuery(sql, args).use { cursor ->
-                        val ids = ArrayList<Long>(BATCH_SIZE)
-                        while (cursor.moveToNext()) {
-                            currentCoroutineContext().ensureActive()
-                            ids += cursor.getLong(0)
-                            if (ids.size == BATCH_SIZE) { consumeIds(ids); ids.clear(); delivered = true }
-                        }
-                        if (ids.isNotEmpty()) { consumeIds(ids); delivered = true }
+                    return database.rawQuery(sql, args).use { cursor ->
+                        buildList { while (cursor.moveToNext()) add(cursor.getLong(0)) }
                     }
-                    Timber.i("QQ copied rowid recovery: table=%s method=covering_index", table)
-                    return stats
                 } catch (_: SQLiteDatabaseCorruptException) {
-                    // 已交付的行不能在换索引后重复计数；复制期间仍保持原有来源不丢失。
-                    if (delivered) return stats.copy(incompleteTable = true)
+                    // 这个索引也有坏页，换下一个
                 }
             }
-            // 索引也不可读时，从末尾读取坏页另一侧；未知缺口会明确保留在报告中。
+            return null
+        }
+
+        // 索引也不可读时，从末尾读取坏页另一侧；未知缺口会明确保留在报告中。
+        suspend fun readTailAfter(afterId: Long?): QqMessageReadStats {
             var before: Long? = null
             while (true) {
                 currentCoroutineContext().ensureActive()
@@ -157,22 +153,37 @@ internal class QqMessageReader(private val database: SQLiteDatabase, private val
             }
         }
 
+        // 连续读不了时从索引取的一批翻倍（坏的是上层页时能快点绕过去），按表顺序读成功一次就复原
+        var detour = BATCH_SIZE
+        var detours = 0
         while (true) {
             currentCoroutineContext().ensureActive()
-            val ids: List<Long> = try {
+            val ids: List<Long>? = try {
                 val where = if (after == null) "" else " WHERE rowid > ?"
                 val args = after?.let { arrayOf(it.toString()) } ?: emptyArray<String>()
                 database.rawQuery("SELECT rowid FROM $table NOT INDEXED$where ORDER BY rowid LIMIT $BATCH_SIZE", args).use { cursor ->
                     buildList<Long> { while (cursor.moveToNext()) add(cursor.getLong(0)) }
                 }
             } catch (_: SQLiteDatabaseCorruptException) {
-                Timber.w("QQ copied messages unreadable: table=%s operation=rowids", table)
-                return recoverAfter(after)
+                null
             }
-            if (ids.isEmpty()) return stats
+            if (ids == null) {
+                if (detours == 0) Timber.w("QQ copied messages unreadable: table=%s operation=rowids", table)
+                detours++
+                val next = indexedAfter(after, detour) ?: return readTailAfter(after)
+                if (next.isEmpty()) break
+                next.chunked(BATCH_SIZE).forEach { consumeIds(it) }
+                after = next.last()
+                detour = minOf(detour * 2, MAX_DETOUR)
+                continue
+            }
+            if (ids.isEmpty()) break
             consumeIds(ids)
             after = ids.last()
+            detour = BATCH_SIZE
         }
+        if (detours > 0) Timber.i("QQ copied rowid recovery: table=%s method=covering_index detours=%d", table, detours)
+        return stats
     }
 
     /** 大转发 BLOB 分块读取，避免单行超过 Android CursorWindow；SQL 仅对只读副本执行。 */
@@ -212,6 +223,9 @@ internal class QqMessageReader(private val database: SQLiteDatabase, private val
 
     private companion object {
         const val BATCH_SIZE = 128
+
+        /** 从索引取行号一次最多这么多（一个 CursorWindow 装得下，不会重新执行查询） */
+        const val MAX_DETOUR = 16_384
         const val INLINE_CACHE_BYTES = 256 * 1024
         const val CACHE_CHUNK_BYTES = 128 * 1024
     }

@@ -53,9 +53,8 @@ internal class QqSentPreviewLinker(
             dao.putPreviewChecks(previews.map { QqPreviewCheckEntity(it.previewPath, it.previewSize, raws[it.previewId], now) })
             val found = previews.filter { it.previewId in raws }
             found.forEach { dao.registerDerivedPath(it.previewPath, raws.getValue(it.previewId)) }
+            // 新关联由读取结束时的增量更新计入会话 / 发送人统计
             found.map { it.previewId }.chunked(SQL_CHUNK).forEach { dao.linkImages(it) }
-            // 新关联要计入会话 / 发送人统计
-            if (found.isNotEmpty()) dao.markDirty()
         }
         mergeFamilies(db)
         Timber.i("QQ sent previews: candidates=%d referenced=%d verified=%d", previews.size, referenced.size, verified.size)

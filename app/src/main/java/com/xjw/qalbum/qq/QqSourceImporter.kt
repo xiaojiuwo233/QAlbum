@@ -11,8 +11,9 @@ import net.zetetic.database.sqlcipher.SQLiteDatabase
 import timber.log.Timber
 
 /**
- * 一个账号的读取结果。[marks] 是读完整、没有坏行的消息表新的水位（表名 → 最大 rowid），
- * 有问题的表不在其中（下次从头读）。
+ * 一个账号的读取结果。[marks] 是读完整的消息表新的水位（表名 → 最大 rowid），没读完整的表不在其中（下次从头读）；
+ * 个别读不了的坏行不影响水位（QQ 库里本来就坏的行每次都一样，从头重读也读不出来）。
+ * [renamed] 是名字变了的会话（0）/ 发送人（1），来源统计要重算它们的名称。
  */
 internal data class QqImportResult(
     val pictures: Int,
@@ -20,6 +21,7 @@ internal data class QqImportResult(
     val unreadable: Int,
     val incompleteTables: Int,
     val marks: Map<String, Long> = emptyMap(),
+    val renamed: Set<Pair<Int, String>> = emptySet(),
 )
 internal data class QqPerson(val uid: String, val nickname: String, val remark: String, val card: String = "") {
     val displayName: String get() = when {
@@ -30,10 +32,15 @@ internal data class QqPerson(val uid: String, val nickname: String, val remark: 
 }
 
 internal class QqSourceImporter(private val db: AppDatabase) {
+    private class Pending(val origin: QqOriginEntity, val paths: Collection<String>)
+
     /**
      * 读取一个账号的消息来源。[readStart] 是这次读取的开始时间：读到的每条消息都记 seen_at = [readStart]，
      * 完整读取后仍早于它的消息就是 QQ 里已经删掉的（见「聊天记录已删除」规则）。
      * [startAfter]（表名 → rowid）给出时只读这之后的新消息（增量读取）。
+     * 以前读过的消息只更新读取时间，路径不再登记（由 MD5 推出，不会变）；[allPaths] 为真时照样登记（解析规则更新后）。
+     *
+     * 写入按几千条一个短事务提交，不长时间占住数据库（期间删图、扫描照常）；关联与统计由调用方在全部读完后补上。
      */
     suspend fun import(
         snapshot: QqDatabaseSnapshot,
@@ -42,6 +49,7 @@ internal class QqSourceImporter(private val db: AppDatabase) {
         chatpicRoot: String,
         readStart: Long = System.currentTimeMillis(),
         startAfter: Map<String, Long> = emptyMap(),
+        allPaths: Boolean = false,
         onProgress: (Int, Int) -> Unit,
     ): QqImportResult = QqCopiedDatabaseReader(snapshot, account).use { reader ->
         val messages = reader.get("nt_msg.db") ?: error("QQ 消息数据库不存在")
@@ -64,94 +72,119 @@ internal class QqSourceImporter(private val db: AppDatabase) {
         val senderNames = mutableMapOf<String, String>()
         val fieldStats = QqPictureFieldStats()
         val marks = mutableMapOf<String, Long>()
-        db.withTransaction {
-            val displayName = names.person(account.uid, "").displayName.ifBlank { "QQ 账号 $accountNumber" }
-            dao.putAccount(QqSourceAccountEntity(account.key, displayName, System.currentTimeMillis(), 0))
-            val origins = mutableListOf<QqOriginEntity>()
-            val paths = mutableListOf<QqOriginPathEntity>()
-            suspend fun flush() {
-                if (origins.isEmpty()) return
-                dao.insertOrigins(origins)
-                dao.insertPaths(paths)
-                // 已有的来源（以前读过的消息）补上这次的读取时间与图片属性；按属性分组，每组一条语句
-                origins.groupBy { Triple(it.picType, it.picSubType, it.sentOriginal) }.forEach { (info, group) ->
-                    dao.markSeen(group.map { it.id }, readStart, info.first, info.second, info.third)
-                }
-                origins.clear()
-                paths.clear()
-            }
-            for ((table, chatType) in tables) {
-                val columns = messages.columns(table)
-                val previousProcessed = processed
-                val after = startAfter[table]
-                val stats = QqMessageReader(messages, fieldStats).forEachBatch(table, columns, after) { records, batchStats ->
-                    processed = previousProcessed + batchStats.inspected
-                    onProgress(processed, 0)
-                    for (record in records) {
-                        currentCoroutineContext().ensureActive()
-                        val values = record.values
-                        val msgId = values[0]
-                        val senderUid = values[1]
-                        val peerUid = values[2]
-                        val peerUin = values[4].takeUnless { it == "0" || it.isEmpty() }
-                            ?: values[3].takeUnless { it == "0" || it.isEmpty() } ?: peerUid
-                        val senderUin = values[5].takeUnless { it == "0" }.orEmpty()
-                        val profile = names.person(senderUid, senderUin)
-                        val member = if (chatType == 2) names.member(peerUin, profile.uid.ifBlank { senderUid }, senderUin) else QqPerson("", "", "")
-                        val canonicalSender = profile.uid.ifBlank { member.uid.ifBlank { senderUid.ifBlank { "uin:$senderUin" } } }
-                        if (canonicalSender.isBlank() || canonicalSender == "uin:") { skipped++; continue }
-                        val senderKey = opaqueKey(account.key, "sender", canonicalSender)
-                        val conversationId = if (chatType == 2) peerUin else names.person(peerUid, peerUin).uid.ifBlank { peerUid.ifBlank { "uin:$peerUin" } }
-                        val conversationKey = opaqueKey(account.key, "conversation", chatType.toString(), conversationId)
-                        val conversationName = if (chatType == 2) names.group(peerUin) else names.person(peerUid, peerUin).displayName
-                        val historicalCard = cleanHistoricalName(values[7], senderUin)
-                        val historicalNickname = cleanHistoricalName(values[8], senderUin)
-                        val memberName = historicalCard.ifBlank { member.card }
-                        val senderName = profile.displayName.ifBlank { historicalNickname.ifBlank { member.nickname.ifBlank { memberName } } }
-                        if (senderName.isNotBlank()) senderNames[senderKey] = senderName
-                        if (record.pictures.isNotEmpty() && conversationName.isNotBlank()) conversationNames[conversationKey] = conversationName
-                        record.pictures.forEachIndexed { index, picture ->
-                            val id = opaqueKey(account.key, table, msgId, picture.elementId.ifBlank { index.toString() }, picture.md5s.joinToString(","))
-                            origins += QqOriginEntity(id, account.key, conversationKey, conversationName, chatType,
-                                senderKey, senderName, memberName, record.sentAt * 1000L, picture.md5s.first(),
-                                readStart, picture.picType, picture.picSubType, picture.original)
-                            QqCachePaths.paths(chatpicRoot, picture).forEach { paths += QqOriginPathEntity(it, id) }
-                            pictures++
-                        }
-                        // 合并转发统一进入虚拟分类。所有层的图片使用最外层转发者，不借用内层人物或原群。
-                        record.forwardedPictures.forEach { forwarded ->
-                            val picture = forwarded.picture
-                            val id = opaqueKey(account.key, table, msgId, "forwarded", forwarded.identity, picture.md5s.joinToString(","))
-                            origins += QqOriginEntity(id, account.key, QqForwardSource.KEY, QqForwardSource.NAME, QqForwardSource.CHAT_TYPE,
-                                senderKey, senderName, "", record.sentAt * 1000L, picture.md5s.first(),
-                                readStart, picture.picType, picture.picSubType, picture.original)
-                            QqCachePaths.paths(chatpicRoot, picture).forEach { paths += QqOriginPathEntity(it, id) }
-                            pictures++
-                        }
-                        if (origins.size >= 400) flush()
+        val displayName = names.person(account.uid, "").displayName.ifBlank { "QQ 账号 $accountNumber" }
+        dao.addAccount(QqSourceAccountEntity(account.key, displayName, System.currentTimeMillis(), 0))
+        val pending = mutableListOf<Pending>()
+        suspend fun flush() {
+            if (pending.isEmpty()) return
+            db.withTransaction {
+                pending.chunked(SQL_CHUNK).forEach { chunk ->
+                    val rowids = dao.insertOrigins(chunk.map { it.origin })
+                    val seen = mutableListOf<QqOriginEntity>()
+                    val paths = mutableListOf<QqOriginPathEntity>()
+                    chunk.forEachIndexed { index, item ->
+                        val added = rowids.getOrElse(index) { -1L } != -1L
+                        if (!added) seen += item.origin
+                        if (added || allPaths) item.paths.mapTo(paths) { QqOriginPathEntity(it, item.origin.id) }
+                    }
+                    if (paths.isNotEmpty()) dao.insertPaths(paths)
+                    // 以前读过的消息补上这次的读取时间与图片属性；按属性分组，每组一条语句
+                    seen.groupBy { Triple(it.picType, it.picSubType, it.sentOriginal) }.forEach { (info, group) ->
+                        dao.markSeen(group.map { it.id }, readStart, info.first, info.second, info.third)
                     }
                 }
-                skipped += stats.skipped
-                unreadable += stats.unreadable
-                if (stats.incompleteTable) incompleteTables++
-                // 读完整的表才推进水位；没有新消息时沿用原来的
-                if (!stats.incompleteTable && stats.unreadable == 0) marks[table] = maxOf(stats.maxRowid, after ?: 0)
-                Timber.i("QQ copied message scan: table=%s inspected=%d skipped=%d unreadable=%d incomplete=%s",
-                    table, stats.inspected, stats.skipped, stats.unreadable, stats.incompleteTable)
             }
-            flush()
-            // 更新名称时不丢弃旧消息来源；QQ 自身清理历史记录后仍可筛选已经关联的本地图片。
-            conversationNames.forEach { (key, name) -> dao.updateConversationName(account.key, key, name) }
-            senderNames.forEach { (key, name) -> dao.updateSenderName(account.key, key, name) }
+            pending.clear()
+        }
+        for ((table, chatType) in tables) {
+            val started = System.currentTimeMillis()
+            val columns = messages.columns(table)
+            val previousProcessed = processed
+            val after = startAfter[table]
+            val stats = QqMessageReader(messages, fieldStats).forEachBatch(table, columns, after) { records, batchStats ->
+                processed = previousProcessed + batchStats.inspected
+                onProgress(processed, 0)
+                for (record in records) {
+                    currentCoroutineContext().ensureActive()
+                    val values = record.values
+                    val msgId = values[0]
+                    val senderUid = values[1]
+                    val peerUid = values[2]
+                    val peerUin = values[4].takeUnless { it == "0" || it.isEmpty() }
+                        ?: values[3].takeUnless { it == "0" || it.isEmpty() } ?: peerUid
+                    val senderUin = values[5].takeUnless { it == "0" }.orEmpty()
+                    val profile = names.person(senderUid, senderUin)
+                    val member = if (chatType == 2) names.member(peerUin, profile.uid.ifBlank { senderUid }, senderUin) else QqPerson("", "", "")
+                    val canonicalSender = profile.uid.ifBlank { member.uid.ifBlank { senderUid.ifBlank { "uin:$senderUin" } } }
+                    if (canonicalSender.isBlank() || canonicalSender == "uin:") { skipped++; continue }
+                    val senderKey = opaqueKey(account.key, "sender", canonicalSender)
+                    val conversationId = if (chatType == 2) peerUin else names.person(peerUid, peerUin).uid.ifBlank { peerUid.ifBlank { "uin:$peerUin" } }
+                    val conversationKey = opaqueKey(account.key, "conversation", chatType.toString(), conversationId)
+                    val conversationName = if (chatType == 2) names.group(peerUin) else names.person(peerUid, peerUin).displayName
+                    val historicalCard = cleanHistoricalName(values[7], senderUin)
+                    val historicalNickname = cleanHistoricalName(values[8], senderUin)
+                    val memberName = historicalCard.ifBlank { member.card }
+                    val senderName = profile.displayName.ifBlank { historicalNickname.ifBlank { member.nickname.ifBlank { memberName } } }
+                    if (senderName.isNotBlank()) senderNames[senderKey] = senderName
+                    if (record.pictures.isNotEmpty() && conversationName.isNotBlank()) conversationNames[conversationKey] = conversationName
+                    record.pictures.forEachIndexed { index, picture ->
+                        val id = opaqueKey(account.key, table, msgId, picture.elementId.ifBlank { index.toString() }, picture.md5s.joinToString(","))
+                        pending += Pending(QqOriginEntity(id, account.key, conversationKey, conversationName, chatType,
+                            senderKey, senderName, memberName, record.sentAt * 1000L, picture.md5s.first(),
+                            readStart, picture.picType, picture.picSubType, picture.original), QqCachePaths.paths(chatpicRoot, picture))
+                        pictures++
+                    }
+                    // 合并转发统一进入虚拟分类。所有层的图片使用最外层转发者，不借用内层人物或原群。
+                    record.forwardedPictures.forEach { forwarded ->
+                        val picture = forwarded.picture
+                        val id = opaqueKey(account.key, table, msgId, "forwarded", forwarded.identity, picture.md5s.joinToString(","))
+                        pending += Pending(QqOriginEntity(id, account.key, QqForwardSource.KEY, QqForwardSource.NAME, QqForwardSource.CHAT_TYPE,
+                            senderKey, senderName, "", record.sentAt * 1000L, picture.md5s.first(),
+                            readStart, picture.picType, picture.picSubType, picture.original), QqCachePaths.paths(chatpicRoot, picture))
+                        pictures++
+                    }
+                    if (pending.size >= FLUSH_SIZE) flush()
+                }
+            }
+            skipped += stats.skipped
+            unreadable += stats.unreadable
+            if (stats.incompleteTable) incompleteTables++
+            // 读完整的表推进水位（没有新消息时沿用原来的）；读不了的坏行下次从头读也一样读不了，不拦着
+            if (!stats.incompleteTable) marks[table] = maxOf(stats.maxRowid, after ?: 0)
+            Timber.i("QQ copied message scan: table=%s from=%s inspected=%d skipped=%d unreadable=%d incomplete=%s ms=%d",
+                table, if (after == null) "start" else "mark", stats.inspected, stats.skipped, stats.unreadable,
+                stats.incompleteTable, System.currentTimeMillis() - started)
+        }
+        flush()
+        // 更新名称时不丢弃旧消息来源；QQ 自身清理历史记录后仍可筛选已经关联的本地图片。
+        val renamed = mutableSetOf<Pair<Int, String>>()
+        keepingClean {
+            conversationNames.forEach { (key, name) -> if (dao.updateConversationName(account.key, key, name) > 0) renamed += 0 to key }
+            senderNames.forEach { (key, name) -> if (dao.updateSenderName(account.key, key, name) > 0) renamed += 1 to key }
             dao.putAccount(QqSourceAccountEntity(account.key, displayName, System.currentTimeMillis(), dao.originCount(account.key)))
-            dao.reconcileLinks()
-            // 读到了图片来源就标脏，由仓库整体重建统计（增量读取没有新消息时不必重建）
-            if (pictures > 0) dao.markDirty()
         }
         onProgress(processed, 0)
         // 诊断：图片段字段分布（只有字段号与小数值），用来核对表情子类型等字段
         fieldStats.lines().forEach { Timber.i(it) }
-        QqImportResult(pictures, skipped, unreadable, incompleteTables, marks)
+        QqImportResult(pictures, skipped, unreadable, incompleteTables, marks, renamed)
+    }
+
+    /**
+     * 在一个事务里执行 [block]：其中的改名、改账号名称会让触发器把来源统计标脏，原本不脏时撤掉
+     * （名称由读取后的增量更新重算，计数不受影响），原本就脏的不动（等整体重建）。
+     */
+    private suspend fun <T> keepingClean(block: suspend () -> T): T = db.withTransaction {
+        val dao = db.qqSourceDao()
+        val clean = !dao.cacheDirty()
+        block().also { if (clean) dao.markClean() }
+    }
+
+    private companion object {
+        /** 攒够这么多条来源提交一次 */
+        const val FLUSH_SIZE = 2_000
+
+        /** 单条语句的参数个数（旧系统的 SQLite 最多 999 个） */
+        const val SQL_CHUNK = 400
     }
 }
 

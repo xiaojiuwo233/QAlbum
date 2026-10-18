@@ -145,7 +145,7 @@ val appModule = module {
     single {
         QqSourceRepository(
             context = get(), db = get(), settings = get(), client = get(), quarantine = get(), appScope = get(), tasks = get(),
-            archive = get(),
+            archive = get(), statsCache = get(),
         )
     }
 

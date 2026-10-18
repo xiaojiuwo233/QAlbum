@@ -89,6 +89,16 @@ class SettingsRepository(
         ds.edit { it[Keys.QQ_PARSE_VERSION] = version }
     }
 
+    /**
+     * 读取聊天来源开始时来源、路径、关联三张表的位置（「来源:路径:关联」的最大 rowid，见 QqSourceRepository）。
+     * 读完补好关联与统计后清掉；中途退出时留着，下次读取从这里补起。
+     */
+    val qqReadBaseline: Flow<String?> = prefsData.map { it[Keys.QQ_READ_BASELINE] }
+
+    suspend fun setQqReadBaseline(value: String?) {
+        ds.edit { if (value == null) it.remove(Keys.QQ_READ_BASELINE) else it[Keys.QQ_READ_BASELINE] = value }
+    }
+
     /** 每天在充电时自动读取聊天来源里的新消息（Root），默认关闭 */
     val qqAutoRefresh: Flow<Boolean> = prefsData.map { it[Keys.QQ_AUTO_REFRESH] ?: false }
 
@@ -368,6 +378,7 @@ class SettingsRepository(
         val ACCESS_MODE = stringPreferencesKey("access_mode")
         val CHATPIC_PATH = stringPreferencesKey("chatpic_path")
         val QQ_SOURCES_COMPLETE = booleanPreferencesKey("qq_sources_complete")
+        val QQ_READ_BASELINE = stringPreferencesKey("qq_read_baseline")
         val QQ_AUTO_REFRESH = booleanPreferencesKey("qq_auto_refresh")
         val QQ_PARSE_VERSION = intPreferencesKey("qq_parse_version")
 

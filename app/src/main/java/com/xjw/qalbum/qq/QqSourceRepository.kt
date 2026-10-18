@@ -6,7 +6,10 @@ import android.database.sqlite.SQLiteDatabaseCorruptException
 import androidx.room.withTransaction
 import com.xjw.qalbum.data.db.AppDatabase
 import com.xjw.qalbum.data.db.QqSourceStatsSql
+import com.xjw.qalbum.data.db.StatsCache
+import com.xjw.qalbum.data.db.StatsCache.Companion.holding
 import com.xjw.qalbum.data.db.dao.QqContent
+import com.xjw.qalbum.data.db.dao.QqReadBaseline
 import com.xjw.qalbum.data.db.dao.QqScopeIds
 import com.xjw.qalbum.data.db.dao.QqScopeSql
 import com.xjw.qalbum.data.db.entity.QqReadMarkEntity
@@ -43,6 +46,8 @@ class QqSourceRepository(
     private val appScope: CoroutineScope,
     private val tasks: BackgroundTasks,
     private val archive: ArchiveManager,
+    /** 读取期间暂停清理页的统计（几十万条来源写入时不来回重算） */
+    private val statsCache: StatsCache? = null,
 ) {
     val dao = db.qqSourceDao()
     val sourcesComplete = settings.qqSourcesComplete
@@ -59,8 +64,8 @@ class QqSourceRepository(
     @Volatile private var statsFailed = false
 
     /**
-     * 统计维护：缓存标脏（导入、升级、名称变化后）且没有其他来源任务时，在后台分段重建。
-     * 删图不再标脏——触发器已随状态变化增量更新，因此这里不会在每次删除后重算。
+     * 统计维护：缓存标脏（第一次读取、升级、清除索引后等）且没有其他来源任务时，在后台分段重建。
+     * 删图由触发器增量更新，读取来源后由 [refresh] 增量更新，都不会触发整体重建。
      */
     fun startFacetCache() {
         if (statsJob?.isActive == true) return
@@ -126,13 +131,14 @@ class QqSourceRepository(
     /**
      * 读取聊天来源。默认增量：一周内从头读过的消息表只解析之后的新消息；[full] 为真或超过一周的表从头读。
      * 所有账号、所有表都从头读完且没有读不了的记录，才算一次完整读取（记下 complete_read_at）。
-     * 已经有来源任务在跑时返回 null。
+     * 读完只给这次新登记的路径补关联、只把新增的来源与关联计入统计（见 QqSourceStatsSql.applyNew），
+     * 不必把几十万张图与来源整体对一遍。已经有来源任务在跑时返回 null。
      */
     fun refresh(full: Boolean = false): Job? {
         if (!_progress.compareAndSet(null, QqSourceProgress("获取 Root 权限"))) return null
         statsFailed = false
         startFacetCache()
-        val started = appScope.launch(Dispatchers.IO) { mirrored("读取聊天来源", cancellable = true) {
+        val started = appScope.launch(Dispatchers.IO) { statsCache.holding { mirrored("读取聊天来源", cancellable = true) {
             var bound: com.xjw.qalbum.fileops.BoundFileOps? = null
             var successful = 0
             var pictures = 0
@@ -146,10 +152,15 @@ class QqSourceRepository(
             val readStart = System.currentTimeMillis()
             // 有表只读了新消息（增量）时不算完整读取
             var fullPass = true
+            var copyMs = 0L
+            var importMs = 0L
+            val renamed = mutableSetOf<Pair<Int, String>>()
             try {
                 // 解析规则更新过（比如新认出表情子类型）：这次从头读，旧来源才补得上
                 val reparse = settings.qqParseVersion.first() < QqPictureCodec.PARSE_VERSION
                 val fromStart = full || reparse
+                // 这次新写入的来源、路径、关联都在这个位置之后
+                val baseline = readBaseline()
                 bound = reader.bind()
                 stage = "account_catalog"
                 _progress.value = QqSourceProgress("读取 QQ 账号目录")
@@ -161,18 +172,23 @@ class QqSourceRepository(
                     currentCoroutineContext().ensureActive()
                     try {
                         stage = "database_snapshot"
+                        val copyStarted = System.currentTimeMillis()
                         reader.snapshot(bound, account) { done, total ->
                             _progress.value = QqSourceProgress("读取账号 ${index + 1}/${accounts.size} 的只读副本", done, total)
                         }.use { snapshot ->
                             stage = "source_import"
+                            val importStarted = System.currentTimeMillis()
+                            copyMs += importStarted - copyStarted
                             val existing = dao.readMarks(account.key).associateBy { it.tableName }
                             val startAfter = if (fromStart) emptyMap() else existing.values
                                 .filter { readStart - it.fullReadAt < FULL_READ_INTERVAL_MS }
                                 .associate { it.tableName to it.maxRowid }
                             if (startAfter.isNotEmpty()) fullPass = false
-                            val result = QqSourceImporter(db).import(snapshot, account, index + 1, root, readStart, startAfter) { done, total ->
+                            val result = QqSourceImporter(db).import(snapshot, account, index + 1, root, readStart, startAfter, allPaths = reparse) { done, total ->
                                 _progress.value = QqSourceProgress("关联账号 ${index + 1}/${accounts.size} 的图片来源 · 已检查 $done 条记录", done.toLong(), total.toLong())
                             }
+                            importMs += System.currentTimeMillis() - importStarted
+                            renamed += result.renamed
                             // 新水位：从头读的表记下这次的时间，增量读的沿用上次从头读的时间；没读完整的表下次从头读
                             dao.putReadMarks(result.marks.map { (table, rowid) ->
                                 QqReadMarkEntity(account.key, table, rowid,
@@ -192,8 +208,12 @@ class QqSourceRepository(
                         logFailure(e, stage)
                     }
                 }
+                var linksMs = 0L
+                var previewsMs = 0L
+                var statsMs = 0L
                 if (successful > 0) {
                     stage = "converted_cache"
+                    val linksStarted = System.currentTimeMillis()
                     _progress.value = QqSourceProgress("关联 QQ 转码图片")
                     var offset = 0
                     val base = root.trimEnd('/')
@@ -211,7 +231,12 @@ class QqSourceRepository(
                         offset += entries.size
                         if ("+" !in rows || entries.isEmpty()) break
                     }
-                    dao.reconcileLinks()
+                    // 这次新登记的路径对上已入库的图片就补上关联；带后缀的别名（Cache_xxx.png 等）沿用同名文件的来源
+                    stage = "links"
+                    _progress.value = QqSourceProgress("关联图片来源")
+                    dao.reconcileLinksAfter(baseline.paths)
+                    val previewsStarted = System.currentTimeMillis()
+                    linksMs = previewsStarted - linksStarted
                     // 自己发的图多出的 chatimg 预览按 MD5 关联不上，按同一次发送的原图补上来源
                     stage = "sent_previews"
                     val label = "关联自己发的图的预览"
@@ -223,6 +248,16 @@ class QqSourceRepository(
                     }.link(accounts.map { opaqueKey(it.key, "sender", it.uid) }) { done, total ->
                         _progress.value = QqSourceProgress(label, done.toLong(), total.toLong())
                     }
+                    // 来源统计：没标脏时只把新增的来源与关联算进去（改了名的会话 / 发送人重算名称）；标了脏的等整体重建
+                    stage = "source_stats"
+                    val statsStarted = System.currentTimeMillis()
+                    previewsMs = statsStarted - previewsStarted
+                    _progress.value = QqSourceProgress("更新来源统计")
+                    val incremental = stats.applyNew(baseline, renamed)
+                    statsMs = System.currentTimeMillis() - statsStarted
+                    settings.setQqReadBaseline(null)
+                    // 新读到的来源里，自动归档名单上的聊天的图一并归档（标了脏的整体重建后再归档）
+                    if (incremental) runCatching { archive.applyAutoArchive() }.onFailure { Timber.w(it, "Auto archive failed") }
                 }
                 // 个别解析不了的消息（多是没缓存内容的合并转发）和 QQ 库里本来就坏的几行每次都一样，不算没读完；
                 // 只有账号读取失败、消息表没读完才算
@@ -236,6 +271,8 @@ class QqSourceRepository(
                     Timber.i("QQ source sweep: origins=%d unseen=%d complete=%s fullPass=%s skipped=%d unreadable=%d incompleteTables=%d",
                         seen.total, seen.stale, complete, fullPass, skipped, unreadable, incompleteTables)
                 }
+                Timber.i("QQ source read: accounts=%d/%d pictures=%d copy=%dms import=%dms links=%dms previews=%dms stats=%dms total=%dms",
+                    successful, accounts.size, pictures, copyMs, importMs, linksMs, previewsMs, statsMs, System.currentTimeMillis() - readStart)
                 report(if (successful == 0) failures.joinToString("；").ifBlank { "没有可读取的图片来源" } else
                     (if (fullPass) "已读取" else "已读取新消息：") + "$successful 个账号、$pictures 条图片来源" +
                         (if (failed > 0) "；$failed 个账号读取失败" else "") +
@@ -253,9 +290,16 @@ class QqSourceRepository(
                 bound?.close()
                 _progress.value = null
             }
-        } }
+        } } }
         job = started
         return started
+    }
+
+    /** 读取前的位置；上次读取没走完（中途退出）时沿用那次的，这次一并补上它写入的来源与路径 */
+    private suspend fun readBaseline(): QqReadBaseline {
+        settings.qqReadBaseline.first()?.split(':')?.mapNotNull(String::toLongOrNull)?.takeIf { it.size == 3 }
+            ?.let { (origins, paths, links) -> return QqReadBaseline(origins, paths, links) }
+        return dao.readBaseline().also { settings.setQqReadBaseline("${it.origins}:${it.paths}:${it.links}") }
     }
 
     private companion object {
@@ -353,6 +397,8 @@ class QqSourceRepository(
         job = appScope.launch(Dispatchers.IO) {
             try {
                 settings.setQqSourcesComplete(false)
+                // 清空后行号从头分配，上次没走完的读取位置不再适用
+                settings.setQqReadBaseline(null)
                 val sql = db.openHelper.writableDatabase
                 db.withTransaction {
                     dao.clear()
