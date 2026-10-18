@@ -8,6 +8,7 @@ import androidx.paging.PagingConfig
 import androidx.paging.PagingData
 import androidx.paging.cachedIn
 import com.xjw.qalbum.data.db.AppDatabase
+import com.xjw.qalbum.data.db.StatsCache
 import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.db.dao.RuleStats
 import com.xjw.qalbum.data.db.entity.ImageEntity
@@ -66,13 +67,14 @@ class RulePreviewViewModel(
     private val imageFiles: ImageFileManager,
     private val settings: SettingsRepository,
     private val appScope: CoroutineScope,
+    private val statsCache: StatsCache,
 ) : ViewModel() {
 
     val rule: CleanupRule = CleanupRule.byId(ruleId) ?: CleanupRule.Thumbnails
     private val dao = db.cleanupRuleDao()
 
-    /** 截止时间按打开页面的时刻固定，翻页期间不漂移 */
-    private val now = System.currentTimeMillis()
+    /** 截止时间按今天零点固定：翻页期间不漂移，与清理页的统计同一个条件（缓存共用） */
+    private val now = CleanupRule.today()
 
     val option: StateFlow<Int> = settings.cleanupRuleParam(rule.id)
         .map { it?.takeIf { value -> rule.option(value) != null } ?: rule.defaultOption }
@@ -82,7 +84,7 @@ class RulePreviewViewModel(
     private val part = option.map { rule.where(it, now) }
 
     val stats: StateFlow<RuleStats?> = part
-        .flatMapLatest { dao.observeStats(RuleSql.stats(it, rule.scope)).throttle() }
+        .flatMapLatest { p -> statsCache.observe(ruleStatsKey(p, rule.scope)) { dao.stats(RuleSql.stats(p, rule.scope)) } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     /** 排序（与聊天来源页同一套：日期 / 大小 × 正序 / 倒序），各规则共用 */
@@ -110,11 +112,11 @@ class RulePreviewViewModel(
                 pagingSourceFactory = refreshGate.gated { dao.paging(RuleSql.page(key.part, rule.scope, key.sort)) },
             ).flow
             if (key.sort.byDate) {
-                val counts = counts { dao.observeBuckets(RuleSql.buckets(key.part)) }
+                val counts = counts("rule-buckets:date:${key.part}") { dao.buckets(RuleSql.buckets(key.part)) }
                 groups.value = Groups(counts, key.sort)
                 pager.withDateHeaders(counts)
             } else {
-                val counts = counts { dao.observeBuckets(RuleSql.sizeBuckets(key.part, rule.scope)) }
+                val counts = counts("rule-buckets:size:${rule.scope}:${key.part}") { dao.buckets(RuleSql.sizeBuckets(key.part, rule.scope)) }
                 groups.value = Groups(counts, key.sort)
                 // 整张图的规则按整组合计分组，与排序一致
                 pager.withSizeHeaders(counts, if (rule.scope == RuleScope.PICTURE) StackedSize else FileSize)
@@ -133,8 +135,9 @@ class RulePreviewViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
-    private fun counts(query: () -> Flow<List<ImageDao.BucketCountRow>>): StateFlow<Map<Long, Int>?> =
-        query().throttle().map { rows -> rows.associate { it.bucketKey to it.count } }
+    /** 分组计数经 StatsCache：再进来时直接用缓存，图片变了才重算 */
+    private fun counts(key: String, query: suspend () -> List<ImageDao.BucketCountRow>): StateFlow<Map<Long, Int>?> =
+        statsCache.observe(key, query).map { rows -> rows.associate { it.bucketKey to it.count } }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     val columns: StateFlow<Int> = settings.galleryColumns

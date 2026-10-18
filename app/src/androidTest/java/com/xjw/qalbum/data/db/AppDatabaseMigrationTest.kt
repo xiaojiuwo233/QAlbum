@@ -30,6 +30,32 @@ class AppDatabaseMigrationTest {
     }
 
     @Test
+    fun migrate25To26_addsFreedTimeToCompressions() {
+        val name = "migration-25-26"
+        helper.createDatabase(name, 25).use { db ->
+            db.execSQL(
+                """INSERT INTO original_backups(image_id, path, backup_path, original_size, original_mtime, original_width, original_height,
+                    compressed_size, compressed_width, compressed_height, created_at, expires_at, state, quality, original_mime)
+                    VALUES(1, '/a', NULL, 100, 1, 10, 10, 40, 10, 10, 5, 6, 'ready', 80, NULL)""",
+            )
+        }
+        helper.runMigrationsAndValidate(name, 26, true, AppDatabase.MIGRATION_25_26).use { db ->
+            // 以前的压缩记录不知道何时腾出来：累计照算，「今日」不算
+            assertEquals(1L, scalarLong(db, "SELECT COUNT(*) FROM original_backups WHERE freed_at IS NULL"))
+        }
+    }
+
+    @Test
+    fun migrate24To25_addsVideos() {
+        val name = "migration-24-25"
+        helper.createDatabase(name, 24).close()
+        helper.runMigrationsAndValidate(name, 25, true, AppDatabase.MIGRATION_24_25).use { db ->
+            db.execSQL("INSERT INTO videos(path, source, size, mtime, date_bucket, duration_ms, width, height, seen_at) VALUES('/v/a.mp4', 'chat', 10, 1, 1, -1, 0, 0, 1)")
+            assertEquals(1L, scalarLong(db, "SELECT COUNT(*) FROM videos WHERE duration_ms < 0"))
+        }
+    }
+
+    @Test
     fun migrate23To24_addsSentPreviewChecks() {
         val name = "migration-23-24"
         helper.createDatabase(name, 23).close()

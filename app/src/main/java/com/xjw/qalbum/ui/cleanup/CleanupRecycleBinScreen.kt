@@ -93,8 +93,11 @@ import org.koin.androidx.compose.koinViewModel
 
 private val SelectedSaver = listSaver<Set<Long>, Long>(save = { it.toList() }, restore = { it.toSet() })
 
-/** 要确认的操作（永久删除都要确认） */
-private enum class BinConfirm { PURGE, PURGE_ALL, DELETE_ORIGINALS, DELETE_ALL_ORIGINALS }
+/** 要确认的操作（永久删除与恢复都要确认） */
+private enum class BinConfirm { PURGE, PURGE_ALL, DELETE_ORIGINALS, DELETE_ALL_ORIGINALS, RESTORE, RESTORE_ARCHIVE, RESTORE_ORIGINALS }
+
+/** 看图时点了恢复（[archive] 为恢复并归档）或还原原图，等确认 */
+private data class PendingRestore(val image: ImageEntity, val archive: Boolean)
 
 /**
  * 回收站：移入回收站的图与压缩前的原图两类，网格同图库（日期按移入回收站的时间分组、标题带到期天数，可按大小排、
@@ -128,6 +131,7 @@ fun CleanupRecycleBinScreen(
     // 打开看图时网格里那些图的回收站记录（看图读回收站里的文件、详情里的删除信息）
     var previewUnits by remember { mutableStateOf(mapOf<Long, TrashUnit>()) }
     var pendingPurge by remember { mutableStateOf<ImageEntity?>(null) }
+    var pendingRestore by remember { mutableStateOf<PendingRestore?>(null) }
     val originals = content == BinContent.ORIGINALS
     val stats = if (originals) originalStats else deletedStats
     // 筛选了删除原因时，全选、「已全选」按这一类的张数算
@@ -252,20 +256,23 @@ fun CleanupRecycleBinScreen(
                 },
             )
 
+            // 回收站里主要是清掉：最显眼的是永久删除（删除原图），恢复放在旁边，也要确认
             FloatingActionToolbar(visible = selecting, modifier = Modifier.align(Alignment.BottomCenter)) {
                 if (originals) {
-                    ToolbarIconAction(Icons.Outlined.DeleteForever, "删除原图", enabled = !busy, onClick = { confirm = BinConfirm.DELETE_ORIGINALS })
-                    ToolbarPrimaryAction(Icons.Outlined.Restore, "还原 ${formatCountExact(selected.size)} 张", enabled = !busy, onClick = {
-                        viewModel.restoreOriginals(selected, onDone = clearSelection)
-                    })
+                    ToolbarIconAction(Icons.Outlined.Restore, "还原原图", enabled = !busy, onClick = { confirm = BinConfirm.RESTORE_ORIGINALS })
+                    ToolbarPrimaryAction(
+                        Icons.Outlined.DeleteForever, "删除原图 ${formatCountExact(selected.size)} 张", enabled = !busy,
+                        containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError,
+                        onClick = { confirm = BinConfirm.DELETE_ORIGINALS },
+                    )
                 } else {
-                    ToolbarIconAction(Icons.Outlined.Archive, "恢复并归档", enabled = !busy, onClick = {
-                        viewModel.restore(selected, thenArchive = true, onDone = clearSelection)
-                    })
-                    ToolbarIconAction(Icons.Outlined.DeleteForever, "永久删除", enabled = !busy, onClick = { confirm = BinConfirm.PURGE })
-                    ToolbarPrimaryAction(Icons.Outlined.Restore, "恢复 ${formatCountExact(selected.size)} 张", enabled = !busy, onClick = {
-                        viewModel.restore(selected, thenArchive = false, onDone = clearSelection)
-                    })
+                    ToolbarIconAction(Icons.Outlined.Restore, "恢复", enabled = !busy, onClick = { confirm = BinConfirm.RESTORE })
+                    ToolbarIconAction(Icons.Outlined.Archive, "恢复并归档", enabled = !busy, onClick = { confirm = BinConfirm.RESTORE_ARCHIVE })
+                    ToolbarPrimaryAction(
+                        Icons.Outlined.DeleteForever, "永久删除 ${formatCountExact(selected.size)} 张", enabled = !busy,
+                        containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError,
+                        onClick = { confirm = BinConfirm.PURGE },
+                    )
                 }
             }
         }
@@ -275,7 +282,7 @@ fun CleanupRecycleBinScreen(
         val ids = selected
         val dismiss = { confirm = null }
         // 选中的图没了（如进程重建后）就不再弹出要确认选中项的对话框
-        if (ids.isEmpty() && (kind == BinConfirm.PURGE || kind == BinConfirm.DELETE_ORIGINALS)) {
+        if (ids.isEmpty() && kind != BinConfirm.PURGE_ALL && kind != BinConfirm.DELETE_ALL_ORIGINALS) {
             LaunchedEffect(kind) { dismiss() }
             return@let
         }
@@ -315,6 +322,31 @@ fun CleanupRecycleBinScreen(
                 onConfirm = {
                     dismiss()
                     viewModel.deleteOriginals(ids, onDone = clearSelection)
+                },
+            )
+            BinConfirm.RESTORE, BinConfirm.RESTORE_ARCHIVE -> {
+                val archive = kind == BinConfirm.RESTORE_ARCHIVE
+                ConfirmDialog(
+                    icon = if (archive) Icons.Outlined.Archive else Icons.Outlined.Restore,
+                    title = (if (archive) "恢复并归档 " else "恢复 ") + "${formatCountExact(ids.size)} 张？",
+                    text = if (archive) "放回原来的位置并归档，之后不会被清理。" else "放回原来的位置。",
+                    confirmLabel = if (archive) "恢复并归档" else "恢复",
+                    onDismiss = dismiss,
+                    onConfirm = {
+                        dismiss()
+                        viewModel.restore(ids, thenArchive = archive, onDone = clearSelection)
+                    },
+                )
+            }
+            BinConfirm.RESTORE_ORIGINALS -> ConfirmDialog(
+                icon = Icons.Outlined.Restore,
+                title = "还原 ${formatCountExact(ids.size)} 张原图？",
+                text = "换回压缩前的原图。",
+                confirmLabel = "还原",
+                onDismiss = dismiss,
+                onConfirm = {
+                    dismiss()
+                    viewModel.restoreOriginals(ids, onDone = clearSelection)
                 },
             )
             BinConfirm.DELETE_ALL_ORIGINALS -> ConfirmDialog(
@@ -366,22 +398,39 @@ fun CleanupRecycleBinScreen(
                 val page = pageOf(shown)
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                     if (originals) {
-                        PreviewAction(icon = Icons.Outlined.Restore, label = "还原原图", enabled = !busy, onClick = {
-                            viewModel.restoreOriginals(listOf(page.id))
-                            preview = preview?.without(page.id)
-                        })
+                        PreviewAction(icon = Icons.Outlined.Restore, label = "还原原图", enabled = !busy, onClick = { pendingRestore = PendingRestore(page, archive = false) })
                         PreviewAction(icon = Icons.Outlined.DeleteForever, label = "删除原图", enabled = !busy, onClick = { pendingPurge = page })
                     } else {
-                        PreviewAction(icon = Icons.Outlined.Restore, label = "恢复", enabled = !busy, onClick = {
-                            viewModel.restore(listOf(page.id), thenArchive = false)
-                            preview = preview?.without(page.id)
-                        })
-                        PreviewAction(icon = Icons.Outlined.Archive, label = "恢复并归档", enabled = !busy, onClick = {
-                            viewModel.restore(listOf(page.id), thenArchive = true)
-                            preview = preview?.without(page.id)
-                        })
+                        PreviewAction(icon = Icons.Outlined.Restore, label = "恢复", enabled = !busy, onClick = { pendingRestore = PendingRestore(page, archive = false) })
+                        PreviewAction(icon = Icons.Outlined.Archive, label = "恢复并归档", enabled = !busy, onClick = { pendingRestore = PendingRestore(page, archive = true) })
                         PreviewAction(icon = Icons.Outlined.DeleteForever, label = "永久删除", enabled = !busy, onClick = { pendingPurge = page })
                     }
+                }
+                pendingRestore?.let { (target, archive) ->
+                    ConfirmDialog(
+                        icon = if (archive) Icons.Outlined.Archive else Icons.Outlined.Restore,
+                        title = when {
+                            originals -> "还原这张原图？"
+                            archive -> "恢复并归档这张图？"
+                            else -> "恢复这张图？"
+                        },
+                        text = when {
+                            originals -> "换回压缩前的原图。"
+                            archive -> "放回原来的位置并归档，之后不会被清理。"
+                            else -> "放回原来的位置。"
+                        },
+                        confirmLabel = when {
+                            originals -> "还原"
+                            archive -> "恢复并归档"
+                            else -> "恢复"
+                        },
+                        onDismiss = { pendingRestore = null },
+                        onConfirm = {
+                            pendingRestore = null
+                            if (originals) viewModel.restoreOriginals(listOf(target.id)) else viewModel.restore(listOf(target.id), thenArchive = archive)
+                            preview = preview?.without(target.id)
+                        },
+                    )
                 }
                 pendingPurge?.let { target ->
                     ConfirmDialog(

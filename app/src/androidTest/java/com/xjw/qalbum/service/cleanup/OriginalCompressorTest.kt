@@ -9,6 +9,7 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.xjw.qalbum.data.db.AppDatabase
+import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.db.entity.OriginalBackupEntity
 import com.xjw.qalbum.data.preferences.SettingsRepository
@@ -24,6 +25,7 @@ import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -140,6 +142,50 @@ class OriginalCompressorTest {
     }
 
     @Test
+    fun theRecordKeepsTheRealOriginalSizeWhenTheIndexHadAShrunkenOne() = runBlocking {
+        val (_, id) = original(2048, 1536)
+        // 旧版分析写入的缩小尺寸
+        db.openHelper.writableDatabase.execSQL("UPDATE images SET width = 512, height = 384 WHERE id = $id")
+        val compressor = compressor()
+        val image = db.imageDao().getById(id)!!
+        val prepared = (compressor.prepare(listOf(image), QUALITY, MAX_SIDE).single() as OriginalCompressor.Preview.Ready).prepared
+        assertEquals(2048 to 1536, prepared.originalWidth to prepared.originalHeight)
+
+        assertEquals(1, compressor.apply(listOf(prepared)).compressed)
+        val record = db.originalBackupDao().getByImageId(id)!!
+        backups += File(record.backupPath!!)
+        assertEquals(2048 to 1536, record.originalWidth to record.originalHeight)
+        // 还原后库里是原图真正的尺寸
+        assertTrue(compressor.restore(id))
+        assertEquals(2048 to 1536, db.imageDao().getById(id)!!.let { it.width to it.height })
+    }
+
+    @Test
+    fun savedSpaceCountsAsFreedOnceTheOriginalIsGone() = runBlocking {
+        val (_, kept) = original(2048, 1536)
+        val compressor = compressor()
+        val saved = compressor.compress(listOf(kept), QUALITY, MAX_SIDE).savedBytes
+        val dao = db.originalBackupDao()
+        // 原图还在回收站：还不算
+        assertEquals(ImageDao.CleanedStatsRow(0, 0), dao.observeFreedStats().first())
+        assertNull(dao.getByImageId(kept)!!.freedAt)
+
+        val purgedAt = System.currentTimeMillis()
+        assertEquals(1, compressor.purgeByImageIds(listOf(kept)))
+        assertEquals(ImageDao.CleanedStatsRow(1, saved), dao.observeFreedStats().first())
+        assertTrue(dao.getByImageId(kept)!!.freedAt!! >= purgedAt)
+        assertEquals(ImageDao.CleanedStatsRow(1, saved), dao.observeFreedStatsSince(purgedAt).first())
+
+        // 不保留原图：替换完就算
+        settings.setCompressKeepOriginal(false)
+        val (_, direct) = original(2048, 1536)
+        val more = compressor.compress(listOf(direct), QUALITY, MAX_SIDE).savedBytes
+        assertEquals(ImageDao.CleanedStatsRow(2, saved + more), dao.observeFreedStats().first())
+        assertNotNull(dao.getByImageId(direct)!!.freedAt)
+        assertEquals(ImageDao.CleanedStatsRow(0, 0), dao.observeFreedStatsSince(Long.MAX_VALUE).first())
+    }
+
+    @Test
     fun discardOrChangedFilesKeepTheOriginal() = runBlocking {
         val (kept, keptId) = original(2048, 1536)
         val (changed, changedId) = original(2048, 1536)
@@ -243,7 +289,10 @@ class OriginalCompressorTest {
         assertEquals(768 to 1024, decodedSize(file))
         val row = db.imageDao().getById(id)!!
         assertEquals(768 to 1024, row.width to row.height)
-        backups += File(db.originalBackupDao().getByImageId(id)!!.backupPath!!)
+        val record = db.originalBackupDao().getByImageId(id)!!
+        backups += File(record.backupPath!!)
+        // 压缩前的尺寸也按显示方向
+        assertEquals(1536 to 2048, record.originalWidth to record.originalHeight)
     }
 
     @Test

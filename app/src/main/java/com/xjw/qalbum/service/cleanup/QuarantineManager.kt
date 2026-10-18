@@ -10,6 +10,8 @@ import androidx.room.withTransaction
 import com.xjw.qalbum.access.AccessManager
 import com.xjw.qalbum.access.FileAccessProvider
 import com.xjw.qalbum.data.db.AppDatabase
+import com.xjw.qalbum.data.db.StatsCache
+import com.xjw.qalbum.data.db.StatsCache.Companion.holding
 import com.xjw.qalbum.data.db.dao.CleanupDao
 import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.db.entity.ImageEntity
@@ -59,6 +61,8 @@ class QuarantineManager(
     private val settings: SettingsRepository,
     private val fileOpsClient: FileOpsClient,
     private val archive: ArchiveManager,
+    /** 删除期间暂停清理页的统计重算（见 StatsCache.hold），数据库先给删除用 */
+    private val statsCache: StatsCache? = null,
 ) {
 
     /** 回收站根目录（外部专属目录；存储不可用时回退 filesDir） */
@@ -128,8 +132,9 @@ class QuarantineManager(
     private suspend fun performPictures(
         ids: Collection<Long>, options: PictureDeleteOptions, reason: String, scope: QqSourceScope?, permanent: Boolean,
         onProgress: (done: Int, total: Int) -> Unit,
-    ): PictureDeleteResult =
+    ): PictureDeleteResult = statsCache.holding {
         withContext(Dispatchers.IO) {
+            val started = System.currentTimeMillis()
             val provider=accessManager.current()
             if(!provider.isAvailable())return@withContext PictureDeleteResult(skipped=ids.size)
             val bound=fileOpsClient.bind(provider.getAccessMode())?:return@withContext PictureDeleteResult(skipped=ids.size)
@@ -157,8 +162,10 @@ class QuarantineManager(
                 // 归档页删除：放回原处（核验失败回滚）的归档图按设置重新隐藏
                 if(options.includeArchived)runCatching { archive.sync() }
                 onProgress(total,total)
+                Timber.i("Pictures %s: %d selected in %d ms", if(permanent)"deleted" else "trashed", total, System.currentTimeMillis()-started)
             }
         }
+    }
 
     internal fun linkedOperations(bound: BoundFileOps, provider: FileAccessProvider): LinkedPictureOperations = LinkedPictureOperations(
         db,bound,rootDir,inFlight,

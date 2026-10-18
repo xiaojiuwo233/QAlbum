@@ -275,19 +275,20 @@ interface QqSourceDao {
         WHERE account_key = :accountKey AND sender_key = :key AND :name <> ''""")
     suspend fun updateSenderName(accountKey: String, key: String, name: String)
 
-    /** 仅给实际已入库、且符合 QQ 家族命名的 .jpg 版本补来源，避免为每条消息预建额外路径。 */
+    /**
+     * 仅给实际已入库、且符合 QQ 家族命名的别名版本（`Cache_xxx.jpg` / `.png` / `.gif` 等，见 QqCachePaths.ALIAS_EXTENSIONS）
+     * 补来源：沿用不带后缀的同名文件的来源，避免为每条消息预建额外路径。
+     */
     @Query("""INSERT OR IGNORE INTO qq_origin_paths(path, origin_id)
-        SELECT COALESCE(q.original_path, i.path), p.origin_id FROM images i
-        LEFT JOIN quarantine q ON q.image_id = i.id
-        JOIN qq_origin_paths p ON p.path = substr(COALESCE(q.original_path, i.path), 1, length(COALESCE(q.original_path, i.path)) - 4)
-        WHERE i.variant_group IS NOT NULL AND substr(COALESCE(q.original_path, i.path), -4) = '.jpg'
-          AND i.status <> 'deleted'""")
-    suspend fun registerIndexedJpegPaths()
-
-    /** 新图片插入前登记别名，让现有的来源与统计触发器在插入时一起维护关联。 */
-    @Query("""INSERT OR IGNORE INTO qq_origin_paths(path, origin_id)
-        SELECT path || '.jpg', origin_id FROM qq_origin_paths WHERE path IN (:referencePaths)""")
-    suspend fun registerJpegPaths(referencePaths: List<String>)
+        SELECT a.path, p.origin_id FROM (
+            SELECT COALESCE(q.original_path, i.path) AS path FROM images i
+            LEFT JOIN quarantine q ON q.image_id = i.id
+            WHERE i.variant_group IS NOT NULL AND i.status <> 'deleted'
+              AND (lower(substr(COALESCE(q.original_path, i.path), -4)) IN ('.jpg', '.png', '.gif', '.bmp')
+                OR lower(substr(COALESCE(q.original_path, i.path), -5)) IN ('.jpeg', '.webp', '.heic'))
+        ) a
+        JOIN qq_origin_paths p ON p.path = substr(a.path, 1, length(a.path) - CASE WHEN substr(a.path, -5, 1) = '.' THEN 5 ELSE 4 END)""")
+    suspend fun registerIndexedAliasPaths()
 
     @Query("""INSERT OR IGNORE INTO image_qq_origins(image_id, origin_id)
         SELECT i.id, p.origin_id FROM images i JOIN qq_origin_paths p ON p.path = i.path
@@ -300,7 +301,7 @@ interface QqSourceDao {
 
     @Transaction
     suspend fun reconcileLinks() {
-        registerIndexedJpegPaths()
+        registerIndexedAliasPaths()
         linkOriginPaths()
     }
 

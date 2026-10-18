@@ -276,6 +276,38 @@ interface ImageDao {
 
     data class SizeWrite(val id: Long, val width: Int, val height: Int)
 
+    /**
+     * 要核对宽高的行：长边不超过 [maxSide] 的非缩略图（旧版分析写入的缩小尺寸都在其中，见 ImageSizeBackfill）。
+     * 回收站里的读移进去的那份文件。
+     */
+    @Query("""
+        SELECT i.id, COALESCE(q.quarantine_path, i.path) AS path, i.width, i.height FROM images i
+        LEFT JOIN quarantine q ON q.image_id = i.id AND i.status = 'quarantined' AND q.state = 'ready'
+        WHERE i.id > :afterId AND i.width > 0 AND MAX(i.width, i.height) <= :maxSide AND i.source_type <> 'chatthumb'
+          AND (i.status IN ('active', 'archived') OR q.id IS NOT NULL)
+        ORDER BY i.id LIMIT :limit
+    """)
+    suspend fun rowsWithSmallSize(maxSide: Int, afterId: Long, limit: Int): List<SizeRow>
+
+    @Query("""
+        SELECT COUNT(*) FROM images WHERE width > 0 AND MAX(width, height) <= :maxSide AND source_type <> 'chatthumb'
+          AND status IN ('active', 'archived', 'quarantined')
+    """)
+    suspend fun countWithSmallSize(maxSide: Int): Int
+
+    /** 只改核对时读到的那个值（期间被扫描或压缩改过的不动） */
+    @Query("UPDATE images SET width = :width, height = :height WHERE id = :id AND width = :oldWidth AND height = :oldHeight")
+    suspend fun correctSize(id: Long, oldWidth: Int, oldHeight: Int, width: Int, height: Int)
+
+    @Transaction
+    suspend fun correctSizes(rows: List<SizeFix>) {
+        rows.forEach { correctSize(it.id, it.oldWidth, it.oldHeight, it.width, it.height) }
+    }
+
+    data class SizeRow(val id: Long, val path: String, val width: Int, val height: Int)
+
+    data class SizeFix(val id: Long, val oldWidth: Int, val oldHeight: Int, val width: Int, val height: Int)
+
     /** 压缩 / 还原成功后写回大小、宽高与格式（PNG 压缩后是 JPEG）；文件在此期间被扫描或 QQ 改过时不匹配，返回 0 */
     @Query("""
         UPDATE images SET size = :size, width = :width, height = :height, optimized = :optimized, mime = :mime
@@ -307,6 +339,14 @@ interface ImageDao {
         WHERE source_type = 'chatthumb' AND status = 'thumbnail_trash'
     """)
     fun observeThumbnailTrashSummary(): Flow<ThumbnailTrashSummary>
+
+    /** 同上的一次性查询（清理页经 StatsCache 缓存） */
+    @Query("""
+        SELECT COUNT(*) AS count, IFNULL(SUM(size), 0) AS bytes
+        FROM images
+        WHERE source_type = 'chatthumb' AND status = 'thumbnail_trash'
+    """)
+    suspend fun thumbnailTrashSummary(): ThumbnailTrashSummary
 
     @Query("""
         SELECT COUNT(*) FROM images
@@ -594,6 +634,15 @@ interface ImageDao {
     """)
     fun observeSourceBreakdown(): Flow<List<SourceBreakdownRow>>
 
+    /** 同上的一次性查询（清理页经 StatsCache 缓存） */
+    @Query("""
+        SELECT source_type AS source, COUNT(*) AS count, IFNULL(SUM(size), 0) AS bytes
+        FROM images
+        WHERE status = 'active' AND source_type <> 'chatthumb'
+        GROUP BY source_type
+    """)
+    suspend fun sourceBreakdown(): List<SourceBreakdownRow>
+
     data class SourceBreakdownRow(
         val source: String,
         val count: Int,
@@ -720,6 +769,15 @@ interface ImageDao {
               AND f.is_protected = 1 AND f.status IN (:statuses) ORDER BY f.source_type = 'chatthumb', f.size DESC, f.id LIMIT 1))
     """)
     fun observeArchiveCount(statuses: List<String>): Flow<Int>
+
+    /** 同上的一次性查询（清理页经 StatsCache 缓存） */
+    @Query("""
+        SELECT COUNT(*) FROM images i
+        WHERE i.is_protected = 1 AND i.status IN (:statuses)
+          AND (i.variant_group IS NULL OR i.id = (SELECT f.id FROM images f WHERE f.variant_group = i.variant_group
+              AND f.is_protected = 1 AND f.status IN (:statuses) ORDER BY f.source_type = 'chatthumb', f.size DESC, f.id LIMIT 1))
+    """)
+    suspend fun archiveCount(statuses: List<String>): Int
 
     @Query("""
         SELECT i.date_bucket AS bucketKey, COUNT(*) AS count FROM images i

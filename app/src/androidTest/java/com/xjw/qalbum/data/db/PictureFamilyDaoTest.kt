@@ -114,7 +114,7 @@ class PictureFamilyDaoTest {
 
             val indexer = PictureVariantIndexer(db, settings)
             indexer.ensureIndexed()
-            assertEquals(3, settings.variantIndexVersion.first())
+            assertEquals(4, settings.variantIndexVersion.first())
             assertEquals(1, dao.countActiveTimeline(stacked = true))
             val jpg = dao.getAnyByIds(listOf(jpgId)).single()
             assertEquals(QqCachePaths.familyKey(raw), jpg.variantGroup)
@@ -149,7 +149,7 @@ class PictureFamilyDaoTest {
             val raw = seedSources(db)[1]
             QqSourceStatsBuilder(db).rebuild {}
             val sources = db.qqSourceDao()
-            sources.registerJpegPaths(listOf(raw))
+            sources.registerDerivedPath("$raw.jpg", raw)
             val jpgId = db.imageDao().insert(image("$raw.jpg", "chatraw", "active", 1_000))
             assertEquals(2, sources.observeImageOrigins(jpgId).first().size)
             val group = sources.facetId(0, "group")!!

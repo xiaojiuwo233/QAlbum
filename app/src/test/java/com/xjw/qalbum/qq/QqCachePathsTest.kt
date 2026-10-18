@@ -48,6 +48,27 @@ class QqCachePathsTest {
     }
 
     @Test
+    fun `按原文件名带后缀另存的版本（png、gif 等）也是同一家族`() {
+        val paths = QqCachePaths.relativePaths(md5("forwarded")).map { "$root/$it" }
+        val key = QqCachePaths.familyKey(paths.first())
+        assertNotNull(key)
+        listOf("png", "gif", "jpeg", "webp", "PNG", "Heic").forEach { ext ->
+            paths.forEach { path -> assertEquals("$path.$ext", key, QqCachePaths.familyKey("$path.$ext")) }
+        }
+        // 不是图片的后缀、或者后缀前不是缓存名，不算
+        assertNull(QqCachePaths.familyKey(paths.first() + ".txt"))
+        assertNull(QqCachePaths.familyKey("$root/chatraw/png/Cache_abc.png"))
+        val raw = paths.first { "/chatraw/" in it }
+        assertEquals(raw, QqCachePaths.aliasStem("$raw.gif"))
+        assertNull(QqCachePaths.aliasStem(raw))
+        assertEquals("Cache_1_hd", QqCachePaths.stripAlias("Cache_1_hd.webp"))
+        // 清理时连同这些别名一起找，读格子小图时只带 .jpg
+        assertEquals(4 * (1 + QqCachePaths.ALIAS_EXTENSIONS.size), QqCachePaths.familyPaths(raw, QqCachePaths.ALIAS_EXTENSIONS).size)
+        assertEquals(true, "$raw.png" in QqCachePaths.familyPaths(raw, QqCachePaths.ALIAS_EXTENSIONS))
+        assertEquals(8, QqCachePaths.familyPaths("$raw.png").size)
+    }
+
+    @Test
     fun `不同图片的家族键不同`() {
         val keys = (0 until 10_000).map { QqCachePaths.familyKey("$root/" + QqCachePaths.relativePaths(md5("other-$it")).first()) }
         assertEquals(keys.size, keys.toSet().size)
@@ -74,7 +95,7 @@ class QqCachePathsTest {
             "$root/chatraw/jpg/Cache_3224b49bbd8391f9.jpg",
             "$root/chatraw/1f9/Cache_3224b49bbd8391f9.jpg.jpg",
             "$root/chatraw/1f9/Cache_3224b49bbd8391f9_hd.jpg",
-            "$root/chatraw/1f9/Cache_3224b49bbd8391f9.png",
+            "$root/chatraw/1f9/Cache_3224b49bbd8391f9.txt",
             "$root/temp/x1.jpg",
             "/sdcard/DCIM/IMG_0001.jpg",
         ).forEach { assertNull(it, QqCachePaths.familyKey(it)) }

@@ -193,6 +193,28 @@ object QqCachePaths {
 
     private val folders = listOf("chatimg", "chatraw", "chatthumb")
 
+    /**
+     * QQ 发图时按原文件名的后缀另存的版本：发送本地图片（包括把别人的图另存后转发）时 QQ 把原文件名交给内核
+     * （MsgUtil 的 createPicElement 把 sourcePath 的文件名传进 RichMediaFilePathInfo），缓存名后面跟上原后缀，
+     * 如 `Cache_xxx.png`、`Cache_xxx.gif`。与不带后缀的同名文件是同一张图（同一个 MD5），按别名处理。
+     */
+    val ALIAS_EXTENSIONS = listOf("jpg", "jpeg", "png", "gif", "webp", "bmp", "heic")
+
+    /** 去掉别名后缀后的结束位置：文件名以 [ALIAS_EXTENSIONS] 之一结尾时是点的位置，否则是 [path] 的长度 */
+    fun aliasStemEnd(path: String): Int {
+        val dot = path.lastIndexOf('.')
+        if (dot <= path.lastIndexOf('/') + 1) return path.length
+        val length = path.length - dot - 1
+        if (length !in 3..4) return path.length
+        return if (ALIAS_EXTENSIONS.any { it.length == length && path.regionMatches(dot + 1, it, 0, length, ignoreCase = true) }) dot else path.length
+    }
+
+    /** [path] 是别名（带后缀的缓存文件）时去掉后缀，否则 null */
+    fun aliasStem(path: String): String? = aliasStemEnd(path).takeIf { it < path.length }?.let { path.substring(0, it) }
+
+    /** 去掉别名后缀（没有时原样返回） */
+    fun stripAlias(path: String): String = path.substring(0, aliasStemEnd(path))
+
     private fun crc(text: String): Long {
         var value = -1L
         text.forEach { char -> value = (value shr 8) xor table[((value xor char.code.toLong()) and 255L).toInt()] }
@@ -219,7 +241,7 @@ object QqCachePaths {
     }
 
     /**
-     * 图片家族键：同一张 QQ 图片的 chatimg / chatraw / chatthumb（含 `_hd`、`.jpg`）以及 Temp 转码缩略图共用一个键
+     * 图片家族键：同一张 QQ 图片的 chatimg / chatraw / chatthumb（含 `_hd`、`.jpg` 等别名后缀）以及 Temp 转码缩略图共用一个键
      * （即这张图在 chatimg 下的文件名 CRC），只凭路径算出，不需要读聊天数据库。
      * 不是 `folder:MD5` 命名的文件（旧缓存迁移、导入消息等）返回 null，按独立图片处理。
      *
@@ -244,11 +266,11 @@ object QqCachePaths {
             else -> return null
         }
         if (!path.startsWith("Cache_", nameAt)) return null
-        val stemEnd = if (path.endsWith(".jpg")) path.length - 4 else path.length
+        val stemEnd = aliasStemEnd(path)
         val hd = stemEnd >= 3 && path.regionMatches(stemEnd - 3, "_hd", 0, 3)
         if (hd && !thumb) return null
         val end = if (hd) stemEnd - 3 else stemEnd
-        // 分桶目录是缓存名（不含 _hd / .jpg）的末 3 位
+        // 分桶目录是缓存名（不含 _hd 与后缀）的末 3 位
         if (bucketLength != 3 || !path.regionMatches(bucketAt, path, end - 3, 3)) return null
         val negative = path.getOrNull(nameAt + 6) == '-'
         val digitsAt = nameAt + if (negative) 7 else 6
@@ -274,8 +296,11 @@ object QqCachePaths {
         return value xor shift
     }
 
-    /** 与 [path] 同一家族的全部候选缓存路径（同一根目录下，不保证存在；Temp 转码缩略图不在其列） */
-    fun familyPaths(path: String): List<String> {
+    /**
+     * 与 [path] 同一家族的全部候选缓存路径（同一根目录下，不保证存在；Temp 转码缩略图不在其列）。每个版本另带
+     * [extensions] 里的别名后缀：默认只带 `.jpg`（读格子小图时逐个尝试，候选越少越快），清理时传 [ALIAS_EXTENSIONS]。
+     */
+    fun familyPaths(path: String, extensions: List<String> = listOf("jpg")): List<String> {
         val key = familyKey(path) ?: return emptyList()
         val parts = path.split('/')
         val depth = if (parts[parts.size - 2] == "Temp" || parts[parts.size - 2] == "temp") 2 else 3
@@ -284,7 +309,7 @@ object QqCachePaths {
             val name = "Cache_" + java.lang.Long.toString(key xor delta.getValue(folder), 16)
             val variant = "$base/$folder/${name.takeLast(3)}/$name"
             val variants = if (folder == "chatthumb") listOf(variant, variant + "_hd") else listOf(variant)
-            variants.flatMap { listOf(it, "$it.jpg") }
+            variants.flatMap { variant -> listOf(variant) + extensions.map { "$variant.$it" } }
         }
     }
 

@@ -12,6 +12,8 @@ import androidx.room.PrimaryKey
  * - [backupPath] 是原图备份（QAlbum 私有目录），为 null 表示没保留原图或备份已删除；
  * - 还原：把备份写回 [path]（替换压缩后的文件）并删除记录；到期或手动删除只删备份、清空 [backupPath]；
  * - [quality] 压缩用的 JPEG 质量（v21 起记录；之前的压缩固定为 85）；[originalMime] 压缩前的格式（v22 起）。
+ * - [freedAt] 省下的空间真正腾出来的时间：没保留原图时是压缩时间，保留了的是原图备份删掉的时间（v26 起；
+ *   之前的记录为空，首页「今日已清理」不算它们，累计照算）。
  */
 @Entity(
     tableName = "original_backups",
@@ -36,4 +38,5 @@ data class OriginalBackupEntity(
     @ColumnInfo(name = "quality", defaultValue = "0") val quality: Int = 0,
     /** 压缩前的格式（PNG 压缩后是 JPEG，还原时改回来）；v22 以前的记录为空，都是 JPEG */
     @ColumnInfo(name = "original_mime") val originalMime: String? = null,
+    @ColumnInfo(name = "freed_at") val freedAt: Long? = null,
 )

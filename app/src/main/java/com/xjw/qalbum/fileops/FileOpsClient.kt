@@ -8,6 +8,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.RemoteException
+import android.os.SystemClock
 import com.topjohnwu.superuser.ipc.RootService
 import com.xjw.qalbum.BuildConfig
 import com.xjw.qalbum.domain.model.AccessMode
@@ -89,7 +90,7 @@ class BoundFileOps(
  * 共享绑定 + 引用计数：扫描 / 分析 / 清理等消费方并发 bind 时复用同一底层连接。
  * Shizuku 侧同一 UserServiceArgs 本就对应同一个 UserService 进程，若各消费方独立
  * unbind(remove=true)，先结束的一方会把还在用的服务一并销毁；现在每个 [BoundFileOps]
- * 句柄 close 一次引用计数减一，归零才真正解绑回收特权进程。
+ * 句柄 close 一次引用计数减一，归零后闲置一小段时间（见 [release]）才真正解绑回收特权进程。
  *
  * 绑定失败 / 超时返回 null，由调用方（ScanTransportFactory 等）降级到 shell 传输，
  * 扫描永远不会因为服务绑定问题而直接失败。
@@ -107,13 +108,16 @@ class FileOpsClient(private val context: Context) {
     /** Root 与 Shizuku 的旧任务可跨设置切换并存，不能用单槽让新模式覆盖仍有引用的旧连接。 */
     private val sharedByMode = mutableMapOf<AccessMode, SharedBinding>()
 
-    /** 共享连接：refCount 记录未关闭的 [BoundFileOps] 句柄数，归零时真正解绑 */
+    /** 共享连接：refCount 记录未关闭的 [BoundFileOps] 句柄数，归零后闲置 [IDLE_RELEASE_MS] 才真正解绑 */
     private class SharedBinding(
         val mode: AccessMode,
         val ops: IFileOps,
         private val unbind: () -> Unit,
     ) {
         var refCount = 1
+
+        /** 最近一次归零的时间（uptimeMillis） */
+        var idleSince = 0L
         private val unbound = AtomicBoolean(false)
 
         fun unbindOnce() {
@@ -223,12 +227,26 @@ class FileOpsClient(private val context: Context) {
         Shizuku.bindUserService(args, conn)
     }
 
-    /** 句柄关闭：引用计数减一，归零时解绑（Shizuku 侧 remove=true 销毁 UserService 进程） */
+    /**
+     * 句柄关闭：引用计数减一。归零后先闲置一会儿再解绑（Shizuku 侧 remove=true 销毁 UserService 进程）：
+     * 接连的操作（扫描完紧接着读时长、统计完紧接着展开目录）不必每次重启特权进程——Shizuku 每次新起
+     * UserService 要两三秒，紧跟着解绑又重绑还可能拿不到连接。闲置期间再有人绑定就接着用。
+     */
     private fun release(binding: SharedBinding) {
         synchronized(stateLock) {
             if (binding.refCount <= 0) return
             binding.refCount--
             if (binding.refCount > 0) return
+            binding.idleSince = SystemClock.uptimeMillis()
+        }
+        mainHandler.postDelayed({ retireIfIdle(binding) }, IDLE_RELEASE_MS)
+    }
+
+    /** 闲置够久（期间没人再用）才真正解绑；期间被重新用过的，由它下次归零时安排的检查处理 */
+    private fun retireIfIdle(binding: SharedBinding) {
+        synchronized(stateLock) {
+            if (binding.refCount > 0) return
+            if (SystemClock.uptimeMillis() - binding.idleSince < IDLE_RELEASE_MS - 50) return
             if (sharedByMode[binding.mode] === binding) sharedByMode.remove(binding.mode)
         }
         binding.unbindOnce()
@@ -262,5 +280,8 @@ class FileOpsClient(private val context: Context) {
 
     companion object {
         private const val BIND_TIMEOUT_MS = 5_000L
+
+        /** 最后一个句柄关闭后保留连接的时长 */
+        private const val IDLE_RELEASE_MS = 15_000L
     }
 }

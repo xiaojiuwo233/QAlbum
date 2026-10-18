@@ -116,6 +116,10 @@ class PictureBatchDeleteTest {
         override fun writeFileChecked(target: String, content: ParcelFileDescriptor, mtimeMs: Long): Int =
             InProcessFileOps.writeFileChecked(target, content, mtimeMs)
         override fun repairOwnership(paths: Array<String>): IntArray = InProcessFileOps.repairOwnership(paths)
+        override fun pathStats(paths: Array<String>): LongArray = InProcessFileOps.pathStats(paths)
+        override fun largestChildren(dir: String, limit: Int): Array<String> = InProcessFileOps.largestChildren(dir, limit)
+        override fun clearQqCache(paths: Array<String>): LongArray = InProcessFileOps.clearQqCache(paths)
+        override fun walkFiles(root: String, offset: Int, limit: Int): Array<String> = InProcessFileOps.walkFiles(root, offset, limit)
     }
 
     @Before

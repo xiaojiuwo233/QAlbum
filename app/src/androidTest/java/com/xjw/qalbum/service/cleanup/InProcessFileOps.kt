@@ -29,4 +29,8 @@ internal object InProcessFileOps : IFileOps.Stub() {
     override fun writeFileChecked(target: String, content: ParcelFileDescriptor, mtimeMs: Long): Int =
         FileOpsImpl.writeFileChecked(target, content, mtimeMs)
     override fun repairOwnership(paths: Array<String>): IntArray = FileOpsImpl.repairOwnership(paths)
+    override fun pathStats(paths: Array<String>): LongArray = FileOpsImpl.pathStats(paths)
+    override fun largestChildren(dir: String, limit: Int): Array<String> = FileOpsImpl.largestChildren(dir, limit)
+    override fun clearQqCache(paths: Array<String>): LongArray = FileOpsImpl.clearQqCache(paths)
+    override fun walkFiles(root: String, offset: Int, limit: Int): Array<String> = FileOpsImpl.walkFiles(root, offset, limit)
 }

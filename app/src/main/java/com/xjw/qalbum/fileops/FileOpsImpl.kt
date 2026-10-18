@@ -46,6 +46,12 @@ internal object FileOpsImpl {
     const val REPAIR_DONE = 1
     const val REPAIR_FAILED = 2
 
+    /** [pathStats] 的状态 */
+    const val PATH_PRESENT = 1L
+    const val PATH_MISSING = 0L
+    const val PATH_DENIED = -1L
+    const val PATH_ERROR = -2L
+
     fun listSubdirs(root: String, offset: Int, limit: Int): Array<String> =
         listEntries(root, offset, limit, dirsOnly = true)
 
@@ -360,6 +366,203 @@ internal object FileOpsImpl {
     }
 
     private val QQ_DATABASES = Regex("/data/(?:user/\\d+|user_de/\\d+|data)/com\\.tencent\\.mobileqq/databases(?:/|$)")
+
+    // ---- QQ 缓存页 ----
+
+    /** 每个路径 [状态, 文件数, 字节数]（见 IFileOps.pathStats） */
+    fun pathStats(paths: Array<String>): LongArray {
+        val out = LongArray(paths.size * 3)
+        paths.forEachIndexed { i, path ->
+            val tree = measure(path)
+            out[i * 3] = tree.state
+            out[i * 3 + 1] = tree.files
+            out[i * 3 + 2] = tree.bytes
+        }
+        return out
+    }
+
+    /** [dir] 下占用最大的 [limit] 项（见 IFileOps.largestChildren） */
+    fun largestChildren(dir: String, limit: Int): Array<String> {
+        val names = File(dir).list() ?: return emptyArray()
+        class Child(val kind: Char, val tree: Tree, val name: String)
+        return names.mapNotNull { name ->
+            val child = "$dir/$name"
+            val stat = try {
+                Os.lstat(child)
+            } catch (_: ErrnoException) {
+                return@mapNotNull null
+            }
+            if (OsConstants.S_ISDIR(stat.st_mode)) Child('D', measure(child), name) else Child('F', Tree(PATH_PRESENT, 1, stat.st_size), name)
+        }
+            .sortedByDescending { it.tree.bytes }
+            .take(limit)
+            .map { "${it.kind}|${it.tree.files}|${it.tree.bytes}|${it.name}" }
+            .toTypedArray()
+    }
+
+    /**
+     * 清空 QQ 的缓存目录（见 IFileOps.clearQqCache）：与 QQ 自己的 FileUtils.deleteFilesInDirectory 一样删掉里面的全部内容、
+     * 保留目录本身。只接受 [com.xjw.qalbum.qq.QqCacheTargets] 登记的目录（按真实路径核对）；遍历不跟随符号链接，链接本身照删。
+     */
+    fun clearQqCache(paths: Array<String>): LongArray {
+        val out = LongArray(paths.size * 3)
+        paths.forEachIndexed { i, path ->
+            val target = com.xjw.qalbum.qq.QqCacheTargets.clearablePath(path)
+            if (target == null) {
+                out[i * 3] = -1
+                return@forEachIndexed
+            }
+            val result = clearContents(target)
+            out[i * 3] = result.files
+            out[i * 3 + 1] = result.bytes
+            out[i * 3 + 2] = result.failed
+        }
+        return out
+    }
+
+    /** 清空 [path] 里的内容、不核对是不是 QQ 登记的目录（[clearQqCache] 核对过再调；测试直接用）：[删掉的文件数, 字节数, 没删掉的项数] */
+    internal fun clearContentsUnchecked(path: String): LongArray = clearContents(path).let { longArrayOf(it.files, it.bytes, it.failed) }
+
+    private class Tree(val state: Long = PATH_PRESENT, var files: Long = 0, var bytes: Long = 0, var failed: Long = 0)
+
+    private fun stateOf(errno: Int): Long = when (errno) {
+        OsConstants.ENOENT, OsConstants.ENOTDIR -> PATH_MISSING
+        OsConstants.EACCES, OsConstants.EPERM -> PATH_DENIED
+        else -> PATH_ERROR
+    }
+
+    /** 递归统计 [path]：不跟随符号链接，读不了的子目录跳过 */
+    private fun measure(path: String): Tree {
+        val stat = try {
+            Os.lstat(path)
+        } catch (e: ErrnoException) {
+            return Tree(stateOf(e.errno))
+        }
+        if (!OsConstants.S_ISDIR(stat.st_mode)) return Tree(PATH_PRESENT, 1, stat.st_size)
+        if (File(path).list() == null) return Tree(PATH_DENIED)
+        val tree = Tree()
+        val pending = ArrayDeque<String>()
+        pending.add(path)
+        while (pending.isNotEmpty()) {
+            val dir = pending.removeLast()
+            val names = File(dir).list() ?: continue
+            for (name in names) {
+                val child = "$dir/$name"
+                val st = try {
+                    Os.lstat(child)
+                } catch (_: ErrnoException) {
+                    continue
+                }
+                if (OsConstants.S_ISDIR(st.st_mode)) {
+                    pending.add(child)
+                } else {
+                    tree.files++
+                    tree.bytes += st.st_size
+                }
+            }
+        }
+        return tree
+    }
+
+    /** 删掉 [path] 里的全部内容（[path] 是文件时删掉它）：先删文件，再从最深处删空目录 */
+    private fun clearContents(path: String): Tree {
+        val stat = try {
+            Os.lstat(path)
+        } catch (e: ErrnoException) {
+            return if (stateOf(e.errno) == PATH_MISSING) Tree() else Tree(failed = 1)
+        }
+        if (!OsConstants.S_ISDIR(stat.st_mode)) {
+            return if (File(path).delete()) Tree(files = 1, bytes = stat.st_size) else Tree(failed = 1)
+        }
+        val result = Tree()
+        // 先序发现的子目录：倒过来删就是先删子目录、再删父目录
+        val dirs = ArrayList<String>()
+        val pending = ArrayDeque<String>()
+        pending.add(path)
+        while (pending.isNotEmpty()) {
+            val dir = pending.removeLast()
+            val names = File(dir).list()
+            if (names == null) {
+                result.failed++
+                continue
+            }
+            for (name in names) {
+                val child = "$dir/$name"
+                val st = try {
+                    Os.lstat(child)
+                } catch (e: ErrnoException) {
+                    if (stateOf(e.errno) != PATH_MISSING) result.failed++
+                    continue
+                }
+                if (OsConstants.S_ISDIR(st.st_mode)) {
+                    dirs += child
+                    pending.add(child)
+                } else if (File(child).delete()) {
+                    result.files++
+                    result.bytes += st.st_size
+                } else {
+                    result.failed++
+                }
+            }
+        }
+        for (dir in dirs.asReversed()) {
+            if (!File(dir).delete()) result.failed++
+        }
+        return result
+    }
+
+    // ---- 视频页 ----
+
+    private class WalkSnapshot(val root: String, val entries: Array<String>)
+
+    @Volatile
+    private var walkSnapshot: WalkSnapshot? = null
+
+    /** 递归列出 [root] 下的普通文件（见 IFileOps.walkFiles）；同一 root 从 offset 0 起的连续翻页基于同一份快照 */
+    fun walkFiles(root: String, offset: Int, limit: Int): Array<String> {
+        val cached = walkSnapshot
+        val snap = if (offset > 0 && cached != null && cached.root == root) cached else {
+            WalkSnapshot(root, collectFiles(root)).also { walkSnapshot = it }
+        }
+        val entries = snap.entries
+        if (offset >= entries.size) {
+            if (walkSnapshot === snap) walkSnapshot = null
+            return emptyArray()
+        }
+        val end = minOf(offset + limit, entries.size)
+        val out = ArrayList<String>(end - offset + 1)
+        for (i in offset until end) out += entries[i]
+        if (end < entries.size) out += MORE_MARKER else if (walkSnapshot === snap) walkSnapshot = null
+        return out.toTypedArray()
+    }
+
+    private fun collectFiles(root: String): Array<String> {
+        val found = ArrayList<Pair<String, String>>()
+        val pending = ArrayDeque<Pair<String, Int>>()
+        pending.add("" to 0)
+        while (pending.isNotEmpty()) {
+            val (relative, depth) = pending.removeLast()
+            val dir = if (relative.isEmpty()) root else "$root/$relative"
+            val names = File(dir).list() ?: continue
+            for (name in names) {
+                if (name.startsWith('.')) continue
+                val childRelative = if (relative.isEmpty()) name else "$relative/$name"
+                val st = try {
+                    Os.lstat("$root/$childRelative")
+                } catch (_: ErrnoException) {
+                    continue
+                }
+                when {
+                    OsConstants.S_ISDIR(st.st_mode) -> if (depth < MAX_WALK_DEPTH) pending.add(childRelative to depth + 1)
+                    OsConstants.S_ISREG(st.st_mode) -> found += childRelative to "${st.st_size}|${st.st_mtime * 1000L}|$childRelative"
+                }
+            }
+        }
+        found.sortBy { it.first }
+        return Array(found.size) { found[it].second }
+    }
+
+    private const val MAX_WALK_DEPTH = 12
 
     // ---- 内部实现 ----
 

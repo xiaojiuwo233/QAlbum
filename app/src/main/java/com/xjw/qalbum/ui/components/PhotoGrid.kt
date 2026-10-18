@@ -17,6 +17,7 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -138,6 +139,8 @@ fun PhotoGrid(
     animatedScope: AnimatedVisibilityScope? = null,
     /** 格子显示什么：默认是图片本身的小版本（见 ImageEntityModel.tile），回收站等页面换成自己的文件 */
     tileModel: (GalleryTimelineItem.Photo) -> Any = { ImageEntityModel(it.image, tile = true) },
+    /** 格子上额外的角标（如视频时长），选择态下不显示 */
+    tileOverlay: (@Composable BoxScope.(GalleryTimelineItem.Photo) -> Unit)? = null,
     leadingContent: (LazyGridScope.() -> Unit)? = null,
 ) {
     val selectionMode = selectedIds.isNotEmpty()
@@ -377,6 +380,7 @@ fun PhotoGrid(
                             selectionMode = selectionMode,
                             badges = badges,
                             showImage = !scrubbing,
+                            overlay = tileOverlay?.let { content -> { content(item) } },
                             modifier = Modifier
                                 .animateItem()
                                 .onGloballyPositioned { photoBounds[id] = it.boundsInRoot() },
@@ -475,6 +479,7 @@ fun PhotoTile(
     badges: PhotoBadges = PhotoBadges(),
     contentScale: ContentScale = ContentScale.Crop,
     showImage: Boolean = true,
+    overlay: (@Composable BoxScope.() -> Unit)? = null,
     sharedScope: SharedTransitionScope? = null,
     animatedScope: AnimatedVisibilityScope? = null,
 ) {
@@ -530,6 +535,7 @@ fun PhotoTile(
         if (badges.size) {
             TileTextBadge(formatBytes(bytes), Modifier.align(Alignment.BottomEnd))
         }
+        if (showInfoBadges) overlay?.invoke(this)
         SelectionMark(
             visible = selectionMode,
             selected = selected,

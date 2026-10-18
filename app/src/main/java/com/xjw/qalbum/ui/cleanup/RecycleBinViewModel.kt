@@ -9,6 +9,7 @@ import androidx.paging.cachedIn
 import androidx.paging.map as pagingMap
 import com.xjw.qalbum.data.db.AppDatabase
 import com.xjw.qalbum.data.db.RecycleBinSql
+import com.xjw.qalbum.data.db.StatsCache
 import com.xjw.qalbum.data.db.dao.BackupUnit
 import com.xjw.qalbum.data.db.dao.CleanupDao
 import com.xjw.qalbum.data.db.dao.TrashUnit
@@ -73,6 +74,7 @@ class RecycleBinViewModel(
     private val settings: SettingsRepository,
     private val tasks: BackgroundTasks,
     private val appScope: CoroutineScope,
+    private val statsCache: StatsCache,
 ) : ViewModel() {
     private val dao = db.cleanupDao()
 
@@ -374,10 +376,12 @@ class RecycleBinViewModel(
     private suspend fun <T> progress(label: String, total: Int, block: suspend (report: (Int, Int) -> Unit) -> T): T {
         CleanupOpState.purgeProgress.value = PurgeProgress(0, total, label)
         try {
-            return tasks.track(label.removePrefix("正在").removeSuffix("…"), cancellable = false) { handle ->
-                block { done, all ->
-                    CleanupOpState.purgeProgress.value = PurgeProgress(done, all, label)
-                    handle.update("已处理 $done / $all 张", done.toLong(), all.toLong())
+            return statsCache.hold {
+                tasks.track(label.removePrefix("正在").removeSuffix("…"), cancellable = false) { handle ->
+                    block { done, all ->
+                        CleanupOpState.purgeProgress.value = PurgeProgress(done, all, label)
+                        handle.update("已处理 $done / $all 张", done.toLong(), all.toLong())
+                    }
                 }
             }
         } finally {

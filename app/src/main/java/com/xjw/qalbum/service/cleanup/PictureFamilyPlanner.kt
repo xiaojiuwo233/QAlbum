@@ -41,7 +41,7 @@ internal class PictureFamilyPlanner(private val db: AppDatabase, private val roo
                     val added = ArrayList<String>()
                     // 同一张图的原图 / 预览图 / 缩略图由文件名 CRC 直接推出（QqCachePaths.familyPaths），不依赖聊天数据库
                     for (path in frontier) {
-                        val family = QqCachePaths.familyPaths(path).filter { cacheType(it) != null }
+                        val family = QqCachePaths.familyPaths(path, QqCachePaths.ALIAS_EXTENSIONS).filter { cacheType(it) != null }
                         if (family.size < 2) continue
                         linkedPaths += path
                         for (member in family) {
@@ -126,7 +126,7 @@ internal class PictureFamilyPlanner(private val db: AppDatabase, private val roo
     }
 
     companion object {
-        private val CACHE=Regex("Cache_-?[0-9a-fA-F]+(?:_hd)?(?:\\.jpg)?")
+        private val CACHE=Regex("Cache_-?[0-9a-fA-F]+(?:_hd)?(?:\\.(?:${QqCachePaths.ALIAS_EXTENSIONS.joinToString("|")}))?",RegexOption.IGNORE_CASE)
         private const val MAX_BATCH_PATHS=20_000
     }
 }

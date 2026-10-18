@@ -256,6 +256,15 @@ sealed class CleanupRule(val id: String) {
         private fun olderThan(base: String, days: Int, now: Long): SqlPart =
             if (days <= 0) SqlPart(base) else SqlPart("$base AND i.mtime < ?", listOf(now - days * DAY_MS))
 
+        /**
+         * 页面上的规则统一用今天零点当「现在」：「30 天前」等截止时间在一天之内不变，清理页与规则页的统计按同一个
+         * 条件缓存（见 StatsCache），切换页面不必重算。
+         */
+        fun today(now: Long = System.currentTimeMillis()): Long {
+            val zone = ZoneId.systemDefault()
+            return Instant.ofEpochMilli(now).atZone(zone).toLocalDate().atStartOfDay(zone).toInstant().toEpochMilli()
+        }
+
         /** [months] 个月前那天的零点（本地时区）；按聊天清理的时间筛选与群聊旧图共用 */
         fun monthsBefore(now: Long, months: Int): Long {
             val zone = ZoneId.systemDefault()

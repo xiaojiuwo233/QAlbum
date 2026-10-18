@@ -7,7 +7,7 @@ import com.xjw.qalbum.data.db.dao.CleanupDao
 import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.db.dao.RuleStats
 import com.xjw.qalbum.data.preferences.SettingsRepository
-import com.xjw.qalbum.data.repository.ImageRepository
+import com.xjw.qalbum.data.db.StatsCache
 import com.xjw.qalbum.domain.model.AccessMode
 import com.xjw.qalbum.service.cleanup.ArchiveManager
 import com.xjw.qalbum.service.cleanup.rules.CleanupRule
@@ -24,6 +24,8 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -83,18 +85,19 @@ data class MonthBucket(val year: Int, val month: Int, val count: Int, val bytes:
 class CleanupViewModel(
     private val db: AppDatabase,
     private val runner: CleanupRunner,
-    private val imageRepository: ImageRepository,
     private val archive: ArchiveManager,
     private val settings: SettingsRepository,
+    private val statsCache: StatsCache,
 ) : ViewModel() {
 
     private val ruleDao = db.cleanupRuleDao()
+    private val imageDao = db.imageDao()
 
-    // ---- 概览 ----
+    // ---- 概览（统计都经 StatsCache：切换页面不重算，图片变了才重算） ----
 
     val storage: StateFlow<StorageOverview?> = combine(
-        imageRepository.observeSourceBreakdown(),
-        imageRepository.observeThumbnailTrashSummary(),
+        statsCache.observe("source-breakdown") { imageDao.sourceBreakdown() },
+        statsCache.observe("thumbnail-summary") { imageDao.thumbnailTrashSummary() },
     ) { rows, thumbs ->
         StorageOverview(
             originals = rows.firstOrNull { it.source == "chatraw" },
@@ -107,7 +110,7 @@ class CleanupViewModel(
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     val archivedCount: StateFlow<Int> = archive.pageStatuses
-        .flatMapLatest { imageRepository.observeArchiveCount(it) }
+        .flatMapLatest { statuses -> statsCache.observe("archive-count:$statuses") { imageDao.archiveCount(statuses) } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
 
     /** 聊天来源（按群聊 / 私聊清理）需要 Root 读取 QQ 数据库 */
@@ -132,12 +135,14 @@ class CleanupViewModel(
     private fun cardFlow(rule: CleanupRule): Flow<RuleCard> =
         settings.cleanupRuleParam(rule.id)
             .map { it?.takeIf { value -> rule.option(value) != null } ?: rule.defaultOption }
+            .distinctUntilChanged()
             .flatMapLatest { option ->
-                val part = rule.where(option, System.currentTimeMillis())
-                ruleDao.observeStats(RuleSql.stats(part, rule.scope))
-                    .throttle()
+                val part = rule.where(option, CleanupRule.today())
+                val key = ruleStatsKey(part, rule.scope)
+                statsCache.observe(key) { ruleDao.stats(RuleSql.stats(part, rule.scope)) }
                     .map<RuleStats, RuleCard> { RuleCard(rule, option, it) }
-                    .onStartWith(RuleCard(rule, option, null))
+                    // 还没算过（换了参数）先显示「统计中」；算过的立刻给缓存值
+                    .onStart { if (!statsCache.has(key)) emit(RuleCard(rule, option, null)) }
             }
 
     val running: StateFlow<CleanupRunner.Running?> = runner.running
@@ -152,8 +157,7 @@ class CleanupViewModel(
 
     /** 每个月的整张图张数与大小（新到旧）；按天汇总后在这里合成月份 */
     val months: StateFlow<List<MonthBucket>?> =
-        ruleDao.observeDays(RuleSql.days(SqlPart(CleanupRule.PICTURE), RuleScope.PICTURE))
-            .throttle()
+        statsCache.observe("days:" + SqlPart(CleanupRule.PICTURE)) { ruleDao.days(RuleSql.days(SqlPart(CleanupRule.PICTURE), RuleScope.PICTURE)) }
             .map { rows ->
                 val zone = ZoneId.systemDefault()
                 rows.filter { it.bucketKey > 1000 }.groupBy { row ->
@@ -181,6 +185,13 @@ class CleanupViewModel(
 
     /** 原图备份张数与占用 */
     val backupStats: StateFlow<CleanupDao.QuarantineStatsRow> = db.originalBackupDao().observeStats()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CleanupDao.QuarantineStatsRow(0, 0))
+
+    /** 视频页上次扫到的视频个数与占用（不包含收到的文件时只算聊天视频） */
+    val videoStats: StateFlow<CleanupDao.QuarantineStatsRow> = combine(db.videoDao().observeSources(), settings.videoIncludeFiles) { rows, include ->
+        rows.filter { include || it.source == com.xjw.qalbum.data.db.entity.VideoEntity.SOURCE_CHAT }
+    }
+        .map { rows -> CleanupDao.QuarantineStatsRow(rows.sumOf { it.count }, rows.sumOf { it.bytes }) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CleanupDao.QuarantineStatsRow(0, 0))
 
     /** 回收站批量操作的进度；为 null 表示当前没有在跑 */
@@ -223,8 +234,5 @@ internal fun <T> Flow<T>.throttle(periodMs: Long = 1_500L): Flow<T> = transform 
     delay(periodMs)
 }
 
-/** 先发一个占位值，再接上游 */
-private fun <T> Flow<T>.onStartWith(value: T): Flow<T> = kotlinx.coroutines.flow.flow {
-    emit(value)
-    collect { emit(it) }
-}
+/** 规则命中统计的缓存键：清理页的规则卡片与规则页的标题共用（同一条件只算一次） */
+internal fun ruleStatsKey(part: SqlPart, scope: RuleScope): String = "rule-stats:$scope:$part"

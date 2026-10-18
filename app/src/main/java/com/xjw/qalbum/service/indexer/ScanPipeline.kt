@@ -257,9 +257,10 @@ class ScanPipeline(
         // 4. 行变更 + 本批目录快照原子提交（崩溃安全：未提交目录下次重扫）
         db.withTransaction {
             retireTerminalIds.chunked(DB_VAR_LIMIT).forEach { imageDao.retireTerminalPaths(it) }
-            newEntities.asSequence().filter { it.variantGroup != null && it.path.endsWith(".jpg") }
-                .map { it.path.removeSuffix(".jpg") }.toList().chunked(DB_VAR_LIMIT)
-                .forEach { db.qqSourceDao().registerJpegPaths(it) }
+            // 带后缀的别名（Cache_xxx.png 等）沿用同名缓存文件的来源：插入前登记，来源触发器插入时一起关联
+            newEntities.forEach { entity ->
+                if (entity.variantGroup != null) QqCachePaths.aliasStem(entity.path)?.let { db.qqSourceDao().registerDerivedPath(entity.path, it) }
+            }
             newEntities.chunked(INSERT_CHUNK).forEach { imageDao.insertAll(it) }
             if (changedEntities.isNotEmpty()) imageDao.updateBatchFromScan(changedEntities)
             reviveIds.chunked(DB_VAR_LIMIT).forEach { imageDao.reviveByIds(it) }

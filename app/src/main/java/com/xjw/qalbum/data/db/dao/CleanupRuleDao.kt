@@ -32,6 +32,13 @@ interface CleanupRuleDao {
     @RawQuery(observedEntities = [ImageEntity::class])
     fun observeDays(query: SupportSQLiteQuery): Flow<List<RuleDayRow>>
 
+    /** 分组计数与按天汇总的一次性查询（经 StatsCache 缓存） */
+    @RawQuery
+    suspend fun buckets(query: SupportSQLiteQuery): List<ImageDao.BucketCountRow>
+
+    @RawQuery
+    suspend fun days(query: SupportSQLiteQuery): List<RuleDayRow>
+
     @RawQuery
     suspend fun ids(query: SupportSQLiteQuery): List<Long>
 }

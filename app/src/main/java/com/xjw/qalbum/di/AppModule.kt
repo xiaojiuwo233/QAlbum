@@ -93,7 +93,13 @@ val appModule = module {
             afterScan = { archive.sync(); archive.applyAutoArchive(); com.xjw.qalbum.qq.QqSentPreviewLinker.mergeFamilies(database) },
         )
     }
-    single { ImageSizeBackfill(imageDao = get(), transportFactory = get(), tasks = get(), appScope = get()) }
+    single {
+        val transports = get<ScanTransportFactory>()
+        ImageSizeBackfill(
+            imageDao = get(), backups = get<AppDatabase>().originalBackupDao(), settings = get(),
+            openTransport = transports::create, tasks = get(), appScope = get(),
+        )
+    }
     single { ScanController(settings = get(), pipeline = get(), tasks = get(), sizeBackfill = get()) }
 
     // ---- 清理 ----
@@ -108,13 +114,16 @@ val appModule = module {
             settings = get(),
             fileOpsClient = get(),
             archive = get(),
+            statsCache = get(),
         )
     }
     single { ArchiveManager(db = get(), settings = get(), appScope = get()) }
+    // 清理页、规则页的统计缓存（图片变了才重算，清理执行期间暂停）
+    single { com.xjw.qalbum.data.db.StatsCache(db = get(), scope = get()) }
     single { com.xjw.qalbum.service.indexer.PictureVariantIndexer(db = get(), settings = get()) }
     single { ImageFileManager(context = get(), accessManager = get(), imageDao = get()) }
     single { OriginalCompressor(context = get(), db = get(), accessManager = get(), fileOpsClient = get(), settings = get()) }
-    single { CleanupRunner(quarantine = get(), compressor = get(), tasks = get(), appScope = get()) }
+    single { CleanupRunner(quarantine = get(), compressor = get(), tasks = get(), appScope = get(), statsCache = get()) }
     // 定时清理（每周，设置里选规则）
     single {
         val runner = get<CleanupRunner>()
@@ -126,6 +135,13 @@ val appModule = module {
     // 压缩的统一入口（先对比再替换）与设置页的质量演示
     single { CompressionCoordinator(db = get(), compressor = get(), runner = get(), settings = get(), tasks = get(), appScope = get()) }
     single { CompressDemo(context = get()) }
+    // QQ 缓存页（复刻 QQ 的清理缓存）与视频页
+    single { com.xjw.qalbum.service.cleanup.QqCacheCleaner(accessManager = get(), fileOpsClient = get(), settings = get()) }
+    single {
+        com.xjw.qalbum.service.video.VideoLibrary(
+            context = get(), db = get(), accessManager = get(), fileOpsClient = get(), settings = get(),
+        )
+    }
     single {
         QqSourceRepository(
             context = get(), db = get(), settings = get(), client = get(), quarantine = get(), appScope = get(), tasks = get(),
@@ -153,6 +169,7 @@ val appModule = module {
             imageRepository = get(),
             scanController = get(),
             cleanupDao = get(),
+            backups = get<AppDatabase>().originalBackupDao(),
         )
     }
     viewModel {
@@ -180,9 +197,9 @@ val appModule = module {
         com.xjw.qalbum.ui.cleanup.CleanupViewModel(
             db = get(),
             runner = get(),
-            imageRepository = get(),
             archive = get(),
             settings = get(),
+            statsCache = get(),
         )
     }
     viewModel {
@@ -194,6 +211,7 @@ val appModule = module {
             settings = get(),
             tasks = get(),
             appScope = get(),
+            statsCache = get(),
         )
     }
     viewModel { params ->
@@ -207,7 +225,14 @@ val appModule = module {
             imageFiles = get(),
             settings = get(),
             appScope = get(),
+            statsCache = get(),
         )
+    }
+    viewModel {
+        com.xjw.qalbum.ui.cleanup.QqCacheViewModel(cleaner = get(), tasks = get(), appScope = get())
+    }
+    viewModel {
+        com.xjw.qalbum.ui.video.VideoViewModel(db = get(), library = get(), settings = get(), tasks = get(), appScope = get())
     }
     viewModel { LogViewModel() }
     viewModel { QqSourcesViewModel(repository = get(), settings = get()) }

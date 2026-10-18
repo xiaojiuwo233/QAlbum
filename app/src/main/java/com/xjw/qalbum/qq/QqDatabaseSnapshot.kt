@@ -22,6 +22,9 @@ internal class QqDatabaseSnapshot(val directory: File, val databases: Map<String
     }
 }
 
+/** 判断文件内容变没变用的状态字段（Android 8.0 上另有内容摘要 fingerprint） */
+private val SIGNATURE_FIELDS = listOf("size", "inode", "device", "mtime", "fingerprint")
+
 internal class QqSnapshotReader(context: Context, private val client: FileOpsClient) {
     private val root = File(context.cacheDir, "qq-source-snapshots").apply {
         // 崩溃遗留的加密副本不跨启动保留，也不会进入 Android 备份。
@@ -58,7 +61,9 @@ internal class QqSnapshotReader(context: Context, private val client: FileOpsCli
                         json.keys().forEach { name ->
                             if (name.endsWith("-shm") || json.isNull(name)) return@forEach
                             val state = json.getJSONObject(name)
-                            put(name, QqSnapshotCopier.FileState(state.getLong("size"), state.toString()))
+                            // 不比状态改变时间（ctime）：只改属性不动内容时也会变，QQ 频繁写入时会把一致的副本误判成变了
+                            val signature = SIGNATURE_FIELDS.joinToString("|") { state.opt(it)?.toString().orEmpty() }
+                            put(name, QqSnapshotCopier.FileState(state.getLong("size"), signature))
                         }
                     }
                 }

@@ -71,4 +71,17 @@ interface IFileOps {
     // 返回句柄（> 0）；0 = 不需要（QQ 没在运行或没有 -shm）；-1 = 一直拿不到锁。句柄 10 分钟后自动释放。
     int pinQqDatabase(int userId, String account, String name) = 17;
     void unpinQqDatabase(int handle) = 18;
+
+    // QQ 缓存页：每个路径三个 long —— 状态（1 有、0 没有、-1 没有权限、-2 读取出错）、文件数、字节数。
+    // 目录递归统计（不跟随符号链接），普通文件算一个。
+    long[] pathStats(in String[] paths) = 19;
+    // dir 下占用最大的 limit 项（目录递归统计）：每项 "D|文件数|字节数|名字"（目录）或 "F|1|字节数|名字"。
+    String[] largestChildren(String dir, int limit) = 20;
+    // 清空 QQ 的缓存目录：删掉里面的全部内容、保留目录本身（路径是文件时删掉它）。只接受 QqCacheTargets 登记的目录。
+    // 每个路径三个 long：删掉的文件数、字节数、没删掉的项数；路径不允许时为 -1, 0, 0。
+    long[] clearQqCache(in String[] paths) = 21;
+
+    // 视频页：递归列出 root 下的普通文件（不跟随符号链接，跳过 . 开头的项）。每项 "size|mtimeMs|相对路径"，
+    // 分页与快照约定同 listFiles。
+    String[] walkFiles(String root, int offset, int limit) = 22;
 }

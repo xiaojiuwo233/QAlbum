@@ -46,6 +46,8 @@ import androidx.compose.material.icons.outlined.PhotoSizeSelectLarge
 import androidx.compose.material.icons.outlined.PhotoSizeSelectSmall
 import androidx.compose.material.icons.outlined.SpeakerNotesOff
 import androidx.compose.material.icons.outlined.Storage
+import androidx.compose.material.icons.outlined.FolderDelete
+import androidx.compose.material.icons.outlined.VideoLibrary
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -92,10 +94,11 @@ import com.xjw.qalbum.ui.components.SegmentedGroup
 import com.xjw.qalbum.ui.components.SegmentedNavigationItem
 import com.xjw.qalbum.ui.components.ShapeIcon
 import com.xjw.qalbum.ui.components.WavyProgress
+import com.xjw.qalbum.ui.video.VideoScreen
 import kotlinx.coroutines.delay
 import org.koin.androidx.compose.koinViewModel
 
-/** 清理页里的子页：主页、某条规则的预览、按时间清理、回收站（[parent] 是返回时回到哪一页） */
+/** 清理页里的子页：主页、某条规则的预览、按时间清理、回收站、视频、QQ 缓存（[parent] 是返回时回到哪一页） */
 private data class CleanupPage(val kind: String, val ruleId: String? = null, val parent: String = MAIN) {
     val depth: Int get() = when {
         kind == MAIN -> 0
@@ -108,6 +111,8 @@ private data class CleanupPage(val kind: String, val ruleId: String? = null, val
         const val RULE = "rule"
         const val TIME = "time"
         const val BIN = "bin"
+        const val VIDEO = "video"
+        const val QQ_CACHE = "qqcache"
 
         val Saver = Saver<CleanupPage, String>(
             save = { listOf(it.kind, it.parent, it.ruleId.orEmpty()).joinToString("\u0001") },
@@ -120,7 +125,7 @@ private data class CleanupPage(val kind: String, val ruleId: String? = null, val
 }
 
 /**
- * 清理页根：在「主页 / 规则预览 / 按时间清理 / 回收站」之间内部切换，共享同一个 [CleanupViewModel]。
+ * 清理页根：在「主页 / 规则预览 / 按时间清理 / 回收站 / 视频 / QQ 缓存」之间内部切换，共享同一个 [CleanupViewModel]。
  * 进入子页时通过 [onSubPageChange] 通知外层隐藏底部导航栏。
  */
 @Composable
@@ -185,6 +190,14 @@ fun CleanupScreen(
                 contentPadding = WindowInsets.navigationBars.asPaddingValues(),
                 onBack = back,
             )
+            CleanupPage.VIDEO -> VideoScreen(
+                contentPadding = WindowInsets.navigationBars.asPaddingValues(),
+                onBack = back,
+            )
+            CleanupPage.QQ_CACHE -> QqCacheScreen(
+                contentPadding = WindowInsets.navigationBars.asPaddingValues(),
+                onBack = back,
+            )
             else -> CleanupMainScreen(
                 contentPadding = contentPadding,
                 viewModel = viewModel,
@@ -193,6 +206,8 @@ fun CleanupScreen(
                 onOpenRule = { rule -> page = CleanupPage(CleanupPage.RULE, rule.id) },
                 onOpenTime = { page = CleanupPage(CleanupPage.TIME) },
                 onOpenRecycleBin = { page = CleanupPage(CleanupPage.BIN) },
+                onOpenVideos = { page = CleanupPage(CleanupPage.VIDEO) },
+                onOpenQqCache = { page = CleanupPage(CleanupPage.QQ_CACHE) },
                 onOpenSources = onOpenSources,
             )
         }
@@ -213,6 +228,8 @@ private fun CleanupMainScreen(
     onOpenRule: (CleanupRule) -> Unit,
     onOpenTime: () -> Unit,
     onOpenRecycleBin: () -> Unit,
+    onOpenVideos: () -> Unit,
+    onOpenQqCache: () -> Unit,
     onOpenSources: () -> Unit,
 ) {
     val storage by viewModel.storage.collectAsState()
@@ -223,6 +240,7 @@ private fun CleanupMainScreen(
     val running by viewModel.running.collectAsState()
     val quarantineStats by viewModel.quarantineStats.collectAsState()
     val backupStats by viewModel.backupStats.collectAsState()
+    val videoStats by viewModel.videoStats.collectAsState()
     val rootMode by viewModel.rootMode.collectAsState()
     val quality by viewModel.compressQuality.collectAsState()
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior(barState)
@@ -307,6 +325,15 @@ private fun CleanupMainScreen(
                             onClick = onOpenTime,
                         )
                     }
+                    item("videos") { position ->
+                        SegmentedNavigationItem(
+                            position = position,
+                            icon = Icons.Outlined.VideoLibrary,
+                            title = "视频",
+                            subtitle = if (videoStats.count > 0) "${formatCountExact(videoStats.count)} 个 · ${formatBytes(videoStats.bytes)}" else "聊天视频与收到的视频文件",
+                            onClick = onOpenVideos,
+                        )
+                    }
                     item("bin") { position ->
                         val backups = if (backupStats.count > 0) " · 原图备份 ${formatCountExact(backupStats.count)} 张" else ""
                         SegmentedNavigationItem(
@@ -315,6 +342,15 @@ private fun CleanupMainScreen(
                             title = "回收站",
                             subtitle = "${formatCountExact(quarantineStats.count)} 张 · ${formatBytes(quarantineStats.bytes)}$backups",
                             onClick = onOpenRecycleBin,
+                        )
+                    }
+                    item("qqcache") { position ->
+                        SegmentedNavigationItem(
+                            position = position,
+                            icon = Icons.Outlined.FolderDelete,
+                            title = "QQ 缓存",
+                            subtitle = "QQ「清理缓存」会清空的目录",
+                            onClick = onOpenQqCache,
                         )
                     }
                 }

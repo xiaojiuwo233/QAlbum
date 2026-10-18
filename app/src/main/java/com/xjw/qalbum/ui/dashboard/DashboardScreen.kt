@@ -83,6 +83,7 @@ import com.xjw.qalbum.domain.model.ScanProgress
 import com.xjw.qalbum.ui.anim.StaggeredEntrance
 import com.xjw.qalbum.ui.common.formatBytes
 import com.xjw.qalbum.ui.common.formatCount
+import com.xjw.qalbum.ui.common.formatCountExact
 import com.xjw.qalbum.ui.components.SegmentPosition
 import com.xjw.qalbum.ui.components.SegmentedNavigationItem
 import com.xjw.qalbum.ui.components.ShapeIcon
@@ -214,11 +215,11 @@ private fun FirstRunGuideCard(onOpenAccessSettings: () -> Unit) {
 
 @Composable
 private fun CleanedStatsLabel(
-    stats: ImageDao.CleanedStatsRow,
-    todayStats: ImageDao.CleanedStatsRow,
+    stats: CleanedStats,
+    todayStats: CleanedStats,
 ) {
     // 从未清理过时不显示；清理过后单击在字节 / 张数间切换，长按切到「今日」维度
-    if (stats.count <= 0) return
+    if (stats.isEmpty) return
     var todayMode by remember { mutableStateOf(false) }
     var showCount by remember { mutableStateOf(false) }
     val haptic = LocalHapticFeedback.current
@@ -258,11 +259,22 @@ private fun CleanedStatsLabel(
             val row = if (today) todayStats else stats
             val prefix = if (today) "今日 " else "已清理 "
             Text(
-                text = if (isCount) "$prefix${formatCount(row.count)} 张" else "$prefix${formatBytes(row.bytes)}",
+                text = if (isCount) cleanedCountText(row, today) else "$prefix${formatBytes(row.bytes)}",
                 style = MaterialTheme.typography.labelLarge,
                 color = content,
             )
         }
+    }
+}
+
+/** 张数：删除的与压缩的分开说（压缩的图还在） */
+internal fun cleanedCountText(row: CleanedStats, today: Boolean): String {
+    val deleted = "${formatCount(row.deleted.count)} 张"
+    val compressed = "压缩 ${formatCount(row.compressed.count)} 张"
+    return when {
+        row.compressed.count <= 0 -> if (today) "今日 $deleted" else "已清理 $deleted"
+        row.deleted.count <= 0 -> if (today) "今日$compressed" else "已$compressed"
+        else -> (if (today) "今日 " else "已清理 ") + "$deleted · $compressed"
     }
 }
 
@@ -279,7 +291,7 @@ private fun MetricsGrid(state: DashboardUiState) {
                 containerColor = MaterialTheme.colorScheme.primaryContainer,
                 contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
                 modifier = Modifier.weight(1f),
-                expandedValue = "%,d".format(state.imageCount),
+                expandedValue = formatCountExact(state.imageCount),
             )
             MetricCard(
                 icon = Icons.Outlined.Storage,
@@ -300,6 +312,7 @@ private fun MetricsGrid(state: DashboardUiState) {
                 containerColor = MaterialTheme.colorScheme.secondaryContainer,
                 contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
                 modifier = Modifier.weight(1f),
+                expandedValue = formatCountExact(state.thumbnailTrashCount),
             )
             MetricCard(
                 icon = Icons.Outlined.Inventory2,
@@ -309,6 +322,7 @@ private fun MetricsGrid(state: DashboardUiState) {
                 containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
                 contentColor = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.weight(1f),
+                expandedValue = formatCountExact(state.quarantineCount),
             )
         }
     }

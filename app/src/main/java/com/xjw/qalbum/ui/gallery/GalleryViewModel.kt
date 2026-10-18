@@ -311,21 +311,34 @@ internal fun Flow<PagingData<GalleryTimelineItem.Photo>>.withDayHeaders(
         }
     }
 
-/** 按 [sizeOf] 的大小区间插入分组标题（与 [sizeBucketId] 同一套分组） */
+/** 按 [sizeOf] 的大小区间插入分组标题（分组见 [buckets]，默认与 [sizeBucketId] 同一套） */
 internal fun Flow<PagingData<GalleryTimelineItem.Photo>>.withSizeBuckets(
     bucketCounts: Flow<Map<Long, Int>?>,
+    buckets: SizeBucketing = ImageSizeBuckets,
     sizeOf: (GalleryTimelineItem.Photo) -> Long,
 ): Flow<PagingData<GalleryTimelineItem>> =
     flowMap { pagingData: PagingData<GalleryTimelineItem.Photo> ->
         val counts = HeaderCounts(bucketCounts)
         pagingData.insertSeparators<GalleryTimelineItem.Photo, GalleryTimelineItem> { before, after ->
             if (after == null) return@insertSeparators null
-            val size = sizeOf(after)
-            val key = sizeBucketId(size)
-            if (before != null && sizeBucketId(sizeOf(before)) == key) return@insertSeparators null
-            GalleryTimelineItem.Header(key = "s-$key", label = headerLabel(sizeBucketLabel(size), counts.get()[key]), section = sizeBucketSection(key))
+            val key = buckets.bucketOf(sizeOf(after))
+            if (before != null && buckets.bucketOf(sizeOf(before)) == key) return@insertSeparators null
+            GalleryTimelineItem.Header(key = "s-$key", label = headerLabel(buckets.labelOf(key), counts.get()[key]), section = buckets.sectionOf(key))
         }
     }
+
+/** 按大小分组的规则：图片用 [ImageSizeBuckets]；视频大多在 10 MB 以上，另有一套（见视频页） */
+internal interface SizeBucketing {
+    fun bucketOf(size: Long): Long
+    fun labelOf(bucket: Long): String
+    fun sectionOf(bucket: Long): TimelineSection.Size
+}
+
+internal object ImageSizeBuckets : SizeBucketing {
+    override fun bucketOf(size: Long): Long = sizeBucketId(size)
+    override fun labelOf(bucket: Long): String = sizeBucketLabel(sizeBucketSection(bucket).low)
+    override fun sectionOf(bucket: Long): TimelineSection.Size = sizeBucketSection(bucket)
+}
 
 /**
  * 一代分页数据的分组计数：插第一个标题时才取。批量操作期间网格关着闸门（见 RefreshGate），新一代要等闸门打开、
@@ -406,16 +419,16 @@ internal fun dateDirectory(counts: Map<Long, Int>, ascending: Boolean): ScrollDi
 }
 
 /** 快速滚动条的大小目录：按显示顺序（默认大到小），MB 级的组和「1 MB 以下」作为刻度 */
-internal fun sizeDirectory(counts: Map<Long, Int>, ascending: Boolean = false): ScrollDirectory {
+internal fun sizeDirectory(counts: Map<Long, Int>, ascending: Boolean = false, buckets: SizeBucketing = ImageSizeBuckets): ScrollDirectory {
     var belowMegabyte = false
-    val entries = counts.keys.sorted().let { if (ascending) it else it.reversed() }.map { bucket ->
-        val section = sizeBucketSection(bucket)
+    val entries = counts.keys.sortedBy { buckets.sectionOf(it).low }.let { if (ascending) it else it.reversed() }.map { bucket ->
+        val section = buckets.sectionOf(bucket)
         val mark = when {
-            section.low >= BYTES_MB -> sizeBucketLabel(section.low)
+            section.low >= BYTES_MB -> buckets.labelOf(bucket)
             !belowMegabyte -> "1 MB 以下".also { belowMegabyte = true }
             else -> null
         }
-        ScrollDirectory.Entry(counts.getValue(bucket), sizeBucketLabel(section.low), mark, key = "s-$bucket")
+        ScrollDirectory.Entry(counts.getValue(bucket), buckets.labelOf(bucket), mark, key = "s-$bucket")
     }
     return ScrollDirectory(entries)
 }

@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.xjw.qalbum.data.db.dao.CleanupDao
 import com.xjw.qalbum.data.db.dao.ImageDao
+import com.xjw.qalbum.data.db.dao.OriginalBackupDao
 import com.xjw.qalbum.data.repository.ImageRepository
 import com.xjw.qalbum.domain.model.ScanProgress
 import com.xjw.qalbum.service.indexer.ScanController
@@ -19,6 +20,7 @@ class DashboardViewModel(
     private val imageRepository: ImageRepository,
     private val scanController: ScanController,
     private val cleanupDao: CleanupDao,
+    private val backups: OriginalBackupDao,
 ) : ViewModel() {
 
     private data class CoreStats(val imageCount: Int, val totalSize: Long)
@@ -49,11 +51,11 @@ class DashboardViewModel(
     )
 
     /** 「已清理」累计（独立 stateIn） */
-    val cleanedStats: StateFlow<ImageDao.CleanedStatsRow> =
-        imageRepository.observeCleanedStats().stateIn(
+    val cleanedStats: StateFlow<CleanedStats> =
+        combine(imageRepository.observeCleanedStats(), backups.observeFreedStats(), ::CleanedStats).stateIn(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(5_000),
-            initialValue = ImageDao.CleanedStatsRow(0, 0L),
+            initialValue = CleanedStats(),
         )
 
     /**
@@ -61,12 +63,15 @@ class DashboardViewModel(
      * 用 flow{} 包一层，使每次重新订阅（WhileSubscribed 超时后重启）都重算当日 0 点起点，
      * 从而跨零点回到页面也能刷新到新的一天，无需常驻定时器。
      */
-    val todayCleanedStats: StateFlow<ImageDao.CleanedStatsRow> =
-        flow { emitAll(imageRepository.observeCleanedStatsSince(startOfTodayMillis())) }
+    val todayCleanedStats: StateFlow<CleanedStats> =
+        flow {
+            val since = startOfTodayMillis()
+            emitAll(combine(imageRepository.observeCleanedStatsSince(since), backups.observeFreedStatsSince(since), ::CleanedStats))
+        }
             .stateIn(
                 scope = viewModelScope,
                 started = SharingStarted.WhileSubscribed(5_000),
-                initialValue = ImageDao.CleanedStatsRow(0, 0L),
+                initialValue = CleanedStats(),
             )
 
     val scanRunning: StateFlow<Boolean> = scanController.running
@@ -84,6 +89,18 @@ class DashboardViewModel(
             set(Calendar.SECOND, 0)
             set(Calendar.MILLISECOND, 0)
         }.timeInMillis
+}
+
+/**
+ * 顶栏「已清理」：永久删除的图片，加上压缩省下的空间。压缩保留了原图时，原图备份删掉（手动或到期）才算省下，
+ * 和删除的图片离开回收站才算一样。
+ */
+data class CleanedStats(
+    val deleted: ImageDao.CleanedStatsRow = ImageDao.CleanedStatsRow(0, 0L),
+    val compressed: ImageDao.CleanedStatsRow = ImageDao.CleanedStatsRow(0, 0L),
+) {
+    val bytes: Long get() = deleted.bytes + compressed.bytes
+    val isEmpty: Boolean get() = deleted.count <= 0 && compressed.count <= 0
 }
 
 data class DashboardUiState(

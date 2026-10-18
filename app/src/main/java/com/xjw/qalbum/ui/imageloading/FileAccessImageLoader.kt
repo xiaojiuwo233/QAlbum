@@ -1,15 +1,18 @@
 package com.xjw.qalbum.ui.imageloading
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import coil3.ImageLoader
 import coil3.PlatformContext
+import coil3.asImage
 import coil3.decode.DataSource
 import coil3.decode.ImageSource
 import coil3.disk.DiskCache
 import coil3.fetch.FetchResult
 import coil3.fetch.Fetcher
+import coil3.fetch.ImageFetchResult
 import coil3.fetch.SourceFetchResult
 import coil3.gif.AnimatedImageDecoder
 import coil3.gif.GifDecoder
@@ -26,12 +29,14 @@ import com.xjw.qalbum.domain.model.AccessMode
 import com.xjw.qalbum.fileops.BoundFileOps
 import com.xjw.qalbum.fileops.FileOpsClient
 import com.xjw.qalbum.qq.QqCachePaths
+import com.xjw.qalbum.service.video.VideoProbe
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -65,6 +70,9 @@ data class ImageEntityModel(val entity: ImageEntity, val tile: Boolean = false)
 
 /** 直接传一个绝对路径（用于详情页的原图加载等场景） */
 data class FileAccessPath(val path: String)
+
+/** 视频封面：取一帧缩小后存进磁盘缓存，[size] 与 [mtime] 变了（文件被换掉）就重新取 */
+data class VideoFrameModel(val path: String, val size: Long, val mtime: Long)
 
 /**
  * 特权 fd 快路径：进程级共享一份 [IFileOps] AIDL 绑定（引用计数由 [FileOpsClient] 管理，
@@ -116,6 +124,20 @@ private class FdFastPath(
                 Timber.w(t, "图片 fd 快路径失活，降级 provider 读")
             }
             null
+        }
+    }
+
+    /**
+     * 等快路径就绪（最多 [timeoutMs]）：视频取帧只能读 fd（要能随机读），不像图片可以降级成 provider 流式读。
+     */
+    suspend fun awaitReady(timeoutMs: Long): Boolean {
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        while (true) {
+            val mode = accessManager.current().getAccessMode()
+            if (bound.get()?.mode == mode) return true
+            maybeBindAsync(mode)
+            if (SystemClock.elapsedRealtime() >= deadline) return false
+            delay(100)
         }
     }
 
@@ -372,6 +394,80 @@ private class FilePathFetcher(
     }
 }
 
+/**
+ * 视频封面：先查磁盘缓存，没有就经 fd 快路径打开视频取一帧（[VideoProbe.frame]），存成 JPEG 放进磁盘缓存。
+ * App 自己读得到的文件直接打开。
+ */
+private class VideoFrameFetcher(
+    private val data: VideoFrameModel,
+    private val options: Options,
+    private val fastPath: FdFastPath,
+    private val diskCache: DiskCache?,
+) : Fetcher {
+    override suspend fun fetch(): FetchResult {
+        val key = "qalbum-video://${data.path}?size=${data.size}&mt=${data.mtime}"
+        val cache = diskCache
+        if (cache != null && options.diskCachePolicy.readEnabled) {
+            runCatching { cache.openSnapshot(key) }.getOrNull()?.let { snapshot ->
+                return SourceFetchResult(
+                    source = ImageSource(file = snapshot.data, fileSystem = cache.fileSystem, diskCacheKey = key, closeable = snapshot),
+                    mimeType = "image/jpeg",
+                    dataSource = DataSource.DISK,
+                )
+            }
+        }
+        val own = File(data.path)
+        val pfd = if (own.canRead()) {
+            ParcelFileDescriptor.open(own, ParcelFileDescriptor.MODE_READ_ONLY)
+        } else {
+            if (!fastPath.awaitReady(BIND_WAIT_MS)) throw IOException("文件访问未就绪")
+            fastPath.openRead(data.path) ?: throw IOException("视频打不开：${data.path}")
+        }
+        // 固定按 FRAME_PX 取帧存缓存：格子与看视频时的封面共用一份，再由解码按各自的大小缩
+        val frame = pfd.use { VideoProbe.frame(it.fileDescriptor, FRAME_PX) } ?: throw IOException("取不到视频画面：${data.path}")
+        if (cache != null && options.diskCachePolicy.writeEnabled) {
+            val editor = runCatching { cache.openEditor(key) }.getOrNull()
+            if (editor != null) {
+                try {
+                    cache.fileSystem.write(editor.data) { frame.compress(Bitmap.CompressFormat.JPEG, 85, outputStream()) }
+                    val snapshot = editor.commitAndOpenSnapshot()
+                    if (snapshot != null) {
+                        frame.recycle()
+                        return SourceFetchResult(
+                            source = ImageSource(file = snapshot.data, fileSystem = cache.fileSystem, diskCacheKey = key, closeable = snapshot),
+                            mimeType = "image/jpeg",
+                            dataSource = DataSource.DISK,
+                        )
+                    }
+                } catch (ce: CancellationException) {
+                    runCatching { editor.abort() }
+                    throw ce
+                } catch (t: Throwable) {
+                    runCatching { editor.abort() }
+                    Timber.w(t, "视频封面缓存写入失败")
+                }
+            }
+        }
+        return ImageFetchResult(image = frame.asImage(), isSampled = true, dataSource = DataSource.DISK)
+    }
+
+    class Factory(private val fastPath: FdFastPath) : Fetcher.Factory<VideoFrameModel> {
+        override fun create(data: VideoFrameModel, options: Options, imageLoader: ImageLoader): Fetcher =
+            VideoFrameFetcher(data, options, fastPath, imageLoader.diskCache)
+    }
+
+    private companion object {
+        /** 封面长边上限：格子最大也就三四百像素 */
+        const val FRAME_PX = 480
+        const val BIND_WAIT_MS = 5_000L
+    }
+}
+
+private object VideoFrameKeyer : Keyer<VideoFrameModel> {
+    override fun key(data: VideoFrameModel, options: Options): String =
+        "qalbum-video://${data.path}?size=${data.size}&mt=${data.mtime}&vp=${options.size}"
+}
+
 /** 磁盘缓存 key：同一文件只存一份源字节，size+mtime 版本化（文件被替换后自动失效） */
 private fun entityDiskKey(entity: ImageEntity): String =
     "qalbum://${entity.path}?size=${entity.size}&mt=${entity.mtime}"
@@ -385,8 +481,8 @@ internal fun smallerVersions(entity: ImageEntity, size: Size): List<String> {
     val family = QqCachePaths.familyPaths(entity.path)
     if (family.size < 2) return emptyList()
     val thumbs = family.filter { "/chatthumb/" in it }
-    val hd = thumbs.filter { it.removeSuffix(".jpg").endsWith("_hd") }
-    val plain = thumbs.filterNot { it.removeSuffix(".jpg").endsWith("_hd") }
+    val hd = thumbs.filter { QqCachePaths.stripAlias(it).endsWith("_hd") }
+    val plain = thumbs.filterNot { QqCachePaths.stripAlias(it).endsWith("_hd") }
     val requested = listOf(size.width, size.height).mapNotNull { (it as? Dimension.Pixels)?.px }.maxOrNull() ?: Int.MAX_VALUE
     val tiny = if (requested <= SMALL_THUMB_PX) plain else emptyList()
     val preview = if (entity.sourceType == "chatraw") family.filter { "/chatimg/" in it } else emptyList()
@@ -444,6 +540,8 @@ fun buildImageLoader(
             add(FilePathKeyer)
             add(ImageEntityFetcher.Factory(accessManager, fastPath))
             add(FilePathFetcher.Factory(accessManager, fastPath))
+            add(VideoFrameKeyer)
+            add(VideoFrameFetcher.Factory(fastPath))
         }
         .build()
 }

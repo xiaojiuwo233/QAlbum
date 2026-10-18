@@ -381,8 +381,9 @@ private fun savingText(prepared: Prepared): String =
 
 private fun sizeLine(prepared: Prepared): String {
     val image = prepared.image
-    val resized = image.width > 0 && (image.width != prepared.width || image.height != prepared.height)
-    val dims = if (resized) "${image.width}×${image.height} → ${prepared.width}×${prepared.height}" else "${prepared.width}×${prepared.height}"
+    val resized = prepared.originalWidth != prepared.width || prepared.originalHeight != prepared.height
+    val dims = if (resized) "${prepared.originalWidth}×${prepared.originalHeight} → ${prepared.width}×${prepared.height}"
+    else "${prepared.width}×${prepared.height}"
     val format = if (prepared.fromPng) " · PNG → JPEG" else ""
     return "${formatBytes(image.size)} → ${formatBytes(prepared.size)} · $dims$format"
 }

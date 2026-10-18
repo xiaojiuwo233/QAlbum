@@ -136,7 +136,7 @@ internal class LinkedPictureOperations(
     }
 
     private fun thumbnailRank(image:ImageEntity):Int = when {
-        image.sourceType=="chatthumb" && image.path.removeSuffix(".jpg").endsWith("_hd") -> 0
+        image.sourceType=="chatthumb" && QqCachePaths.stripAlias(image.path).endsWith("_hd") -> 0
         image.sourceType=="chatimg" -> 1
         image.sourceType=="chatthumb" -> 2
         else -> 3
@@ -389,8 +389,9 @@ internal class LinkedPictureOperations(
                 mime=types.getValue(asset.path).mime,width=0,height=0,isAnimated=types.getValue(asset.path).isAnimated,
                 status=if(asset.sourceType=="chatthumb")"thumbnail_trash" else "active")
         }
-        drafts.filter { it.variantGroup!=null && it.path.endsWith(".jpg") }.map { it.path.removeSuffix(".jpg") }
-            .chunked(200).forEach { db.qqSourceDao().registerJpegPaths(it) }
+        drafts.forEach { draft ->
+            if(draft.variantGroup!=null)QqCachePaths.aliasStem(draft.path)?.let { db.qqSourceDao().registerDerivedPath(draft.path,it) }
+        }
         for(page in drafts.chunked(200))images.insertAll(page)
         val rows=usable.flatMap { group->group.assets.map { it.path } }.chunked(200).flatMap { images.getAnyByPaths(it) }.associateBy { it.path }
         val included=usable.mapTo(HashSet()) { it.key }

@@ -10,6 +10,7 @@ import com.xjw.qalbum.data.db.dao.CleanupDao
 import com.xjw.qalbum.data.db.dao.CleanupRuleDao
 import com.xjw.qalbum.data.db.dao.OriginalBackupDao
 import com.xjw.qalbum.data.db.dao.QqSourceDao
+import com.xjw.qalbum.data.db.dao.VideoDao
 import com.xjw.qalbum.data.db.entity.QqAutoArchiveEntity
 import com.xjw.qalbum.data.db.entity.QqSourceAccountEntity
 import com.xjw.qalbum.data.db.entity.QqOriginEntity
@@ -27,6 +28,7 @@ import com.xjw.qalbum.data.db.entity.DirSnapshotEntity
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.db.entity.OriginalBackupEntity
 import com.xjw.qalbum.data.db.entity.QuarantineEntity
+import com.xjw.qalbum.data.db.entity.VideoEntity
 
 /**
  * QAlbum 主数据库
@@ -53,6 +55,7 @@ import com.xjw.qalbum.data.db.entity.QuarantineEntity
         QqAutoArchiveEntity::class,
         QqReadMarkEntity::class,
         QqPreviewCheckEntity::class,
+        VideoEntity::class,
     ],
     version = AppDatabase.VERSION,
     exportSchema = true,
@@ -65,6 +68,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun cleanupRuleDao(): CleanupRuleDao
     abstract fun dirSnapshotDao(): DirSnapshotDao
     abstract fun qqSourceDao(): QqSourceDao
+    abstract fun videoDao(): VideoDao
 
     companion object {
 
@@ -264,6 +268,27 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /** v24 → v25：视频页的视频表（打开视频页时扫描入库，与图片表互不相干） */
+        val MIGRATION_24_25 = object : Migration(24, 25) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `videos` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `path` TEXT NOT NULL, " +
+                        "`source` TEXT NOT NULL, `size` INTEGER NOT NULL, `mtime` INTEGER NOT NULL, `date_bucket` INTEGER NOT NULL, " +
+                        "`duration_ms` INTEGER NOT NULL, `width` INTEGER NOT NULL, `height` INTEGER NOT NULL, `seen_at` INTEGER NOT NULL)",
+                )
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_videos_path` ON `videos` (`path`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_videos_source_mtime` ON `videos` (`source`, `mtime`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_videos_size` ON `videos` (`size`)")
+            }
+        }
+
+        /** v25 → v26：压缩记录记下省下的空间何时腾出来（首页「今日已清理」算压缩省下的） */
+        val MIGRATION_25_26 = object : Migration(25, 26) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE original_backups ADD COLUMN freed_at INTEGER")
+            }
+        }
+
         private val LEGACY_TABLES_V20 = listOf(
             "ocr_fts", "ocr_text", "image_tags", "tags", "ai_analysis", "image_embeddings",
             "dedup_exclusions", "cleanup_candidates", "cleanup_batches",
@@ -298,7 +323,7 @@ abstract class AppDatabase : RoomDatabase() {
         const val DB_NAME = "qalbum.db"
 
         /** 当前数据库版本（启动时据此判断要不要显示升级进度） */
-        const val VERSION = 24
+        const val VERSION = 26
 
         /** v1 → v2：Phase 3 增加 Room FTS4 OCR 索引。 */
         val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -838,6 +863,7 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14,
             MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20,
             MIGRATION_20_21, MIGRATION_21_22, MIGRATION_22_23, MIGRATION_23_24,
+            MIGRATION_24_25, MIGRATION_25_26,
         )
 
         /** 每个迁移开始时报告升级到哪一版（升级弹窗里显示），具体步骤由迁移自己细报 */

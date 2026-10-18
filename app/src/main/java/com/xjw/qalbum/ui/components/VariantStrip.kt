@@ -35,6 +35,7 @@ import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import coil3.request.crossfade
 import com.xjw.qalbum.data.db.entity.ImageEntity
+import com.xjw.qalbum.qq.QqCachePaths
 import com.xjw.qalbum.ui.common.formatBytes
 import com.xjw.qalbum.ui.common.sourceLabel
 import com.xjw.qalbum.ui.imageloading.ImageEntityModel
@@ -117,6 +118,6 @@ private fun VariantThumb(image: ImageEntity, model: Any, selected: Boolean, onCl
 internal fun variantLabel(image: ImageEntity): String = when (image.sourceType) {
     "chatraw" -> "原图"
     "chatimg" -> "预览图"
-    "chatthumb" -> if (image.filename.removeSuffix(".jpg").endsWith("_hd")) "高清缩略图" else "缩略图"
+    "chatthumb" -> if (QqCachePaths.stripAlias(image.filename).endsWith("_hd")) "高清缩略图" else "缩略图"
     else -> sourceLabel(image.sourceType)
 }

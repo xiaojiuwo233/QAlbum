@@ -217,6 +217,20 @@ class SettingsRepository(
         ds.edit { it[Keys.RECYCLE_BIN_SORT] = sort.name }
     }
 
+    /** 视频页的排序 */
+    val videoSort: Flow<SourceSort> = prefsData.map { SourceSort.fromName(it[Keys.VIDEO_SORT]) }
+
+    suspend fun setVideoSort(sort: SourceSort) {
+        ds.edit { it[Keys.VIDEO_SORT] = sort.name }
+    }
+
+    /** 视频页包含收到的文件（QQfile_recv，多是手动下载的群文件）；默认只看聊天视频 */
+    val videoIncludeFiles: Flow<Boolean> = prefsData.map { it[Keys.VIDEO_INCLUDE_FILES] ?: false }
+
+    suspend fun setVideoIncludeFiles(include: Boolean) {
+        ds.edit { it[Keys.VIDEO_INCLUDE_FILES] = include }
+    }
+
     /** QQ 来源分类列表的排序 */
     val qqSourceFacetOrder: Flow<SourceFacetOrder> = prefsData.map { SourceFacetOrder.fromName(it[Keys.QQ_SOURCE_FACET_ORDER]) }
 
@@ -259,6 +273,13 @@ class SettingsRepository(
 
     suspend fun setVariantIndexVersion(version: Int) {
         ds.edit { it[Keys.VARIANT_INDEX_VERSION] = version }
+    }
+
+    /** 已完成的图片尺寸核对版本（见 ImageSizeBackfill） */
+    val imageSizeCheckVersion: Flow<Int> = prefsData.map { it[Keys.IMAGE_SIZE_CHECK_VERSION] ?: 0 }
+
+    suspend fun setImageSizeCheckVersion(version: Int) {
+        ds.edit { it[Keys.IMAGE_SIZE_CHECK_VERSION] = version }
     }
 
     // ---- 主题动态取色 ----
@@ -364,9 +385,12 @@ class SettingsRepository(
         val FAST_SCROLL = booleanPreferencesKey("fast_scroll")
         val ARCHIVE_VISIBLE = booleanPreferencesKey("archive_visible")
         val VARIANT_INDEX_VERSION = intPreferencesKey("variant_index_version")
+        val IMAGE_SIZE_CHECK_VERSION = intPreferencesKey("image_size_check_version")
         val QQ_SOURCE_SORT = stringPreferencesKey("qq_source_sort")
         val CLEANUP_RULE_SORT = stringPreferencesKey("cleanup_rule_sort")
         val RECYCLE_BIN_SORT = stringPreferencesKey("recycle_bin_sort")
+        val VIDEO_SORT = stringPreferencesKey("video_sort")
+        val VIDEO_INCLUDE_FILES = booleanPreferencesKey("video_include_files")
         val SCHEDULED_CLEANUP = stringSetPreferencesKey("scheduled_cleanup_rules")
         val SCHEDULED_CLEANUP_LAST = stringPreferencesKey("scheduled_cleanup_last")
         val QQ_SOURCE_FACET_ORDER = stringPreferencesKey("qq_source_facet_order")

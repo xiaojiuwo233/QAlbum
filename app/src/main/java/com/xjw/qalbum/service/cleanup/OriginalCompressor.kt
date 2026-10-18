@@ -81,7 +81,10 @@ class OriginalCompressor(
         )
     }
 
-    /** 压缩出来、还没替换原图的结果（对比用）；[file] 在缓存目录，由 [apply] / [discard] 删除 */
+    /**
+     * 压缩出来、还没替换原图的结果（对比用）；[file] 在缓存目录，由 [apply] / [discard] 删除。
+     * [originalWidth] / [originalHeight] 是解码时看到的原图尺寸（按显示方向）：库里的宽高可能是旧版分析写入的缩小尺寸。
+     */
     data class Prepared(
         val image: ImageEntity,
         val file: File,
@@ -89,6 +92,8 @@ class OriginalCompressor(
         val width: Int,
         val height: Int,
         val quality: Int,
+        val originalWidth: Int,
+        val originalHeight: Int,
     ) {
         val savedBytes: Long get() = image.size - size
 
@@ -251,7 +256,12 @@ class OriginalCompressor(
         if (encoded.bytes.size >= image.size) return Preview.Unavailable(image, "压缩后没有变小", worthless = true)
         val file = File(File(workDir, "preview").apply { mkdirs() }, "${image.id}-q$quality-${System.nanoTime()}.jpg")
         file.writeBytes(encoded.bytes)
-        return Preview.Ready(Prepared(image, file, encoded.bytes.size.toLong(), encoded.width, encoded.height, quality))
+        return Preview.Ready(
+            Prepared(
+                image, file, encoded.bytes.size.toLong(), encoded.width, encoded.height, quality,
+                originalWidth = encoded.sourceWidth, originalHeight = encoded.sourceHeight,
+            ),
+        )
     }
 
     /**
@@ -268,14 +278,17 @@ class OriginalCompressor(
         // 旧记录（例如压缩后 QQ 又重新下载了原图）作废
         backups.getByImageId(image.id)?.let { stale -> discard(bound, stale) }
         val extension = if (image.mime == "image/png") "png" else "jpg"
-        val backupPath = if (keep) File(backupDir, "${image.id}_${System.currentTimeMillis()}.$extension").path else null
+        val now = System.currentTimeMillis()
+        val backupPath = if (keep) File(backupDir, "${image.id}_$now.$extension").path else null
         val record = OriginalBackupEntity(
             imageId = image.id, path = image.path, backupPath = backupPath,
             originalSize = image.size, originalMtime = image.mtime,
-            originalWidth = image.width, originalHeight = image.height,
+            originalWidth = item.originalWidth, originalHeight = item.originalHeight,
             compressedSize = item.size, compressedWidth = item.width, compressedHeight = item.height,
-            createdAt = System.currentTimeMillis(), expiresAt = expiresAt, state = STATE_PENDING, quality = item.quality,
+            createdAt = now, expiresAt = expiresAt, state = STATE_PENDING, quality = item.quality,
             originalMime = image.mime,
+            // 不保留原图时替换完就腾出来了；保留的等备份删掉
+            freedAt = if (backupPath == null) now else null,
         )
         val recordId = backups.insert(record)
         return try {
@@ -412,7 +425,7 @@ class OriginalCompressor(
         val done = withFiles.filterIndexed { index, record ->
             gone.getOrElse(index) { false } || File(record.backupPath!!).delete() || !File(record.backupPath).exists()
         }.map { it.id }
-        if (done.isNotEmpty()) backups.clearBackupPaths(done)
+        if (done.isNotEmpty()) backups.clearBackupPaths(done, System.currentTimeMillis())
         return done.size
     }
 
@@ -519,7 +532,8 @@ class OriginalCompressor(
         }
     }
 
-    internal class Encoded(val bytes: ByteArray, val width: Int, val height: Int)
+    /** 压缩结果；[sourceWidth] / [sourceHeight] 是原图按显示方向的尺寸 */
+    internal class Encoded(val bytes: ByteArray, val width: Int, val height: Int, val sourceWidth: Int, val sourceHeight: Int)
 
     /** 压不了的原因；直接压缩时记为不划算，规则不再列出 */
     internal enum class Problem(val text: String) {
@@ -582,7 +596,12 @@ class OriginalCompressor(
                 onProblem(Problem.TRANSPARENT)
                 return null
             }
-            var bitmap = oriented(decoded, orientation(bytes))
+            val orientation = orientation(bytes)
+            // 转 90° 的几种方向（5~8）宽高互换
+            val upright = orientation !in ExifInterface.ORIENTATION_TRANSPOSE..ExifInterface.ORIENTATION_ROTATE_270
+            val sourceWidth = if (upright) bounds.outWidth else bounds.outHeight
+            val sourceHeight = if (upright) bounds.outHeight else bounds.outWidth
+            var bitmap = oriented(decoded, orientation)
             val currentLong = maxOf(bitmap.width, bitmap.height)
             if (maxSide in 1 until currentLong) {
                 val scale = maxSide.toFloat() / currentLong
@@ -600,7 +619,7 @@ class OriginalCompressor(
                 val check = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                 BitmapFactory.decodeByteArray(encoded, 0, encoded.size, check)
                 if (check.outWidth != bitmap.width || check.outHeight != bitmap.height) null
-                else Encoded(encoded, bitmap.width, bitmap.height)
+                else Encoded(encoded, bitmap.width, bitmap.height, sourceWidth, sourceHeight)
             } finally {
                 bitmap.recycle()
             }

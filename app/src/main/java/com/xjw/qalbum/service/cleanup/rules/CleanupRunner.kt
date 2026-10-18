@@ -1,5 +1,7 @@
 package com.xjw.qalbum.service.cleanup.rules
 
+import com.xjw.qalbum.data.db.StatsCache
+import com.xjw.qalbum.data.db.StatsCache.Companion.holding
 import com.xjw.qalbum.service.cleanup.OriginalCompressor
 import com.xjw.qalbum.service.cleanup.PictureDeleteOptions
 import com.xjw.qalbum.service.cleanup.QuarantineManager
@@ -30,6 +32,8 @@ class CleanupRunner(
     private val compressor: OriginalCompressor,
     private val tasks: BackgroundTasks,
     private val appScope: CoroutineScope,
+    /** 执行期间暂停清理页的统计重算，数据库先给清理用 */
+    private val statsCache: StatsCache? = null,
 ) {
     /** 正在跑的任务；[ruleId] 是从哪条规则的预览页发起的（别处发起为 null） */
     data class Running(val ruleId: String?, val title: String, val action: RuleAction, val done: Int, val total: Int)
@@ -97,8 +101,11 @@ class CleanupRunner(
         process: suspend (page: List<Long>, progress: (Int) -> Unit) -> Step,
     ) {
         if (ids.isEmpty()) return
+        val queuedAt = System.currentTimeMillis()
         appScope.launch {
             queue.withLock {
+                val waited = System.currentTimeMillis() - queuedAt
+                if (waited > 1_000) Timber.i("CleanupRunner: %s waited %d ms for the previous task", title, waited)
                 current = currentCoroutineContext()[Job]
                 try {
                     run(ruleId, title, action, ids, process = process)
@@ -117,7 +124,7 @@ class CleanupRunner(
         ids: List<Long>,
         announce: Boolean = true,
         process: suspend (page: List<Long>, progress: (Int) -> Unit) -> Step,
-    ): Int = tasks.track(title) { handle ->
+    ): Int = statsCache.holding { tasks.track(title) { handle ->
         val total = ids.size
         var processed = 0
         var done = 0
@@ -153,7 +160,7 @@ class CleanupRunner(
             _running.value = null
         }
         done
-    }
+    } }
 
     private fun progressText(action: RuleAction, done: Int, total: Int): String {
         val verb = if (action == RuleAction.COMPRESS) "已压缩" else "已处理"
