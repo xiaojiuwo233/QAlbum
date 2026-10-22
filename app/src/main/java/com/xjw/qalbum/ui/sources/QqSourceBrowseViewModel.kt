@@ -59,6 +59,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.xjw.qalbum.service.work.BackgroundTasks
+import com.xjw.qalbum.data.paging.calmDuringBulkWrites
 
 /**
  * 按来源范围整体清理前的确认状态：[counts] 为 null 表示正在统计；[olderThanMonths] 只清理几个月前的（0 不限），
@@ -138,9 +139,9 @@ class QqSourceBrowseViewModel(
 
     /** 当前分类；「全部」用汇总合成一个 */
     val lookup: StateFlow<FacetLookup?> = when (target.kind) {
-        SourceKind.CONVERSATION -> dao.observeFacet(0, target.key)
-        SourceKind.SENDER -> dao.observeFacet(1, target.key)
-        SourceKind.ALL -> dao.observeSummary().map { summary ->
+        SourceKind.CONVERSATION -> dao.observeFacet(0, target.key).calmDuringBulkWrites()
+        SourceKind.SENDER -> dao.observeFacet(1, target.key).calmDuringBulkWrites()
+        SourceKind.ALL -> dao.observeSummary().calmDuringBulkWrites().map { summary ->
             QqSourceFacet(
                 id = 0, key = "all", name = "全部来源图片", alias = "",
                 count = summary?.imageCount ?: 0, bytes = summary?.imageBytes ?: 0,
@@ -175,8 +176,8 @@ class QqSourceBrowseViewModel(
         when {
             target.kind == SourceKind.ALL -> flowOf(emptyList())
             id == null -> flowOf(null)
-            target.kind == SourceKind.CONVERSATION -> dao.observeConversationMembers(id)
-            else -> dao.observeSenderConversations(id)
+            target.kind == SourceKind.CONVERSATION -> dao.observeConversationMembers(id).calmDuringBulkWrites()
+            else -> dao.observeSenderConversations(id).calmDuringBulkWrites()
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
@@ -228,11 +229,11 @@ class QqSourceBrowseViewModel(
                 ).flow
                 // 分组计数固化为热流：分析 / 扫描期间 PagingSource 频繁失效，每代分页只取缓存值
                 if (key.sort.byDate) {
-                    val counts = bucketCounts { dao.observeBuckets(QqScopeSql.dateBuckets(key.ids, key.content, key.stacked)) }
+                    val counts = bucketCounts { dao.observeBuckets(QqScopeSql.dateBuckets(key.ids, key.content, key.stacked)).calmDuringBulkWrites() }
                     buckets.value = BucketSource(counts, key.sort)
                     pager.withDateHeaders(counts)
                 } else {
-                    val counts = bucketCounts { dao.observeBuckets(QqScopeSql.sizeBuckets(key.ids, key.content, key.stacked)) }
+                    val counts = bucketCounts { dao.observeBuckets(QqScopeSql.sizeBuckets(key.ids, key.content, key.stacked)).calmDuringBulkWrites() }
                     buckets.value = BucketSource(counts, key.sort)
                     // 合并显示时按整组合计分组，与排序一致
                     pager.withSizeHeaders(counts, if (key.stackedImages) StackedSize else FileSize)

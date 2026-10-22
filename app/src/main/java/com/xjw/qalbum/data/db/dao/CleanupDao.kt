@@ -63,6 +63,10 @@ interface CleanupDao {
     @Query("SELECT * FROM quarantine WHERE group_id = :groupId ORDER BY id")
     suspend fun getQuarantineGroup(groupId: String): List<QuarantineEntity>
 
+    /** 批量恢复用；调用方分块控制变量上限 */
+    @Query("SELECT * FROM quarantine WHERE id IN (:ids)")
+    suspend fun getQuarantineByIds(ids: List<Long>): List<QuarantineEntity>
+
     /** 多组的全部记录（批量清理用）；调用方分块控制变量上限 */
     @Query("SELECT * FROM quarantine WHERE group_id IN (:groupIds) ORDER BY id")
     suspend fun getQuarantineGroups(groupIds: List<String>): List<QuarantineEntity>

@@ -40,7 +40,7 @@ object LogcatCapture {
                     since != null -> { cmd += "-T"; cmd += since }
                     attempts > 0 -> { cmd += "-T"; cmd += "1" }
                 }
-                cmd += listOf("--pid", pid, "*:V")
+                cmd += listOf("--pid", pid) + QUIET_TAGS + "*:V"
                 val process = ProcessBuilder(cmd).redirectErrorStream(true).start()
 
                 val startedAt = System.currentTimeMillis()
@@ -68,6 +68,12 @@ object LogcatCapture {
             }
         }
     }
+
+    /**
+     * 不镜像的系统日志：HyperOS 等每解码 / 编码一张 JPEG 就打两行 skia-debug（删一万张图生成回收站缩略图就是几万行），
+     * 还有读不到厂商属性的警告，会把日志文件很快轮转掉、冲走有用的内容。libc 只留错误（崩溃信号照常记下）。
+     */
+    private val QUIET_TAGS = listOf("SkJpegCodec:S", "SkJpegEncoder:S", "SkPngCodec:S", "SkPngEncoder:S", "SkWebpCodec:S", "skia:W", "libc:E")
 
     private const val MAX_ATTEMPTS = 8
     private const val RETRY_DELAY_MS = 1500L

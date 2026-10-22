@@ -84,4 +84,11 @@ interface IFileOps {
     // 视频页：递归列出 root 下的普通文件（不跟随符号链接，跳过 . 开头的项）。每项 "size|mtimeMs|相对路径"，
     // 分页与快照约定同 listFiles。
     String[] walkFiles(String root, int offset, int limit) = 22;
+
+    // 删除规划：每个 (dirs[i], prefixes[i]) 列出目录里以前缀开头的文件，每项 "i|名字|状态"（状态同 statFiles）；
+    // 目录读不出时一项 "i||M"（不存在）或 "i||E"。同一张图的文件都在三个分桶目录里，按前缀找比逐个核对候选名快。
+    String[] findFiles(in String[] dirs, in String[] prefixes) = 23;
+    // 让别的应用目录里的文件能改名移进 dir（App 外部目录里的回收站，仅 Root）：去掉目录的「继承配额」标记，
+    // 跨应用改名不再被配额拒绝（EXDEV）。返回 1 已处理、0 不支持、-1 失败。
+    int allowRenameInto(String dir) = 24;
 }

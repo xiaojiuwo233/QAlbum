@@ -57,4 +57,6 @@ class FileOpsUserService : IFileOps.Stub() {
     override fun largestChildren(dir: String, limit: Int): Array<String> = FileOpsImpl.largestChildren(dir, limit)
     override fun clearQqCache(paths: Array<String>): LongArray = FileOpsImpl.clearQqCache(paths)
     override fun walkFiles(root: String, offset: Int, limit: Int): Array<String> = FileOpsImpl.walkFiles(root, offset, limit)
+    override fun findFiles(dirs: Array<String>, prefixes: Array<String>): Array<String> = FileOpsImpl.findFiles(dirs, prefixes)
+    override fun allowRenameInto(dir: String): Int = FileOpsImpl.allowRenameInto(dir)
 }

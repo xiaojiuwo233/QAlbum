@@ -1,6 +1,7 @@
 package com.xjw.qalbum.data.db
 
 import androidx.room.InvalidationTracker
+import com.xjw.qalbum.data.paging.BulkWrites
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -30,8 +31,9 @@ import java.util.concurrent.atomic.AtomicInteger
  *   通知推进（images 与聊天来源的几张表有写入）。页面订阅时先给缓存值（哪怕旧了），数据没变就不再查——切换页面、
  *   进出规则页都不重算，只在图片变化后才重算。
  * - 同一时间只跑一个统计查询，只算有页面在看的；写入集中的时候（批量删除、扫描）等安静 [QUIET_MS] 再算。
- * - [hold] 期间（清理执行中）不算，正在算的取消（Room 会中断 SQLite 查询）：数据库线程留给清理，删除不会排在
- *   一串统计查询后面；结束后补算一次。
+ * - [hold] 期间（清理执行中）已有的结果先不重算，正在算的取消（Room 会中断 SQLite 查询）：数据库线程留给清理，删除不会排在
+ *   一串统计查询后面；结束后补算一次。还没算过的照算，期间打开的页面不至于一直「统计中」。期间各页面的网格与观察流也放慢刷新
+ *   （见 [BulkWrites]）。
  */
 class StatsCache(db: AppDatabase, private val scope: CoroutineScope) {
 
@@ -88,7 +90,7 @@ class StatsCache(db: AppDatabase, private val scope: CoroutineScope) {
     suspend fun <T> hold(block: suspend () -> T): T {
         holds.update { it + 1 }
         try {
-            return block()
+            return BulkWrites.hold(block)
         } finally {
             holds.update { it - 1 }
             wake.trySend(Unit)
@@ -99,12 +101,14 @@ class StatsCache(db: AppDatabase, private val scope: CoroutineScope) {
     private suspend fun refreshStale() {
         val pending = slots.values.filter { it.watchers.get() > 0 && it.version != version.value }
         for (slot in pending) {
-            if (holds.value > 0) return
             val target = version.value
             if (slot.version == target) continue
+            // 暂停期间只算还没有结果的；已有结果的（哪怕旧了）等暂停结束再算
+            val missing = slot.value.value == null
+            if (holds.value > 0 && !missing) continue
             val started = System.currentTimeMillis()
             val result = try {
-                cancellableByHold { slot.query() } ?: return
+                if (missing) slot.query() else cancellableByHold { slot.query() } ?: return
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

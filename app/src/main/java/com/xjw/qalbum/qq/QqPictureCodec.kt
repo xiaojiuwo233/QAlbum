@@ -327,6 +327,18 @@ object QqCachePaths {
     }
 
     /**
+     * 家族 [family] 在三个缓存目录里的（分桶目录, 文件名前缀）：同一家族的文件都在这三个目录里，文件名以前缀开头
+     * （chatthumb 的前缀也是 `_hd` 的前缀，别名再跟后缀）。以前缀开头的不一定同一家族，用 [familyKey] 核对。
+     */
+    fun familyStems(root: String, family: Long): List<Pair<String, String>> {
+        val base = root.trimEnd('/')
+        return folders.map { folder ->
+            val name = "Cache_" + java.lang.Long.toString(family xor delta.getValue(folder), 16)
+            "$base/$folder/${name.takeLast(3)}" to name
+        }
+    }
+
+    /**
      * 消息里记的本地路径中，推不出 [families] 里家族键的（规范命名的缓存都按家族键关联，这些另外记下）。
      * 只关联已经配置的图片目录，不把任意聊天附件路径作为图片读取入口。
      */

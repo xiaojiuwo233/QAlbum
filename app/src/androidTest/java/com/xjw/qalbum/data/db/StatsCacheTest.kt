@@ -5,6 +5,7 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.xjw.qalbum.data.db.entity.ImageEntity
+import com.xjw.qalbum.data.paging.BulkWrites
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -19,6 +20,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -76,6 +78,21 @@ class StatsCacheTest {
         db.imageDao().insertAll(listOf(image(2)))
         assertEquals(listOf(1, 2), withTimeout(10_000) { values.await() })
         watcher.cancel()
+    }
+
+    @Test
+    fun resultsNeverComputedArriveEvenWhileHeld() = runBlocking {
+        val cache = StatsCache(db, scope)
+        db.imageDao().insertAll(listOf(image(1)))
+        val released = CompletableDeferred<Unit>()
+        val holder = scope.launch { cache.hold { released.await() } }
+        delay(100)
+        assertTrue(BulkWrites.active)
+        // 删除进行中才打开的页面：还没有结果的照算，不至于一直「统计中」
+        withTimeout(5_000) { assertEquals(1, cache.observe("count-during-hold") { count() }.first()) }
+        released.complete(Unit)
+        holder.join()
+        assertFalse(BulkWrites.active)
     }
 
     @Test

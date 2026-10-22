@@ -107,17 +107,29 @@ sealed class CleanupRule(val id: String) {
         )
     }
 
-    /** 动图和表情包：动图，或尺寸小、接近正方形的小图 */
+    /** 动图和表情包：动图，或尺寸小、接近正方形的小图；可以只看动图或只看（不动的）表情包 */
     data object Stickers : CleanupRule("stickers") {
         override val title = "动图和表情包"
         override val description = "动图，以及边长 512 以内、近似正方形、小于 200 KB 的小图（多是表情包）。" +
             "只看尺寸，可能混进头像等小图，删前看一眼。"
         override val scope = RuleScope.PICTURE
-        override fun where(option: Int, now: Long) = SqlPart(
-            """$PICTURE AND (i.is_animated = 1 OR (i.width > 0 AND i.height > 0
-                AND MAX(i.width, i.height) <= 512 AND MIN(i.width, i.height) * 5 >= MAX(i.width, i.height) * 4
-                AND i.size <= 204800) OR $STICKER_MESSAGE)""",
+        override val options = listOf(
+            RuleOption(ALL, "全部", ""),
+            RuleOption(ANIMATED_ONLY, "动图", "动图"),
+            RuleOption(STILL_ONLY, "表情包", "表情包"),
         )
+        override val defaultOption = ALL
+        override fun where(option: Int, now: Long) = SqlPart(
+            "$PICTURE AND " + when (option) {
+                ANIMATED_ONLY -> ANIMATED
+                STILL_ONLY -> "NOT $ANIMATED AND ($SMALL_SQUARE OR $STICKER_MESSAGE)"
+                else -> "($ANIMATED OR $SMALL_SQUARE OR $STICKER_MESSAGE)"
+            },
+        )
+
+        private const val ALL = 0
+        private const val ANIMATED_ONLY = 1
+        private const val STILL_ONLY = 2
     }
 
     /** 旧图片：整张图 N 年前 */
@@ -230,6 +242,14 @@ sealed class CleanupRule(val id: String) {
 
         /** 最近一次完整读取聊天来源的开始时间（没有过为 0） */
         private const val COMPLETE_READ = "(SELECT complete_read_at FROM qq_source_cache WHERE id = 1)"
+
+        /** 动图：文件本身是动图（GIF、动画 WebP 等），或聊天记录里是 GIF（图片类型 2000）。没读来源时只看文件 */
+        private const val ANIMATED = """(i.is_animated = 1 OR EXISTS (SELECT 1 FROM image_qq_origins l CROSS JOIN qq_origins o
+            ON o.id = l.origin_id WHERE l.image_id = i.id AND o.pic_type = 2000))"""
+
+        /** 边长 512 以内、近似正方形、小于 200 KB 的小图（多是表情包） */
+        private const val SMALL_SQUARE = """(i.width > 0 AND i.height > 0 AND MAX(i.width, i.height) <= 512
+            AND MIN(i.width, i.height) * 5 >= MAX(i.width, i.height) * 4 AND i.size <= 204800)"""
 
         /**
          * 聊天记录里是动图或表情的图：消息的图片类型是 GIF（2000），或子类型属于表情（QQ 按表情显示的

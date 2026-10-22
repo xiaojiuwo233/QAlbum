@@ -95,14 +95,80 @@ internal object FileOpsImpl {
         return res
     }
 
-    fun statFiles(paths: Array<String>): Array<String> = paths.map { path ->
-        try {
-            val stat = Os.lstat(path)
-            if (!OsConstants.S_ISREG(stat.st_mode)) "O"
-            else "S|${stat.st_size}|${stat.st_mtime * 1000L}|${stamp(stat)}"
-        } catch (e: ErrnoException) { if (e.errno == OsConstants.ENOENT) "M" else "E" }
-        catch (_: Exception) { "E" }
-    }.toTypedArray()
+    fun statFiles(paths: Array<String>): Array<String> = paths.map(::statLine).toTypedArray()
+
+    private fun statLine(path: String): String = try {
+        val stat = Os.lstat(path)
+        if (!OsConstants.S_ISREG(stat.st_mode)) "O"
+        else "S|${stat.st_size}|${stat.st_mtime * 1000L}|${stamp(stat)}"
+    } catch (e: ErrnoException) { if (e.errno == OsConstants.ENOENT) "M" else "E" }
+    catch (_: Exception) { "E" }
+
+    /**
+     * 删除规划用（见 IFileOps.findFiles）：每个 (目录, 前缀) 列出目录里以前缀开头的文件及状态，每项 "i|名字|状态"
+     * （状态同 [statFiles]）。同一目录只读一次；目录读不出时一项 "i||M"（不存在）或 "i||E"。
+     * 比逐个核对同一张图的几十个可能的文件名（版本 × 别名后缀，几乎都不存在）少得多。
+     */
+    fun findFiles(dirs: Array<String>, prefixes: Array<String>): Array<String> {
+        require(dirs.size == prefixes.size)
+        val listed = HashMap<String, Array<String>?>()
+        val root = Os.getuid() == 0
+        // 底层目录与原路径是不是同一个目录（按图片根目录各核对一次 inode）
+        val same = HashMap<String, Boolean>()
+        val out = ArrayList<String>()
+        for (i in dirs.indices) {
+            val dir = dirs[i]
+            // Root 直接读底层目录（不经 FUSE，快得多）；只读名字，状态仍按原路径取，与之后移动 / 删除时的核对一致
+            val names = if (dir in listed) listed[dir] else {
+                val lower = if (root) lowerPath(dir)?.takeIf { sameDirectory(dir, it, same) } else null
+                ((lower?.let { File(it).list() }) ?: File(dir).list()).also { listed[dir] = it }
+            }
+            if (names == null) {
+                out += "$i||" + if (statLine(dir) == "M") "M" else "E"
+                continue
+            }
+            for (name in names) if (name.startsWith(prefixes[i])) out += "$i|$name|" + statLine("$dir/$name")
+        }
+        return out.toTypedArray()
+    }
+
+    /**
+     * 让别的应用目录里的文件能改名移进回收站目录 [dir]（仅 Root，见 IFileOps.allowRenameInto）。
+     * Android 给每个应用的外部目录分了存储配额（project ID），目录带「继承配额」标记时，配额不同的文件改名进来
+     * 会被拒（EXDEV），只能逐个复制。去掉回收站目录的这个标记后改名照常：文件保留原来的配额，送回时也能改名回去。
+     * 返回 1 已处理、0 不支持（不是 Root / 不是应用外部目录里的回收站）、-1 失败。
+     */
+    fun allowRenameInto(dir: String): Int {
+        if (Os.getuid() != 0) return 0
+        val lower = lowerPath(dir) ?: return 0
+        if (!lower.contains("/Android/data/") || !lower.endsWith("/quarantine") || lower.split('/').any { it == ".." }) return 0
+        return try {
+            // 回收站目录由 App 自己建（属主是 App），这里不新建
+            if (!File(lower).isDirectory) return -1
+            val process = ProcessBuilder("/system/bin/chattr", "-P", lower).redirectErrorStream(true).start()
+            process.inputStream.use { it.readBytes() }
+            if (process.waitFor() == 0) 1 else -1
+        } catch (_: Exception) {
+            -1
+        }
+    }
+
+    /**
+     * [dir] 的底层位置 [lower] 是不是同一个目录：两边看到的 inode 号相同（只有设备号不同）。按上两级目录（图片根目录）
+     * 核对一次，结果记在 [cache]；核对不了时不用底层路径。
+     */
+    private fun sameDirectory(dir: String, lower: String, cache: HashMap<String, Boolean>): Boolean {
+        val top = File(dir).parentFile?.parent ?: return false
+        return cache.getOrPut(top) {
+            runCatching { Os.lstat(top).st_ino == Os.lstat(File(lower).parentFile!!.parent!!).st_ino }.getOrDefault(false)
+        }
+    }
+
+    /** 外部存储在底层文件系统上的位置：/storage/emulated/<用户>/… = /data/media/<用户>/…（属性只能在底层改，读目录也快） */
+    private fun lowerPath(path: String): String? =
+        LOWER_STORAGE.matchEntire(path)?.let { "/data/media/${it.groupValues[1]}${it.groupValues[2]}" }
+
+    private val LOWER_STORAGE = Regex("^/storage/emulated/(\\d+)(/.*)$")
 
     fun moveFilesChecked(sources: Array<String>, targets: Array<String>, stamps: Array<String>): BooleanArray {
         require(sources.size == targets.size && sources.size == stamps.size)

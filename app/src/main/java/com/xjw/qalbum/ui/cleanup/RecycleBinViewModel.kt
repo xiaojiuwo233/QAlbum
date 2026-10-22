@@ -32,6 +32,7 @@ import com.xjw.qalbum.ui.gallery.withDayHeaders
 import com.xjw.qalbum.ui.gallery.withSizeBuckets
 import com.xjw.qalbum.ui.imageloading.FileAccessPath
 import com.xjw.qalbum.ui.imageloading.ImageEntityModel
+import com.xjw.qalbum.data.paging.calmDuringBulkWrites
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -94,14 +95,14 @@ class RecycleBinViewModel(
     val fastScroll: StateFlow<Boolean> = settings.fastScrollEnabled
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
 
-    val deletedStats: StateFlow<CleanupDao.QuarantineStatsRow> = dao.observeQuarantineStats()
+    val deletedStats: StateFlow<CleanupDao.QuarantineStatsRow> = dao.observeQuarantineStats().calmDuringBulkWrites()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CleanupDao.QuarantineStatsRow(0, 0))
 
-    val originalStats: StateFlow<CleanupDao.QuarantineStatsRow> = db.originalBackupDao().observeStats()
+    val originalStats: StateFlow<CleanupDao.QuarantineStatsRow> = db.originalBackupDao().observeStats().calmDuringBulkWrites()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CleanupDao.QuarantineStatsRow(0, 0))
 
     /** 回收站里的删除原因，按张数从多到少 */
-    val reasons: StateFlow<List<ReasonFilter>> = dao.observeTrashReasons(RecycleBinSql.trashReasons())
+    val reasons: StateFlow<List<ReasonFilter>> = dao.observeTrashReasons(RecycleBinSql.trashReasons()).calmDuringBulkWrites()
         .throttle()
         .map { rows ->
             rows.groupBy { trashReasonLabel(it.reason) }
@@ -152,7 +153,7 @@ class RecycleBinViewModel(
             val deleted = k.content == BinContent.DELETED
             val buckets = if (deleted) RecycleBinSql.trashBuckets(k.sort.byDate, k.reasons) else RecycleBinSql.backupBuckets(k.sort.byDate)
             groups.value = Groups(
-                dao.observeBinBuckets(buckets).map { rows -> rows.associate { it.bucketKey to it.count } }
+                dao.observeBinBuckets(buckets).calmDuringBulkWrites().map { rows -> rows.associate { it.bucketKey to it.count } }
                     .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null),
                 k.sort,
             )

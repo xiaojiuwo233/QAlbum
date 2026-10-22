@@ -102,9 +102,9 @@ data class QqPreviewCandidate(
 data class QqPicturePathEdge(val originId: String, val path: String)
 /** 同一张图（按消息里的 MD5，[originId]）的一个家族键 */
 data class QqFamilyEdge(val originId: String, val family: Long)
-data class QqPictureContext(val conversationKey: String, val senderKey: String)
-data class QqPathContext(val path: String, val conversationKey: String, val senderKey: String)
-data class QqFamilyContext(val family: Long, val conversationKey: String, val senderKey: String)
+/** 家族出现过的会话 / 发送人组合（会话与发送人键用 char(31) 连起来）中最小和最大的一个 */
+data class QqFamilyContextRange(val family: Long, val low: String, val high: String)
+data class QqPathContextRange(val path: String, val low: String, val high: String)
 data class QqOriginDetails(
     val conversationName: String, val senderName: String, val memberName: String,
     val chatType: Int, val messageTime: Long, val messageCount: Int, val accountName: String,
@@ -155,19 +155,35 @@ interface QqSourceDao {
         FROM touched t CROSS JOIN qq_origin_paths p ON p.origin_id = t.origin_id CROSS JOIN qq_origins o ON o.id = t.origin_id""")
     suspend fun explicitPathEdges(families: List<Long>, paths: List<String>): List<QqPicturePathEdge>
 
-    /** 每个家族出现过的会话 / 发送人（删除规划一次查整批，按组合并） */
-    @Query("""SELECT DISTINCT f.family AS family, o.conversation_key AS conversationKey, o.sender_key AS senderKey FROM (
-            SELECT family, id AS origin_id FROM qq_origins WHERE family IN (:families)
-            UNION SELECT family, origin_id FROM qq_origin_families WHERE family IN (:families)) f
-        CROSS JOIN qq_origins o ON o.id = f.origin_id""")
-    suspend fun familyContexts(families: List<Long>): List<QqFamilyContext>
+    /**
+     * 删除规划判断「共用」：每个家族（[families]）出现过的会话 / 发送人组合里最小和最大的一个，两者不同就是出现在不止一个
+     * 组合里。只做聚合不去重：热门表情几万条消息也只是顺着家族索引读一遍。
+     */
+    @Query("""SELECT family, MIN(pair) AS low, MAX(pair) AS high FROM (
+            SELECT family, conversation_key || char(31) || sender_key AS pair FROM qq_origins WHERE family IN (:families)
+            UNION ALL SELECT f.family, o.conversation_key || char(31) || o.sender_key FROM qq_origin_families f
+                CROSS JOIN qq_origins o ON o.id = f.origin_id WHERE f.family IN (:families))
+        GROUP BY family""")
+    suspend fun familyContextRange(families: List<Long>): List<QqFamilyContextRange>
 
-    /** 每个路径出现过的会话 / 发送人：消息另记的路径，以及已入库那张图的关联（发送图片缓存等） */
-    @Query("""SELECT DISTINCT x.path AS path, o.conversation_key AS conversationKey, o.sender_key AS senderKey FROM (
-            SELECT path, origin_id FROM qq_origin_paths WHERE path IN (:paths)
-            UNION SELECT i.path, l.origin_id FROM images i CROSS JOIN image_qq_origins l ON l.image_id = i.id WHERE i.path IN (:paths)) x
-        CROSS JOIN qq_origins o ON o.id = x.origin_id""")
-    suspend fun pathContexts(paths: List<String>): List<QqPathContext>
+    /** 同上，按消息另记的路径（推不出家族键的） */
+    @Query("""SELECT p.path AS path, MIN(o.conversation_key || char(31) || o.sender_key) AS low,
+            MAX(o.conversation_key || char(31) || o.sender_key) AS high
+        FROM qq_origin_paths p CROSS JOIN qq_origins o ON o.id = p.origin_id WHERE p.path IN (:paths) GROUP BY p.path""")
+    suspend fun pathContextRange(paths: List<String>): List<QqPathContextRange>
+
+    /** 限定来源删除时的「共用」：[families] 中也出现在范围之外的（会话不是 [groupKey]，或发送人不是 [senderKey]，为 null 的不限） */
+    @Query("""SELECT DISTINCT family FROM (
+            SELECT family, conversation_key, sender_key FROM qq_origins WHERE family IN (:families)
+            UNION ALL SELECT f.family, o.conversation_key, o.sender_key FROM qq_origin_families f
+                CROSS JOIN qq_origins o ON o.id = f.origin_id WHERE f.family IN (:families))
+        WHERE (:groupKey IS NOT NULL AND conversation_key <> :groupKey) OR (:senderKey IS NOT NULL AND sender_key <> :senderKey)""")
+    suspend fun familiesOutsideScope(families: List<Long>, groupKey: String?, senderKey: String?): List<Long>
+
+    /** 同上，按消息另记的路径 */
+    @Query("""SELECT DISTINCT p.path FROM qq_origin_paths p CROSS JOIN qq_origins o ON o.id = p.origin_id WHERE p.path IN (:paths)
+          AND ((:groupKey IS NOT NULL AND o.conversation_key <> :groupKey) OR (:senderKey IS NOT NULL AND o.sender_key <> :senderKey))""")
+    suspend fun pathsOutsideScope(paths: List<String>, groupKey: String?, senderKey: String?): List<String>
 
     /** [ids] 中出现在不止一个会话 / 发送人组合里的（与删除时「共用」的判断一致） */
     @Query("""SELECT l.image_id FROM image_qq_origins l CROSS JOIN qq_origins o ON o.id = l.origin_id

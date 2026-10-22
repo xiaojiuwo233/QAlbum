@@ -40,11 +40,13 @@ class CleanupRuleTest {
 
     @Test
     fun `所有规则都排除归档的图 整张图的规则只算图库里看得到的代表图`() {
-        val rules = CleanupRule.listed + CleanupRule.TimeRange(0, now, "全部")
+        val rules = CleanupRule.listed + CleanupRule.chat + CleanupRule.TimeRange(0, now, "全部")
         rules.forEach { rule ->
-            val sql = rule.where(rule.defaultOption, now).sql
-            assertTrue(rule.id, sql.contains("i.is_protected = 0"))
-            if (rule.scope == RuleScope.PICTURE) assertTrue(rule.id, sql.contains(CleanupRule.PICTURE))
+            (rule.options.map { it.value }.ifEmpty { listOf(rule.defaultOption) }).forEach { option ->
+                val sql = rule.where(option, now).sql
+                assertTrue("${rule.id}:$option", sql.contains("i.is_protected = 0"))
+                if (rule.scope == RuleScope.PICTURE) assertTrue("${rule.id}:$option", sql.contains(CleanupRule.PICTURE))
+            }
         }
     }
 

@@ -15,6 +15,7 @@ import com.xjw.qalbum.service.cleanup.rules.CleanupRunner
 import com.xjw.qalbum.service.cleanup.rules.RuleScope
 import com.xjw.qalbum.service.cleanup.rules.RuleSql
 import com.xjw.qalbum.service.cleanup.rules.SqlPart
+import com.xjw.qalbum.data.paging.calmDuringBulkWrites
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
@@ -180,11 +181,11 @@ class CleanupViewModel(
 
     // ---- 回收站入口 ----
 
-    val quarantineStats: StateFlow<CleanupDao.QuarantineStatsRow> = db.cleanupDao().observeQuarantineStats()
+    val quarantineStats: StateFlow<CleanupDao.QuarantineStatsRow> = db.cleanupDao().observeQuarantineStats().calmDuringBulkWrites()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CleanupDao.QuarantineStatsRow(0, 0))
 
     /** 原图备份张数与占用 */
-    val backupStats: StateFlow<CleanupDao.QuarantineStatsRow> = db.originalBackupDao().observeStats()
+    val backupStats: StateFlow<CleanupDao.QuarantineStatsRow> = db.originalBackupDao().observeStats().calmDuringBulkWrites()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CleanupDao.QuarantineStatsRow(0, 0))
 
     /** 视频页上次扫到的视频个数与占用（不包含收到的文件时只算聊天视频） */

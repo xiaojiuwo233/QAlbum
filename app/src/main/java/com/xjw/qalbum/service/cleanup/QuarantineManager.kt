@@ -137,16 +137,25 @@ class QuarantineManager(
             val started = System.currentTimeMillis()
             val provider=accessManager.current()
             if(!provider.isAvailable())return@withContext PictureDeleteResult(skipped=ids.size)
-            val bound=fileOpsClient.bind(provider.getAccessMode())?:return@withContext PictureDeleteResult(skipped=ids.size)
+            val mode=provider.getAccessMode()
+            val bound=fileOpsClient.bind(mode)?:return@withContext PictureDeleteResult(skipped=ids.size)
             var result=PictureDeleteResult()
             val total=ids.size
             var done=0
+            val timer=StepTimer()
             try {
                 onProgress(0,total)
-                reconcilePendingWithProvider(provider)
-                val operations=linkedOperations(bound,provider)
+                timer.measure("reconcile") { reconcilePendingWithProvider(provider) }
+                val renames=renameStates.getOrPut(mode) { LinkedPictureOperations.RenameState() }
+                if(!renames.prepared) {
+                    // Root：去掉回收站目录的配额继承标记，之后移入回收站都是改名，不用复制（见 FileOpsImpl.allowRenameInto）
+                    renames.prepared=true
+                    val prepared=runCatching { bound.callWithTimeout { it.allowRenameInto(rootDir.path) } }.getOrDefault(-1)
+                    if(prepared!=0)Timber.i("Trash renames prepared: %d",prepared)
+                }
+                val operations=linkedOperations(bound,provider,timer,renames)
                 val expiry=computeExpiry()
-                PictureFamilyPlanner(db,settings.chatpicPath.first()).batches(ids,options,bound,scope) { groups ->
+                PictureFamilyPlanner(db,settings.chatpicPath.first(),timer).batches(ids,options,bound,scope) { groups ->
                     val open=groups.filter { it.blocked==null }
                     result+=PictureDeleteResult(skipped=groups.size-open.size)
                     if(open.isNotEmpty())result+=if(permanent)operations.permanentlyDeleteAll(open,options.includeArchived)
@@ -156,21 +165,30 @@ class QuarantineManager(
                 }
                 result
             } catch(e:CancellationException) { throw e }
-            catch(_:Exception) { result.copy(partial=result.partial+1) }
+            catch(e:Exception) { Timber.w(e,"Picture delete stopped");result.copy(partial=result.partial+1) }
             finally {
                 bound.close()
                 // 归档页删除：放回原处（核验失败回滚）的归档图按设置重新隐藏
                 if(options.includeArchived)runCatching { archive.sync() }
                 onProgress(total,total)
-                Timber.i("Pictures %s: %d selected in %d ms", if(permanent)"deleted" else "trashed", total, System.currentTimeMillis()-started)
+                Timber.i("Pictures %s: %d selected, %d files in %d ms (%s)", if(permanent)"deleted" else "trashed", total, result.files,
+                    System.currentTimeMillis()-started, timer)
             }
         }
     }
 
-    internal fun linkedOperations(bound: BoundFileOps, provider: FileAccessProvider): LinkedPictureOperations = LinkedPictureOperations(
+    internal fun linkedOperations(
+        bound: BoundFileOps, provider: FileAccessProvider, timer: StepTimer = StepTimer(),
+        renames: LinkedPictureOperations.RenameState = LinkedPictureOperations.RenameState(),
+    ): LinkedPictureOperations = LinkedPictureOperations(
         db,bound,rootDir,inFlight,
         thumbnail={ image -> generateThumbnail(bound,AtomicBoolean(true),provider,image) },
+        timer=timer,
+        renames=renames,
     )
+
+    /** 各访问方式下改名能不能移进回收站（Root 先去掉目录的配额标记；Shizuku 确认移不进后直接复制） */
+    private val renameStates = ConcurrentHashMap<com.xjw.qalbum.domain.model.AccessMode, LinkedPictureOperations.RenameState>()
 
     /** 把指定图片移到回收站（单张；批量走 [quarantineBatch]）。非 active 的图直接返回 false。 */
     suspend fun quarantine(imageId: Long, reason: String): Boolean =
@@ -212,43 +230,59 @@ class QuarantineManager(
 
     /**
      * 批量恢复（[quarantineIds] 每组一条，整组恢复）。原位置已经有文件（多是 QQ 又下载了一份）的组默认不动、记在
-     * [RestoreReport.occupied] 里；[keepExisting] 时用现有的文件，其余照常送回。期间一直占着特权服务的绑定，
-     * 不会每组重新连一次；归档最后同步一次。
+     * [RestoreReport.occupied] 里；[keepExisting] 时用现有的文件，其余照常送回。每 [RESTORE_PAGE] 组一批整批处理
+     * （见 LinkedPictureOperations.restoreGroups）；归档最后同步一次。
      */
     suspend fun restoreAll(
         quarantineIds: List<Long>, keepExisting: Boolean = false, onProgress: (done: Int, total: Int) -> Unit = { _, _ -> },
     ): RestoreReport = withContext(Dispatchers.IO) {
+        val started = System.currentTimeMillis()
         val restored = ArrayList<Long>()
         val groups = ArrayList<Long>()
         val occupied = ArrayList<Long>()
         val adopted = ArrayList<Long>()
         val provider = accessManager.current()
         if (!provider.isAvailable()) return@withContext RestoreReport()
-        val keep = fileOpsClient.bind(provider.getAccessMode())
+        val bound = fileOpsClient.bind(provider.getAccessMode()) ?: return@withContext RestoreReport()
         try {
-            quarantineIds.forEachIndexed { index, id ->
+            val operations = linkedOperations(bound, provider)
+            var done = 0
+            for (page in quarantineIds.chunked(RESTORE_PAGE)) {
                 ensureActive()
-                val record = cleanupDao.getQuarantineById(id)
-                if (record != null) {
-                    val members = record.groupId?.let { cleanupDao.getQuarantineGroup(it) } ?: listOf(record)
-                    val result = restoreRecord(id, keepExisting)
-                    when (result.outcome) {
+                val heads = cleanupDao.getQuarantineByIds(page).associateBy { it.id }
+                val members = heads.values.mapNotNull { it.groupId }.distinct().chunked(SQL_CHUNK)
+                    .flatMap { cleanupDao.getQuarantineGroups(it) }.groupBy { it.groupId }
+                val seen = HashSet<String>()
+                val grouped = page.mapNotNull { heads[it] }.filter { it.groupId != null && seen.add(it.groupId) }
+                val results = operations.restoreGroups(grouped.map { members[it.groupId].orEmpty() }, keepExisting)
+                grouped.forEachIndexed { k, head ->
+                    when (results[k].outcome) {
                         RestoreOutcome.RESTORED -> {
-                            restored += members.map { it.imageId }
-                            groups += id
-                            adopted += result.archive
+                            restored += members[head.groupId].orEmpty().map { it.imageId }
+                            groups += head.id
+                            adopted += results[k].archive
                         }
-                        RestoreOutcome.OCCUPIED -> occupied += id
+                        RestoreOutcome.OCCUPIED -> occupied += head.id
                         RestoreOutcome.FAILED -> Unit
                     }
                 }
-                onProgress(index + 1, quarantineIds.size)
+                // 旧版没有组的记录逐条恢复
+                for (head in page.mapNotNull { heads[it] }.filter { it.groupId == null }) {
+                    if (restoreRecord(head.id, keepExisting).outcome == RestoreOutcome.RESTORED) {
+                        restored += head.imageId
+                        groups += head.id
+                    }
+                }
+                done += page.size
+                onProgress(done, quarantineIds.size)
             }
         } finally {
-            keep?.close()
+            bound.close()
             // 接替了归档过的旧记录的新图接着归档
             if (adopted.isNotEmpty()) runCatching { archive.archive(adopted) }
             if (restored.isNotEmpty()) runCatching { archive.sync() }
+            Timber.i("Pictures restored: %d of %d groups (%d occupied) in %d ms", groups.size, quarantineIds.size, occupied.size,
+                System.currentTimeMillis() - started)
         }
         RestoreReport(restored, groups, occupied)
     }
@@ -862,6 +896,9 @@ class QuarantineManager(
         private const val EXPIRE_PAGE = 200
 
         private const val RECONCILE_PAGE = 200
+
+        /** 批量恢复每批的组数 */
+        private const val RESTORE_PAGE = 100
         private const val RESTORE_NAME_ATTEMPTS = 1_000
 
         private const val STATE_PENDING = "pending"

@@ -119,6 +119,8 @@ class PictureBatchDeleteTest {
         override fun largestChildren(dir: String, limit: Int): Array<String> = InProcessFileOps.largestChildren(dir, limit)
         override fun clearQqCache(paths: Array<String>): LongArray = InProcessFileOps.clearQqCache(paths)
         override fun walkFiles(root: String, offset: Int, limit: Int): Array<String> = InProcessFileOps.walkFiles(root, offset, limit)
+        override fun findFiles(dirs: Array<String>, prefixes: Array<String>): Array<String> = InProcessFileOps.findFiles(dirs, prefixes)
+        override fun allowRenameInto(dir: String): Int = 0
     }
 
     @Before

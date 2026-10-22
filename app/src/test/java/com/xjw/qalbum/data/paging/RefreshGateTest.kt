@@ -50,6 +50,32 @@ class RefreshGateTest {
     }
 
     @Test
+    fun `批量写入期间显示过内容的网格稍后再刷新，没显示过的照常加载，滚动加载不等`() = runBlocking {
+        val gate = RefreshGate()
+        val factory = gate.gated { FakeSource() }
+        val first = factory()
+        val release = CompletableDeferred<Unit>()
+        val bulk = launch { BulkWrites.hold { release.await() } }
+        try {
+            yield()
+            assertTrue(BulkWrites.active)
+            assertTrue(first.load(refresh) is PagingSource.LoadResult.Page)
+            val second = factory()
+            val pending = async { second.load(refresh) }
+            yield()
+            assertFalse(pending.isCompleted)
+            val append = PagingSource.LoadParams.Append(key = 3, loadSize = 3, placeholdersEnabled = true)
+            assertTrue(factory().load(append) is PagingSource.LoadResult.Page)
+            release.complete(Unit)
+            assertTrue(pending.await() is PagingSource.LoadResult.Page)
+        } finally {
+            release.complete(Unit)
+            bulk.join()
+        }
+        assertFalse(BulkWrites.active)
+    }
+
+    @Test
     fun `失效双向传递`() = runBlocking {
         val gate = RefreshGate()
         val created = mutableListOf<FakeSource>()

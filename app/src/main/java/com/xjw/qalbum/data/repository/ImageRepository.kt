@@ -9,6 +9,8 @@ import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.paging.RefreshGate
 import com.xjw.qalbum.domain.model.GallerySort
 import com.xjw.qalbum.domain.model.TimelineWindow
+import com.xjw.qalbum.data.paging.BulkWrites
+import com.xjw.qalbum.data.paging.calmDuringBulkWrites
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -165,12 +167,12 @@ class ImageRepository(
 
     fun observeImageCount(): Flow<Int> = imageDao.observeImageCount().throttleLatest()
     fun observeTotalSize(): Flow<Long> = imageDao.observeTotalSize().throttleLatest()
-    fun observeCleanedStats(): Flow<ImageDao.CleanedStatsRow> = imageDao.observeCleanedStats()
-    fun observeCleanedStatsSince(since: Long): Flow<ImageDao.CleanedStatsRow> = imageDao.observeCleanedStatsSince(since)
+    fun observeCleanedStats(): Flow<ImageDao.CleanedStatsRow> = imageDao.observeCleanedStats().calmDuringBulkWrites()
+    fun observeCleanedStatsSince(since: Long): Flow<ImageDao.CleanedStatsRow> = imageDao.observeCleanedStatsSince(since).calmDuringBulkWrites()
     fun observeSourceBreakdown(): Flow<List<ImageDao.SourceBreakdownRow>> = imageDao.observeSourceBreakdown().throttleLatest()
     fun observeArchiveCount(statuses: List<String>): Flow<Int> = imageDao.observeArchiveCount(statuses).throttleLatest()
     fun observeThumbnailTrashSummary(): Flow<ImageDao.ThumbnailTrashSummary> =
-        imageDao.observeThumbnailTrashSummary()
+        imageDao.observeThumbnailTrashSummary().calmDuringBulkWrites()
 
     companion object {
         /** 单条 IN 查询里 id 的安全上限（远低于 SQLite 999/32766 变量限制） */
@@ -187,7 +189,7 @@ class ImageRepository(
 private fun List<ImageDao.BucketCountRow>.toBucketCountMap(): Map<Long, Int> =
     associate { row -> row.bucketKey to row.count }
 
-/** 聚合观察流节流周期：扫描 / 分析批量提交期间把 200w 行 COUNT/SUM/GROUP BY 重查压到每周期至多一次 */
+/** 聚合观察流节流周期：扫描 / 分析批量提交期间把 200w 行 COUNT/SUM/GROUP BY 重查压到每周期至多一次（批量删除等期间更长） */
 private const val AGGREGATE_THROTTLE_MS = 1_500L
 
 /**
@@ -200,4 +202,5 @@ private fun <T> Flow<T>.throttleLatest(periodMs: Long = AGGREGATE_THROTTLE_MS): 
     transform { value ->
         emit(value)
         delay(periodMs)
+        BulkWrites.awaitIdle(BulkWrites.REFRESH_MS - periodMs)
     }

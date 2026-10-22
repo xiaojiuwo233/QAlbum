@@ -8,6 +8,7 @@ import com.xjw.qalbum.data.db.dao.OriginalBackupDao
 import com.xjw.qalbum.data.repository.ImageRepository
 import com.xjw.qalbum.domain.model.ScanProgress
 import com.xjw.qalbum.service.indexer.ScanController
+import com.xjw.qalbum.data.paging.calmDuringBulkWrites
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
@@ -31,7 +32,7 @@ class DashboardViewModel(
             imageRepository.observeTotalSize(),
         ) { imageCount, totalSize -> CoreStats(imageCount, totalSize) },
         imageRepository.observeSourceBreakdown(),
-        cleanupDao.observeQuarantineStats(),
+        cleanupDao.observeQuarantineStats().calmDuringBulkWrites(),
         imageRepository.observeThumbnailTrashSummary(),
     ) { core, breakdown, quarantine, thumbnailTrash ->
         DashboardUiState(
@@ -52,7 +53,7 @@ class DashboardViewModel(
 
     /** 「已清理」累计（独立 stateIn） */
     val cleanedStats: StateFlow<CleanedStats> =
-        combine(imageRepository.observeCleanedStats(), backups.observeFreedStats(), ::CleanedStats).stateIn(
+        combine(imageRepository.observeCleanedStats(), backups.observeFreedStats().calmDuringBulkWrites(), ::CleanedStats).stateIn(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(5_000),
             initialValue = CleanedStats(),
@@ -66,7 +67,7 @@ class DashboardViewModel(
     val todayCleanedStats: StateFlow<CleanedStats> =
         flow {
             val since = startOfTodayMillis()
-            emitAll(combine(imageRepository.observeCleanedStatsSince(since), backups.observeFreedStatsSince(since), ::CleanedStats))
+            emitAll(combine(imageRepository.observeCleanedStatsSince(since), backups.observeFreedStatsSince(since).calmDuringBulkWrites(), ::CleanedStats))
         }
             .stateIn(
                 scope = viewModelScope,

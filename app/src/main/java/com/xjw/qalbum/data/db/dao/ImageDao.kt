@@ -24,15 +24,9 @@ interface ImageDao {
     @Query("SELECT * FROM images WHERE path IN (:paths)")
     suspend fun getAnyByPaths(paths: List<String>): List<ImageEntity>
 
-    /** 这些路径上已入库的图记的家族键 */
-    @Query("SELECT DISTINCT variant_group FROM images WHERE path IN (:paths) AND variant_group IS NOT NULL")
-    suspend fun variantGroupsOfPaths(paths: List<String>): List<Long>
-
-    /** 这些家族里已入库的文件（含 Temp 转码图、并进来的发送图片缓存） */
-    @Query("SELECT variant_group AS variantGroup, path FROM images WHERE variant_group IN (:groups)")
-    suspend fun pathsInFamilies(groups: List<Long>): List<FamilyPath>
-
-    data class FamilyPath(val variantGroup: Long, val path: String)
+    /** 这些家族里已入库、还在原位置的文件（含 Temp 转码图、并进来的发送图片缓存；回收站里的与删掉的路径已换成内部地址） */
+    @Query("SELECT * FROM images WHERE variant_group IN (:groups) AND path NOT LIKE 'qalbum-internal:%'")
+    suspend fun getByFamilies(groups: List<Long>): List<ImageEntity>
 
     /** [archived]：归档页删除时归档的图也可删（见 PictureDeleteOptions.includeArchived） */
     @Query("""SELECT * FROM images WHERE id IN (:ids)

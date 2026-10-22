@@ -24,6 +24,28 @@ data class PictureDeleteFacts(
     fun bytes(options: PictureDeleteOptions): Long = if (options.linkedVersions) versionBytes else bytes
 }
 
+/** 批量删除各步骤累计用时（毫秒，并行的步骤按墙钟算），结束时写进日志，从用户日志里就能看出慢在哪一步 */
+internal class StepTimer {
+    private val totals = LinkedHashMap<String, Long>()
+
+    inline fun <T> measure(step: String, block: () -> T): T {
+        val started = android.os.SystemClock.elapsedRealtime()
+        try {
+            return block()
+        } finally {
+            add(step, android.os.SystemClock.elapsedRealtime() - started)
+        }
+    }
+
+    @Synchronized
+    fun add(step: String, ms: Long) {
+        totals[step] = (totals[step] ?: 0) + ms
+    }
+
+    @Synchronized
+    override fun toString(): String = totals.entries.joinToString(" ") { "${it.key}=${it.value}" }
+}
+
 internal data class PictureAsset(
     val id: Long?, val path: String, val sourceType: String, val size: Long, val mtime: Long, val stamp: String,
 )

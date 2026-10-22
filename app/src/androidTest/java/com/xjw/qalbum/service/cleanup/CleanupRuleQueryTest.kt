@@ -113,6 +113,28 @@ class CleanupRuleQueryTest {
     }
 
     @Test
+    fun stickerFiltersSplitAnimatedFromStillOnes() = runBlocking {
+        val still = insert(family()[0], "chatimg", "active", 50_000, width = 240, height = 240)
+        val gif = insert(family()[0], "chatimg", "active", 3 * mb, width = 800, height = 600, animated = true, mime = "image/gif")
+        // 聊天记录里是 GIF 的也算动图；标成表情的静态图算表情包
+        val (img, raw) = family()
+        insert(img, "chatimg", "active", 200_000, age = 100)
+        val gifMessage = insert(raw, "chatraw", "active", 2 * mb, age = 100)
+        origin(listOf(img, raw), 2, 100, picType = 2000)
+        val (img2, raw2) = family()
+        insert(img2, "chatimg", "active", 200_000, age = 100)
+        val stickerMessage = insert(raw2, "chatraw", "active", 2 * mb, age = 100)
+        origin(listOf(img2, raw2), 2, 100, picType = 1000, picSubType = 1)
+        insert(family()[0], "chatimg", "active", 300_000, width = 800, height = 600)
+        db.qqSourceDao().reconcileLinks()
+
+        assertEquals(setOf(still, gif, gifMessage, stickerMessage), ids(CleanupRule.Stickers, 0))
+        assertEquals(setOf(gif, gifMessage), ids(CleanupRule.Stickers, 1))
+        assertEquals(setOf(still, stickerMessage), ids(CleanupRule.Stickers, 2))
+        assertEquals(RuleStats(2, 3 * mb + 2 * mb + 200_000), stats(CleanupRule.Stickers, 1))
+    }
+
+    @Test
     fun oldPicturesAndTimeRangesWorkOnWholePictures() = runBlocking {
         val (img, raw, thumb) = family()
         insert(img, "chatimg", "active", 300_000, age = 3 * 365)
@@ -238,12 +260,12 @@ class CleanupRuleQueryTest {
     }
 
     /** 一条聊天来源（消息），关联到 [paths]；[daysAgo] 天前发的，[seenAt] 为最近一次读取时见到的时间 */
-    private suspend fun origin(paths: List<String>, chatType: Int, daysAgo: Int, seenAt: Long = now, picType: Int = 0): String {
+    private suspend fun origin(paths: List<String>, chatType: Int, daysAgo: Int, seenAt: Long = now, picType: Int = 0, picSubType: Int = -1): String {
         val sources = db.qqSourceDao()
         sources.putAccount(QqSourceAccountEntity("account", "账号", now, 0))
         val id = "origin-${++origins}"
         sources.insertOrigins(listOf(QqOriginEntity(id, "account", "conversation-$chatType", "", chatType, "sender", "", "",
-            now - daysAgo * day, "%032x".format(origins), seenAt, picType)))
+            now - daysAgo * day, "%032x".format(origins), seenAt, picType, picSubType)))
         sources.insertPaths(paths.map { QqOriginPathEntity(it, id) })
         return id
     }

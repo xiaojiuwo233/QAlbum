@@ -25,6 +25,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -127,7 +128,9 @@ class PictureFamilyDaoTest {
             val forwarded = sources.facetId(0, "forwarded")!!
             assertEquals(listOf(jpgId), sources.queryIds(QqScopeSql.ids(QqScopeIds(group, sender), QqContent.IMAGES, stacked = true)))
             assertEquals(listOf(jpgId), sources.queryIds(QqScopeSql.ids(QqScopeIds(conversationId = forwarded), QqContent.IMAGES, stacked = true)))
-            assertEquals(2, sources.pathContexts(listOf("$raw.jpg")).size)
+            // 别名所在的家族出现在两个会话里：删除规划据此判断「共用」
+            val range = sources.familyContextRange(listOf(jpg.variantGroup!!)).single()
+            assertNotEquals(range.low, range.high)
             assertEquals(setOf("Alice", "Forwarder"), sources.observeImageOrigins(jpgId).first().map { it.senderName }.toSet())
             assertFalse(sources.observeSummary().first()!!.dirty)
             // 同一版本再次启动不回填、不触发来源重建。
