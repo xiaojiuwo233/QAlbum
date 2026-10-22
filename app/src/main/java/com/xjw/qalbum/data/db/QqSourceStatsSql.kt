@@ -6,7 +6,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  * 来源统计的 SQL：增量触发器与整体重建步骤。
  *
  * 统计分两类：图片（status = active 且不是 chatthumb）与 QQ 缩略图（chatthumb，status = thumbnail_trash）。
- * - 缓存未标脏（qq_source_cache.dirty = 0）时，images 的新增 / 状态 / 大小 / 路径变化由触发器
+ * - 缓存未标脏（qq_source_cache.dirty = 0）时，新增的关联（image_qq_origins）与图片的状态 / 大小变化由触发器
  *   增量更新 qq_image_contexts、各分类计数与汇总；单张删除只改动这张图涉及的几行。
  * - 读取聊天来源后由 [applyNew] 增量更新：只处理读取前最大 rowid 之后新增的来源与关联，名称只重算涉及的会话与发送人。
  * - 清除索引、升级等标脏后，触发器暂停，由 [rebuildNames]、[contextsInRange]、[recount] 分段重建
@@ -54,8 +54,46 @@ object QqSourceStatsSql {
 
     const val MARK_DIRTY = "UPDATE qq_source_cache SET dirty = 1 WHERE id = 1"
 
-    /** v17 的触发器：关联删除 / 名称变化仍标脏；图片变化走增量 */
+    /** v27 换掉的两个按路径补关联的触发器（改由 [createTriggers] 里按关联增量的 qq_stats_link_insert 处理） */
+    val replacedInV27 = listOf("qq_stats_image_insert", "qq_stats_image_path")
+
+    /**
+     * v27 的触发器：关联删除 / 名称变化仍标脏；图片状态、大小变化与新增的关联走增量。
+     * 关联由 images 上的 link_qq_image_origin_* 触发器（新入库、改路径、改家族键）与读取来源时补上，新增一条就把
+     * 这张图计入它第一次出现的会话 / 发送人；分类还没建（新群、新发送人）的跳过，由读取结束时的 [applyNew] 补上。
+     */
     fun createTriggers(db: SupportSQLiteDatabase) {
+        createNameAndStateTriggers(db)
+        fun added(kind: (String) -> String, bytes: Boolean) =
+            "COALESCE((SELECT " + (if (bytes) "CASE WHEN ${kind("i")} THEN i.size ELSE 0 END" else kind("i")) +
+                " FROM images i WHERE i.id = NEW.image_id), 0)"
+        val additions = listOf(
+            "image_count = image_count + " + added(::img, false),
+            "image_bytes = image_bytes + " + added(::img, true),
+            "thumb_count = thumb_count + " + added(::thumb, false),
+            "thumb_bytes = thumb_bytes + " + added(::thumb, true),
+        ).joinToString(", ")
+        // 两个分类都在才会写入投影；只给这张图还没计入的分类加
+        val pair = """FROM qq_origins o
+            CROSS JOIN qq_source_facets cf ON cf.kind = 0 AND cf.`key` = o.conversation_key
+            CROSS JOIN qq_source_facets sf ON sf.kind = 1 AND sf.`key` = o.sender_key
+            WHERE o.id = NEW.origin_id"""
+        db.execSQL("""CREATE TRIGGER IF NOT EXISTS qq_stats_link_insert
+            AFTER INSERT ON image_qq_origins
+            WHEN $CLEAN
+            BEGIN
+              UPDATE qq_source_facets SET $additions WHERE id IN (
+                SELECT cf.id $pair AND NOT EXISTS (SELECT 1 FROM qq_image_contexts c WHERE c.image_id = NEW.image_id AND c.conversation_id = cf.id)
+                UNION
+                SELECT sf.id $pair AND NOT EXISTS (SELECT 1 FROM qq_image_contexts c WHERE c.image_id = NEW.image_id AND c.sender_id = sf.id));
+              UPDATE qq_source_cache SET $additions
+                WHERE id = 1 AND NOT EXISTS (SELECT 1 FROM qq_image_contexts WHERE image_id = NEW.image_id) AND EXISTS (SELECT 1 $pair);
+              INSERT OR IGNORE INTO qq_image_contexts(image_id, conversation_id, sender_id) SELECT NEW.image_id, cf.id, sf.id $pair;
+            END""")
+    }
+
+    /** 名称变化标脏、图片状态 / 大小变化与删除走增量（v17 起相同） */
+    private fun createNameAndStateTriggers(db: SupportSQLiteDatabase) {
         val dirty = "UPDATE qq_source_cache SET dirty = 1 WHERE id = 1 AND dirty = 0;"
         db.execSQL("""CREATE TRIGGER IF NOT EXISTS dirty_qq_links_delete
             AFTER DELETE ON image_qq_origins BEGIN $dirty END""")
@@ -77,6 +115,20 @@ object QqSourceStatsSql {
               UPDATE qq_source_facets SET ${deltas("OLD", "NEW")} WHERE ${facetsOf("NEW.id")};
               UPDATE qq_source_cache SET ${deltas("OLD", "NEW")} WHERE id = 1;
             END""")
+        // 图片行被删除（极少见）：扣掉贡献并清掉关联
+        db.execSQL("""CREATE TRIGGER IF NOT EXISTS qq_stats_image_delete
+            AFTER DELETE ON images
+            WHEN EXISTS (SELECT 1 FROM qq_image_contexts WHERE image_id = OLD.id)
+            BEGIN
+              UPDATE qq_source_facets SET ${deltas("OLD", null)} WHERE $CLEAN AND ${counted("OLD")} AND ${facetsOf("OLD.id")};
+              UPDATE qq_source_cache SET ${deltas("OLD", null)} WHERE id = 1 AND dirty = 0 AND ${counted("OLD")};
+              DELETE FROM qq_image_contexts WHERE image_id = OLD.id;
+            END""")
+    }
+
+    /** v17～v26 的触发器（旧版本迁移里用，保持当时的样子）：关联删除 / 名称变化仍标脏；图片变化按路径走增量 */
+    fun createTriggersV17(db: SupportSQLiteDatabase) {
+        createNameAndStateTriggers(db)
         // 扫描新入库的缓存文件：按路径找到已导入的消息，补上关联并计入统计
         db.execSQL("""CREATE TRIGGER IF NOT EXISTS qq_stats_image_insert
             AFTER INSERT ON images
@@ -105,15 +157,6 @@ object QqSourceStatsSql {
               UPDATE qq_source_cache SET ${deltas(null, "NEW")}
                 WHERE id = 1 AND ${counted("NEW")} AND NOT EXISTS (SELECT 1 FROM qq_image_contexts WHERE image_id = NEW.id);
               $CONTEXTS_OF_NEW_PATH;
-            END""")
-        // 图片行被删除（极少见）：扣掉贡献并清掉关联
-        db.execSQL("""CREATE TRIGGER IF NOT EXISTS qq_stats_image_delete
-            AFTER DELETE ON images
-            WHEN EXISTS (SELECT 1 FROM qq_image_contexts WHERE image_id = OLD.id)
-            BEGIN
-              UPDATE qq_source_facets SET ${deltas("OLD", null)} WHERE $CLEAN AND ${counted("OLD")} AND ${facetsOf("OLD.id")};
-              UPDATE qq_source_cache SET ${deltas("OLD", null)} WHERE id = 1 AND dirty = 0 AND ${counted("OLD")};
-              DELETE FROM qq_image_contexts WHERE image_id = OLD.id;
             END""")
     }
 

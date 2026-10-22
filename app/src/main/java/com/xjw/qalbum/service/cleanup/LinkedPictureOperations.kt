@@ -389,9 +389,7 @@ internal class LinkedPictureOperations(
                 mime=types.getValue(asset.path).mime,width=0,height=0,isAnimated=types.getValue(asset.path).isAnimated,
                 status=if(asset.sourceType=="chatthumb")"thumbnail_trash" else "active")
         }
-        drafts.forEach { draft ->
-            if(draft.variantGroup!=null)QqCachePaths.aliasStem(draft.path)?.let { db.qqSourceDao().registerDerivedPath(draft.path,it) }
-        }
+        // 带后缀的别名与同名缓存同一家族，插入时来源触发器按家族键关联
         for(page in drafts.chunked(200))images.insertAll(page)
         val rows=usable.flatMap { group->group.assets.map { it.path } }.chunked(200).flatMap { images.getAnyByPaths(it) }.associateBy { it.path }
         val included=usable.mapTo(HashSet()) { it.key }

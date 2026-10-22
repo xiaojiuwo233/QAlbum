@@ -149,6 +149,13 @@ val appModule = module {
         )
     }
 
+    single { com.xjw.qalbum.data.db.DatabaseSlimmer(context = get(), db = get()) }
+    single {
+        com.xjw.qalbum.service.storage.StorageMaintenance(
+            slimmer = get(), sources = get(), statsCache = get(), tasks = get(), imageLoader = get(), appScope = get(),
+        )
+    }
+
     // ---- Coil ImageLoader（全局单例，通过 Koin 暴露，App.onCreate 安装为 SingletonImageLoader） ----
 
     single { buildImageLoader(context = get(), accessManager = get(), fileOpsClient = get()) }
@@ -234,6 +241,7 @@ val appModule = module {
     viewModel {
         com.xjw.qalbum.ui.video.VideoViewModel(db = get(), library = get(), settings = get(), tasks = get(), appScope = get())
     }
+    viewModel { com.xjw.qalbum.ui.settings.StorageViewModel(maintenance = get()) }
     viewModel { LogViewModel() }
     viewModel { QqSourcesViewModel(repository = get(), settings = get()) }
     viewModel { params ->

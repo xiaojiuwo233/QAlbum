@@ -119,6 +119,19 @@ class QqSourceRepository(
             }
         }
 
+    /**
+     * 不与读取来源、整理统计同时进行地执行 [block]（精简数据库时用：期间不写来源）；已有来源任务在跑时返回 null。
+     * 期间来源页显示 [label]。
+     */
+    suspend fun <T> exclusive(label: String, block: suspend () -> T): T? {
+        if (!_progress.compareAndSet(null, QqSourceProgress(label, cancellable = false))) return null
+        return try {
+            block()
+        } finally {
+            _progress.value = null
+        }
+    }
+
     fun acknowledgeMessage() { _message.value = null }
     private fun report(text: String) { _report.value = text; _message.value = text }
     fun cancel() { if (_progress.value?.cancellable == true) job?.cancel() }
@@ -212,29 +225,11 @@ class QqSourceRepository(
                 var previewsMs = 0L
                 var statsMs = 0L
                 if (successful > 0) {
-                    stage = "converted_cache"
-                    val linksStarted = System.currentTimeMillis()
-                    _progress.value = QqSourceProgress("关联 QQ 转码图片")
-                    var offset = 0
-                    val base = root.trimEnd('/')
-                    while (true) {
-                        currentCoroutineContext().ensureActive()
-                        val rows = bound.callWithTimeout { it.listFiles("$base/Temp", offset, 512) }
-                        val entries = rows.filter { it != "+" }
-                        db.withTransaction {
-                            entries.forEach { row ->
-                                val filename = row.split('|', limit = 3).getOrNull(2) ?: return@forEach
-                                val reference = QqCachePaths.convertedThumbnailSource(filename) ?: return@forEach
-                                dao.registerDerivedPath("$base/Temp/$filename", "$base/$reference")
-                            }
-                        }
-                        offset += entries.size
-                        if ("+" !in rows || entries.isEmpty()) break
-                    }
-                    // 这次新登记的路径对上已入库的图片就补上关联；带后缀的别名（Cache_xxx.png 等）沿用同名文件的来源
+                    // 新读到的消息按家族键关联已入库的图片（原图、预览图、缩略图、带后缀的别名、Temp 转码图都在同一家族）
                     stage = "links"
+                    val linksStarted = System.currentTimeMillis()
                     _progress.value = QqSourceProgress("关联图片来源")
-                    dao.reconcileLinksAfter(baseline.paths)
+                    dao.linkAfter(baseline)
                     val previewsStarted = System.currentTimeMillis()
                     linksMs = previewsStarted - linksStarted
                     // 自己发的图多出的 chatimg 预览按 MD5 关联不上，按同一次发送的原图补上来源
@@ -295,11 +290,11 @@ class QqSourceRepository(
         return started
     }
 
-    /** 读取前的位置；上次读取没走完（中途退出）时沿用那次的，这次一并补上它写入的来源与路径 */
+    /** 读取前的位置；上次读取没走完（中途退出）时沿用那次的，这次一并补上它写入的来源与家族 */
     private suspend fun readBaseline(): QqReadBaseline {
-        settings.qqReadBaseline.first()?.split(':')?.mapNotNull(String::toLongOrNull)?.takeIf { it.size == 3 }
-            ?.let { (origins, paths, links) -> return QqReadBaseline(origins, paths, links) }
-        return dao.readBaseline().also { settings.setQqReadBaseline("${it.origins}:${it.paths}:${it.links}") }
+        settings.qqReadBaseline.first()?.split(':')?.mapNotNull(String::toLongOrNull)?.takeIf { it.size == 4 }
+            ?.let { (origins, families, paths, links) -> return QqReadBaseline(origins, families, paths, links) }
+        return dao.readBaseline().also { settings.setQqReadBaseline("${it.origins}:${it.families}:${it.paths}:${it.links}") }
     }
 
     private companion object {

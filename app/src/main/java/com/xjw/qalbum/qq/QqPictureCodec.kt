@@ -313,12 +313,27 @@ object QqCachePaths {
         }
     }
 
-    fun paths(root: String, picture: QqPictureElement): Set<String> = buildSet {
+    /** [md5] 这张图的家族键：它在 chatimg 下的文件名 CRC（与那个文件的 [familyKey] 相同）；不是 32 位十六进制时为 null */
+    fun md5Family(md5: String): Long? =
+        if (md5.length == 32 && md5.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }) crc("chatimg:" + md5.uppercase(Locale.ROOT)) else null
+
+    /** 这张图各 MD5 的家族键（去重，按 MD5 的顺序） */
+    fun families(picture: QqPictureElement): List<Long> = picture.md5s.mapNotNull(::md5Family).distinct()
+
+    /** 家族 [family] 在 [root] 下的 chatimg 路径（同一家族的其他路径由 [familyPaths] 推出） */
+    fun familyPath(root: String, family: Long): String {
+        val name = "Cache_" + java.lang.Long.toString(family, 16)
+        return "${root.trimEnd('/')}/chatimg/${name.takeLast(3)}/$name"
+    }
+
+    /**
+     * 消息里记的本地路径中，推不出 [families] 里家族键的（规范命名的缓存都按家族键关联，这些另外记下）。
+     * 只关联已经配置的图片目录，不把任意聊天附件路径作为图片读取入口。
+     */
+    fun extraPaths(root: String, picture: QqPictureElement, families: Collection<Long>): List<String> {
         val base = root.trimEnd('/')
-        picture.md5s.forEach { md5 -> relativePaths(md5).forEach { add("$base/$it") } }
-        picture.paths.forEach { path ->
-            // 只关联已经配置的图片目录，不把任意聊天附件路径作为图片读取入口。
-            if (path.startsWith("$base/") && path.removePrefix("$base/").split('/').none { it == ".." }) add(path)
+        return picture.paths.filter { path ->
+            path.startsWith("$base/") && path.removePrefix("$base/").split('/').none { it == ".." } && familyKey(path) !in families
         }
     }
 

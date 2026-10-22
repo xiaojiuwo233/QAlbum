@@ -11,7 +11,6 @@ import com.xjw.qalbum.data.db.dao.QqScopeOrder
 import com.xjw.qalbum.data.db.dao.QqScopeSql
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.db.entity.QqOriginEntity
-import com.xjw.qalbum.data.db.entity.QqOriginPathEntity
 import com.xjw.qalbum.data.db.entity.QqSourceAccountEntity
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.domain.model.TimelineSection
@@ -149,7 +148,7 @@ class PictureFamilyDaoTest {
             val raw = seedSources(db)[1]
             QqSourceStatsBuilder(db).rebuild {}
             val sources = db.qqSourceDao()
-            sources.registerDerivedPath("$raw.jpg", raw)
+            // 别名与同名缓存同一家族：入库时按家族键关联、计入统计
             val jpgId = db.imageDao().insert(image("$raw.jpg", "chatraw", "active", 1_000))
             assertEquals(2, sources.observeImageOrigins(jpgId).first().size)
             val group = sources.facetId(0, "group")!!
@@ -172,12 +171,11 @@ class PictureFamilyDaoTest {
         val paths = QqCachePaths.relativePaths(md5).map { "$root/$it" }
         val sources = db.qqSourceDao()
         sources.putAccount(QqSourceAccountEntity("account", "Account", 1_000, 2))
-        val origins = listOf(
-            QqOriginEntity("direct", "account", "group", "Photography", 2, "sender", "Alice", "", 1_000, md5),
-            QqOriginEntity("forward", "account", "forwarded", "Forwarded records", 3, "forwarder", "Forwarder", "", 2_000, md5),
-        )
-        sources.insertOrigins(origins)
-        sources.insertPaths(origins.flatMap { origin -> paths.map { QqOriginPathEntity(it, origin.id) } })
+        val family = QqCachePaths.md5Family(md5)
+        sources.insertOrigins(listOf(
+            QqOriginEntity("direct", "account", "group", "Photography", 2, "sender", "Alice", "", 1_000, md5, family = family),
+            QqOriginEntity("forward", "account", "forwarded", "Forwarded records", 3, "forwarder", "Forwarder", "", 2_000, md5, family = family),
+        ))
         return paths
     }
 

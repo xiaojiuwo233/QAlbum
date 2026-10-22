@@ -5,6 +5,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.xjw.qalbum.qq.QqCachePaths
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -27,6 +28,61 @@ class AppDatabaseMigrationTest {
     fun migrationEdgesCoverEveryPublishedVersion() {
         assertEquals((1 until AppDatabase.VERSION).toList(), allMigrations.map { it.startVersion })
         assertEquals((2..AppDatabase.VERSION).toList(), allMigrations.map { it.endVersion })
+    }
+
+    @Test
+    fun migrate26To27_linksPicturesByFamilyInsteadOfStoredPaths() {
+        val name = "migration-26-27"
+        val root = "/storage/emulated/0/Android/data/com.tencent.mobileqq/Tencent/MobileQQ/chatpic"
+        val md5 = "0123456789abcdef0123456789abcdef"
+        val second = "fedcba9876543210fedcba9876543210"
+        val (img, raw, thumb, hd) = QqCachePaths.relativePaths(md5).map { "$root/$it" }
+        val secondRaw = "$root/" + QqCachePaths.relativePaths(second)[1]
+        val alias = "$raw.png"
+        val temp = "$root/Temp/" + thumb.substringAfterLast('/') + ".thumb_1.tmp.from_orig_avif_aio.ready"
+        val odd = "$root/chatimg/odd/not_a_cache_name"
+        helper.createDatabase(name, 26).use { db ->
+            db.execSQL("INSERT INTO qq_source_accounts VALUES('a', '账号', 1, 1)")
+            db.execSQL(
+                """INSERT INTO qq_origins(id, account_key, conversation_key, conversation_name, chat_type, sender_key, sender_name,
+                    member_name, message_time, md5) VALUES('o', 'a', 'g', '群', 2, 's', '人', '', 1000, '$md5')""",
+            )
+            // 以前每条消息存下的路径：规范路径、第二个 MD5 的、别名、Temp 转码图，以及一条推不出家族键的
+            listOf(img, raw, thumb, hd, secondRaw, alias, temp, odd).forEach { db.execSQL("INSERT INTO qq_origin_paths VALUES('$it', 'o')") }
+            image(db, 1, raw)
+            db.execSQL("INSERT INTO image_qq_origins VALUES(1, 'o')")
+        }
+        helper.runMigrationsAndValidate(name, 27, true, AppDatabase.MIGRATION_26_27).use { db ->
+            assertEquals(QqCachePaths.md5Family(md5), scalarLong(db, "SELECT family FROM qq_origins WHERE id = 'o'"))
+            // 旧路径留到「精简数据库」时再删（见 DatabaseSlimmer），这时照常参与关联
+            assertEquals(8L, scalarLong(db, "SELECT COUNT(*) FROM qq_origin_paths"))
+            assertEquals(0L, scalarLong(db, "SELECT COUNT(*) FROM qq_origin_families"))
+            assertEquals(1L, scalarLong(db, "SELECT COUNT(*) FROM image_qq_origins"))
+            assertEquals(0L, scalarLong(db, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name IN ('qq_stats_image_insert', 'qq_stats_image_path')"))
+            db.query("PRAGMA foreign_key_check").use { assertEquals(0, it.count) }
+
+            // 删掉旧路径后（精简之后的样子）新入库的图也按家族键关联
+            db.execSQL("DELETE FROM qq_origin_paths WHERE path <> '$odd' AND path <> '$secondRaw'")
+            // 新入库的图按家族键关联：缩略图、别名、Temp 转码图、第二个 MD5 的原图，以及另记的路径
+            listOf(thumb, alias, temp, secondRaw, odd).forEachIndexed { index, path -> image(db, 2L + index, path) }
+            (2L..6L).forEach { id -> assertEquals("image $id", 1L, scalarLong(db, "SELECT COUNT(*) FROM image_qq_origins WHERE image_id = $id AND origin_id = 'o'")) }
+            // 发送图片缓存并进原图那一家（改家族键）时一起关联
+            image(db, 7, "$root/chatimg/abc/Cache_123abc")
+            assertEquals(0L, scalarLong(db, "SELECT COUNT(*) FROM image_qq_origins WHERE image_id = 7"))
+            db.execSQL("UPDATE images SET variant_group = ${QqCachePaths.md5Family(md5)} WHERE id = 7")
+            assertEquals(1L, scalarLong(db, "SELECT COUNT(*) FROM image_qq_origins WHERE image_id = 7"))
+        }
+    }
+
+    /** 按路径算出家族键的一行图片（v26 起的列） */
+    private fun image(db: SupportSQLiteDatabase, id: Long, path: String) {
+        val family = QqCachePaths.familyKey(path)?.toString() ?: "NULL"
+        db.execSQL(
+            """INSERT INTO images(id, path, filename, parent_dir, source_type, cache_key, variant_group, size, mtime, first_seen,
+                last_seen, mime, width, height, is_animated, status, is_protected)
+            VALUES($id, '$path', '${path.substringAfterLast('/')}', '/c', 'chatraw', 'k$id', $family, 100, 1000, 1000, 1000,
+                'image/jpeg', 10, 10, 0, 'active', 0)""",
+        )
     }
 
     @Test
@@ -130,9 +186,9 @@ class AppDatabaseMigrationTest {
         val name = "migration-19-20"
         helper.createDatabase(name, 19).use { db ->
             // v19 的触发器不在导出的 schema 里（由迁移 / 建库回调创建），这里补上
-            AppDatabase.createQqSourceTriggers(db)
+            AppDatabase.createQqSourceTriggersV13(db)
             db.execSQL(QqSourceStatsSql.ENSURE_CACHE_ROW)
-            QqSourceStatsSql.createTriggers(db)
+            QqSourceStatsSql.createTriggersV17(db)
             ImageVariantSql.createTriggers(db)
             db.execSQL("""CREATE TRIGGER invalidate_changed_image_analysis AFTER UPDATE OF size, mtime ON images
                 BEGIN DELETE FROM ocr_text WHERE image_id = NEW.id; END""")

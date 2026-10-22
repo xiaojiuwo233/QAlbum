@@ -51,11 +51,8 @@ internal class QqSentPreviewLinker(
         val now = System.currentTimeMillis()
         db.withTransaction {
             dao.putPreviewChecks(previews.map { QqPreviewCheckEntity(it.previewPath, it.previewSize, raws[it.previewId], now) })
-            val found = previews.filter { it.previewId in raws }
-            found.forEach { dao.registerDerivedPath(it.previewPath, raws.getValue(it.previewId)) }
-            // 新关联由读取结束时的增量更新计入会话 / 发送人统计
-            found.map { it.previewId }.chunked(SQL_CHUNK).forEach { dao.linkImages(it) }
         }
+        // 并进原图那一家（改家族键时触发器按家族关联到原图的消息）
         mergeFamilies(db)
         Timber.i("QQ sent previews: candidates=%d referenced=%d verified=%d", previews.size, referenced.size, verified.size)
         return raws.size

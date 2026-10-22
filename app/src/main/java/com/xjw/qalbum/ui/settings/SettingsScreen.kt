@@ -31,6 +31,7 @@ import androidx.compose.material.icons.automirrored.outlined.FactCheck
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.CleaningServices
+import androidx.compose.material.icons.outlined.DataUsage
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Info
@@ -93,6 +94,9 @@ import com.xjw.qalbum.ui.components.ConnectedChoiceRow
 import com.xjw.qalbum.ui.components.SegmentPosition
 import com.xjw.qalbum.ui.components.SegmentedCard
 import com.xjw.qalbum.ui.components.SegmentedGroup
+import com.xjw.qalbum.ui.components.WavyProgress
+import com.xjw.qalbum.ui.common.formatBytes
+import com.xjw.qalbum.ui.common.formatCount
 import com.xjw.qalbum.ui.components.SegmentedListItem
 import com.xjw.qalbum.ui.components.SegmentedSwitchItem
 import com.xjw.qalbum.ui.components.ShapeIcon
@@ -103,6 +107,7 @@ import org.koin.androidx.compose.koinViewModel
 enum class SettingsGroup(val title: String) {
     DATA("数据与清理"),
     SYSTEM("个性化与系统"),
+    APP("应用"),
 }
 
 /** 设置类别：每个类别一个独立子页面，首页按 [group] 聚合入口 */
@@ -117,8 +122,9 @@ enum class SettingsCategory(
     CLEANUP("settings_cleanup", "清理", "回收站、原图压缩与定时清理", Icons.Outlined.CleaningServices, SettingsGroup.DATA),
     PERSONALIZATION("settings_personalization", "外观与导出", "取色、图库显示、动效与导出目录", Icons.Outlined.Palette, SettingsGroup.SYSTEM),
     ACCESS("settings_access", "权限与访问", "Shizuku / Root 授权与连通性", Icons.Outlined.Security, SettingsGroup.SYSTEM),
-    LOGS("settings_logs", "日志", "运行日志、崩溃记录与导出", Icons.AutoMirrored.Outlined.Article, SettingsGroup.SYSTEM),
-    ABOUT("settings_about", "关于", "版本信息", Icons.Outlined.Info, SettingsGroup.SYSTEM),
+    STORAGE("settings_storage", "存储空间", "数据库占用与精简、图片缓存", Icons.Outlined.DataUsage, SettingsGroup.APP),
+    LOGS("settings_logs", "日志", "运行日志、崩溃记录与导出", Icons.AutoMirrored.Outlined.Article, SettingsGroup.APP),
+    ABOUT("settings_about", "关于", "版本信息", Icons.Outlined.Info, SettingsGroup.APP),
     ;
 
     companion object {
@@ -639,6 +645,79 @@ fun AccessSettingsScreen(
         }
     }
 }
+
+@Composable
+fun StorageSettingsScreen(
+    onBack: () -> Unit,
+    viewModel: StorageViewModel = koinViewModel(),
+    sharedScope: SharedTransitionScope? = null,
+    animatedScope: AnimatedVisibilityScope? = null,
+) {
+    val usage by viewModel.usage.collectAsState()
+    val progress by viewModel.progress.collectAsState()
+    val message by viewModel.message.collectAsState()
+
+    SettingsDetailScaffold(SettingsCategory.STORAGE, onBack, sharedScope, animatedScope) { notify ->
+        LaunchedEffect(message) {
+            message?.let { notify(it); viewModel.acknowledgeMessage() }
+        }
+        val database = usage?.database
+        SegmentedGroup(header = "数据库") {
+            item("database") { position ->
+                SegmentedCard(position) {
+                    Text(
+                        database?.let { formatBytes(it.totalBytes) } ?: "统计中…",
+                        style = MaterialTheme.typography.headlineMediumEmphasized,
+                    )
+                    database?.let {
+                        SettingsBlurb("${formatCount(it.images)} 张图片 · ${formatCount(it.sources)} 条聊天来源 · ${formatCount(it.videos)} 个视频")
+                    }
+                    val running = progress
+                    when {
+                        running != null -> {
+                            Text(running.label, style = MaterialTheme.typography.titleSmall)
+                            WavyProgress(if (running.total > 0) running.done.toFloat() / running.total else null)
+                        }
+                        database == null -> Unit
+                        database.reclaimableBytes >= MIN_SLIM_BYTES -> {
+                            SettingsBlurb(
+                                buildList {
+                                    if (database.legacyBytes > 0) add("旧版存下的图片路径约 ${formatBytes(database.legacyBytes)}，现在用不上了")
+                                    if (database.freeBytes > 0) add("空闲 ${formatBytes(database.freeBytes)}")
+                                }.joinToString("；") + "。精简时不能读取聊天来源。",
+                            )
+                            Button(onClick = viewModel::slim, shapes = ButtonDefaults.shapes()) {
+                                Text("精简数据库，约省 ${formatBytes(database.reclaimableBytes)}")
+                            }
+                        }
+                        else -> SettingsBlurb("不需要精简。")
+                    }
+                }
+            }
+        }
+        SegmentedGroup(header = "缓存与日志") {
+            item("cache") { position ->
+                SegmentedListItem(
+                    position = position,
+                    headline = { Text("图片缓存") },
+                    supporting = { Text(usage?.let { formatBytes(it.cacheBytes) } ?: "统计中…") },
+                    trailing = { TextButton(onClick = viewModel::clearCache, enabled = (usage?.cacheBytes ?: 0) > 0) { Text("清除") } },
+                )
+            }
+            item("logs") { position ->
+                SegmentedListItem(
+                    position = position,
+                    headline = { Text("运行日志") },
+                    supporting = { Text(usage?.let { formatBytes(it.logBytes) } ?: "统计中…") },
+                    trailing = { TextButton(onClick = viewModel::clearLogs, enabled = (usage?.logBytes ?: 0) > 0) { Text("清除") } },
+                )
+            }
+        }
+    }
+}
+
+/** 能省下这么多才值得精简 */
+private const val MIN_SLIM_BYTES = 32L * 1024 * 1024
 
 @Composable
 fun AboutSettingsScreen(

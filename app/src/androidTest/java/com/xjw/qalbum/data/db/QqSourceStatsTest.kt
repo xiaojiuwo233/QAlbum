@@ -35,7 +35,7 @@ class QqSourceStatsTest {
         val name = "qq-source-stats"
         helper.createDatabase(name, 16).close()
         helper.runMigrationsAndValidate(name, 17, true, AppDatabase.MIGRATION_16_17).use { db ->
-            AppDatabase.createQqSourceTriggers(db)
+            AppDatabase.createQqSourceTriggersV13(db)
             seed(db)
             rebuild(db)
 

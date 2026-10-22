@@ -50,10 +50,23 @@ internal class PictureFamilyPlanner(private val db: AppDatabase, private val roo
                             join(path, member)
                         }
                     }
-                    for (page in frontier.chunked(200)) {
-                        val edges = db.qqSourceDao().picturePathEdges(page).groupBy { it.originId }
-                        for (entries in edges.values) {
-                            val verified = entries.map { it.path }.filter { it in paths || cacheType(it) != null }
+                    for (page in frontier.chunked(100)) {
+                        // 同一条消息里的图（按 MD5 合并）：它的各个家族（一张图有多个 MD5 时不止一个）里已入库的文件、
+                        // 每个家族的规范路径（下一轮再推出原图 / 预览图 / 缩略图），以及消息另记的路径
+                        val sources = db.qqSourceDao()
+                        val families = familiesOf(page)
+                        val byOrigin = HashMap<String, MutableSet<String>>()
+                        val edges = sources.familyEdges(families, page)
+                        val members = edges.map { it.family }.distinct().chunked(200).flatMap { db.imageDao().pathsInFamilies(it) }
+                            .groupBy({ it.variantGroup }, { it.path })
+                        for (edge in edges) {
+                            val entries = byOrigin.getOrPut(edge.originId) { HashSet() }
+                            entries += QqCachePaths.familyPath(root, edge.family)
+                            members[edge.family]?.let(entries::addAll)
+                        }
+                        for (edge in sources.explicitPathEdges(families, page)) byOrigin.getOrPut(edge.originId) { HashSet() } += edge.path
+                        for (entries in byOrigin.values) {
+                            val verified = entries.filter { it in paths || cacheType(it) != null }
                             if (verified.isEmpty()) continue
                             val anchor = verified.first()
                             for (path in verified) {
@@ -75,6 +88,10 @@ internal class PictureFamilyPlanner(private val db: AppDatabase, private val roo
                 check(rows.size==page.size) { "文件状态返回不完整" }
                 page.indices.forEach { states[page[it]]=rows[it] }
             }
+            // 每个路径的会话 / 发送人：按家族键找消息（文件名算出的与已入库那张图记的），加上另记的路径与已入库图的关联
+            val familyOf = parents.keys.associateWith { path -> setOfNotNull(indexed[path]?.variantGroup, QqCachePaths.familyKey(path)) }
+            val contextsByFamily = familyOf.values.flatten().distinct().chunked(200).flatMap { db.qqSourceDao().familyContexts(it) }
+                .groupBy({ it.family }, { QqPictureContext(it.conversationKey, it.senderKey) })
             val contextsByPath = parents.keys.chunked(200).flatMap { db.qqSourceDao().pathContexts(it) }
                 .groupBy({ it.path }, { QqPictureContext(it.conversationKey, it.senderKey) })
             val groups = ArrayList<PictureFileGroup>()
@@ -99,7 +116,9 @@ internal class PictureFamilyPlanner(private val db: AppDatabase, private val roo
                     if(old!=null && (old.size!=size || old.mtime!=mtime || old.status=="missing")) { unavailable=true;continue }
                     assets+=PictureAsset(old?.id,path,old?.sourceType?:cacheType(path)?:"unknown",size,mtime,parts[3])
                 }
-                val contexts=members.flatMap { contextsByPath[it].orEmpty() }.distinct()
+                val contexts=members.flatMap { path ->
+                    contextsByPath[path].orEmpty() + familyOf[path].orEmpty().flatMap { contextsByFamily[it].orEmpty() }
+                }.distinct()
                 val shared=if(scope==null)contexts.size>1 else contexts.any {
                     (scope.groupKey!=null && it.conversationKey!=scope.groupKey) || (scope.senderKey!=null && it.senderKey!=scope.senderKey)
                 }
@@ -114,6 +133,10 @@ internal class PictureFamilyPlanner(private val db: AppDatabase, private val roo
             consume(groups)
         }
     }
+
+    /** 这些路径的家族键：按文件名算出的，加上已入库那张图记的（发送图片缓存并进了原图那一家） */
+    private suspend fun familiesOf(paths: List<String>): List<Long> =
+        (paths.mapNotNull { QqCachePaths.familyKey(it) } + db.imageDao().variantGroupsOfPaths(paths)).distinct()
 
     private fun cacheType(path: String): String? {
         val base=root.trimEnd('/')+"/"

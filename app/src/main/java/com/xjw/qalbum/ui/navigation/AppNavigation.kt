@@ -57,6 +57,7 @@ import com.xjw.qalbum.ui.gallery.ArchiveScreen
 import com.xjw.qalbum.ui.gallery.GalleryScreen
 import com.xjw.qalbum.ui.logs.LogScreen
 import com.xjw.qalbum.ui.settings.AboutSettingsScreen
+import com.xjw.qalbum.ui.settings.StorageSettingsScreen
 import com.xjw.qalbum.ui.settings.AccessSettingsScreen
 import com.xjw.qalbum.ui.settings.CleanupSettingsScreen
 import com.xjw.qalbum.ui.settings.PersonalizationSettingsScreen
@@ -239,6 +240,13 @@ fun AppNavigation() {
                 }
                 composable(SettingsCategory.PERSONALIZATION.route) {
                     PersonalizationSettingsScreen(
+                        onBack = { navController.popBackStack() },
+                        sharedScope = this@SharedTransitionLayout,
+                        animatedScope = this,
+                    )
+                }
+                composable(SettingsCategory.STORAGE.route) {
+                    StorageSettingsScreen(
                         onBack = { navController.popBackStack() },
                         sharedScope = this@SharedTransitionLayout,
                         animatedScope = this,

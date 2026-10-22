@@ -6,7 +6,6 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.db.entity.QqOriginEntity
-import com.xjw.qalbum.data.db.entity.QqOriginPathEntity
 import com.xjw.qalbum.data.db.entity.QqSourceAccountEntity
 import com.xjw.qalbum.qq.QqCachePaths
 import kotlinx.coroutines.runBlocking
@@ -17,8 +16,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * QQ 按原文件名带后缀另存的缓存（Cache_xxx.png / .gif，发送本地图片、另存后转发时出现）沿用同名缓存的来源：
- * 读取来源后整理关联、扫描新入库时登记别名，都能关联上消息，不会被算成「聊天记录已删除」。
+ * QQ 按原文件名带后缀另存的缓存（Cache_xxx.png / .gif，发送本地图片、另存后转发时出现）与同名缓存同一家族：
+ * 读取来源后补关联、扫描新入库时，都按家族键关联上消息，不会被算成「聊天记录已删除」。
  */
 @RunWith(AndroidJUnit4::class)
 class QqAliasLinkTest {
@@ -55,21 +54,19 @@ class QqAliasLinkTest {
         val raw = "$root/" + QqCachePaths.relativePaths(md5).first { it.startsWith("chatraw/") }
         val sources = db.qqSourceDao()
         sources.putAccount(QqSourceAccountEntity("account", "Account", 1_000, 1))
-        sources.insertOrigins(listOf(QqOriginEntity("origin", "account", "group", "群", 2, "sender", "Alice", "", 1_000, md5)))
-        sources.insertPaths(listOf(QqOriginPathEntity(raw, "origin")))
-
-        // 已经入库的别名：读取来源后整理关联时补上
+        // 已经入库的别名：读到这条消息后按家族键补上关联
         listOf("png", "gif", "JPEG").forEach { db.imageDao().insertAll(listOf(image("$raw.$it"))) }
         db.imageDao().insertAll(listOf(image("$raw.txt")))
-        sources.reconcileLinks()
+        val baseline = sources.readBaseline()
+        sources.insertOrigins(listOf(QqOriginEntity("origin", "account", "group", "群", 2, "sender", "Alice", "", 1_000, md5, family = QqCachePaths.md5Family(md5))))
+        sources.linkAfter(baseline)
         assertEquals(1, linked("$raw.png"))
         assertEquals(1, linked("$raw.gif"))
         assertEquals(1, linked("$raw.JPEG"))
         assertEquals(0, linked("$raw.txt"))
 
-        // 扫描新入库的别名：插入前登记，来源触发器插入时一起关联
+        // 扫描新入库的别名：来源触发器插入时按家族键关联
         val webp = "$raw.webp"
-        QqCachePaths.aliasStem(webp)?.let { sources.registerDerivedPath(webp, it) }
         db.imageDao().insertAll(listOf(image(webp)))
         assertEquals(1, linked(webp))
     }

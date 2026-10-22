@@ -98,8 +98,8 @@ class QuarantineManager(
             fun protected(row: ImageDao.DeleteFactRow) = row.isArchived && !includeArchived
             val open = rows.filterNot(::protected)
             val sources = db.qqSourceDao()
-            val sharedPaths = open.map { it.path }.chunked(PATH_CHUNK).flatMapTo(HashSet()) { page ->
-                if (scope == null) sources.pathsInSeveralContexts(page) else sources.pathsOutsideScope(page, scope.groupKey, scope.senderKey)
+            val sharedIds = open.map { it.id }.chunked(PATH_CHUNK).flatMapTo(HashSet()) { page ->
+                if (scope == null) sources.idsInSeveralContexts(page) else sources.idsOutsideScope(page, scope.groupKey, scope.senderKey)
             }
             PictureDeleteFacts(
                 count = rows.size,
@@ -107,7 +107,7 @@ class QuarantineManager(
                 versionBytes = sizes.values.sum(),
                 withVersions = rows.count { row -> familyIds[row.variantGroup].orEmpty().any { it != row.id } },
                 protectedCount = rows.count(::protected),
-                shared = open.count { it.path in sharedPaths },
+                shared = open.count { it.id in sharedIds },
                 accessError = fileAccessError(),
             )
         }

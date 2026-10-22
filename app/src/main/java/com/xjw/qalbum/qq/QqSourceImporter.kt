@@ -3,6 +3,7 @@ package com.xjw.qalbum.qq
 import androidx.room.withTransaction
 import com.xjw.qalbum.data.db.AppDatabase
 import com.xjw.qalbum.data.db.entity.QqOriginEntity
+import com.xjw.qalbum.data.db.entity.QqOriginFamilyEntity
 import com.xjw.qalbum.data.db.entity.QqOriginPathEntity
 import com.xjw.qalbum.data.db.entity.QqSourceAccountEntity
 import kotlinx.coroutines.currentCoroutineContext
@@ -32,13 +33,20 @@ internal data class QqPerson(val uid: String, val nickname: String, val remark: 
 }
 
 internal class QqSourceImporter(private val db: AppDatabase) {
-    private class Pending(val origin: QqOriginEntity, val paths: Collection<String>)
+    /** 一条消息的一张图：第一个 MD5 的家族键记在 [origin] 上，[families] 是其余 MD5 的，[paths] 是推不出家族键的路径 */
+    private class Pending(val origin: QqOriginEntity, val families: List<Long>, val paths: List<String>)
+
+    private fun toPending(origin: QqOriginEntity, picture: QqPictureElement, root: String): Pending {
+        val families = QqCachePaths.families(picture)
+        return Pending(origin.copy(family = families.firstOrNull()), families.drop(1), QqCachePaths.extraPaths(root, picture, families))
+    }
 
     /**
      * 读取一个账号的消息来源。[readStart] 是这次读取的开始时间：读到的每条消息都记 seen_at = [readStart]，
      * 完整读取后仍早于它的消息就是 QQ 里已经删掉的（见「聊天记录已删除」规则）。
      * [startAfter]（表名 → rowid）给出时只读这之后的新消息（增量读取）。
-     * 以前读过的消息只更新读取时间，路径不再登记（由 MD5 推出，不会变）；[allPaths] 为真时照样登记（解析规则更新后）。
+     * 图片按 MD5 的家族键关联（见 QqOriginEntity.family）；以前读过的消息只更新读取时间，[allPaths] 为真时
+     * 也补登记它们的其他家族与另记的路径（解析规则更新后）。
      *
      * 写入按几千条一个短事务提交，不长时间占住数据库（期间删图、扫描照常）；关联与统计由调用方在全部读完后补上。
      */
@@ -81,12 +89,17 @@ internal class QqSourceImporter(private val db: AppDatabase) {
                 pending.chunked(SQL_CHUNK).forEach { chunk ->
                     val rowids = dao.insertOrigins(chunk.map { it.origin })
                     val seen = mutableListOf<QqOriginEntity>()
+                    val families = mutableListOf<QqOriginFamilyEntity>()
                     val paths = mutableListOf<QqOriginPathEntity>()
                     chunk.forEachIndexed { index, item ->
                         val added = rowids.getOrElse(index) { -1L } != -1L
                         if (!added) seen += item.origin
-                        if (added || allPaths) item.paths.mapTo(paths) { QqOriginPathEntity(it, item.origin.id) }
+                        if (added || allPaths) {
+                            item.families.mapTo(families) { QqOriginFamilyEntity(it, item.origin.id) }
+                            item.paths.mapTo(paths) { QqOriginPathEntity(it, item.origin.id) }
+                        }
                     }
+                    if (families.isNotEmpty()) dao.insertFamilies(families)
                     if (paths.isNotEmpty()) dao.insertPaths(paths)
                     // 以前读过的消息补上这次的读取时间与图片属性；按属性分组，每组一条语句
                     seen.groupBy { Triple(it.picType, it.picSubType, it.sentOriginal) }.forEach { (info, group) ->
@@ -129,18 +142,18 @@ internal class QqSourceImporter(private val db: AppDatabase) {
                     if (record.pictures.isNotEmpty() && conversationName.isNotBlank()) conversationNames[conversationKey] = conversationName
                     record.pictures.forEachIndexed { index, picture ->
                         val id = opaqueKey(account.key, table, msgId, picture.elementId.ifBlank { index.toString() }, picture.md5s.joinToString(","))
-                        pending += Pending(QqOriginEntity(id, account.key, conversationKey, conversationName, chatType,
+                        pending += toPending(QqOriginEntity(id, account.key, conversationKey, conversationName, chatType,
                             senderKey, senderName, memberName, record.sentAt * 1000L, picture.md5s.first(),
-                            readStart, picture.picType, picture.picSubType, picture.original), QqCachePaths.paths(chatpicRoot, picture))
+                            readStart, picture.picType, picture.picSubType, picture.original), picture, chatpicRoot)
                         pictures++
                     }
                     // 合并转发统一进入虚拟分类。所有层的图片使用最外层转发者，不借用内层人物或原群。
                     record.forwardedPictures.forEach { forwarded ->
                         val picture = forwarded.picture
                         val id = opaqueKey(account.key, table, msgId, "forwarded", forwarded.identity, picture.md5s.joinToString(","))
-                        pending += Pending(QqOriginEntity(id, account.key, QqForwardSource.KEY, QqForwardSource.NAME, QqForwardSource.CHAT_TYPE,
+                        pending += toPending(QqOriginEntity(id, account.key, QqForwardSource.KEY, QqForwardSource.NAME, QqForwardSource.CHAT_TYPE,
                             senderKey, senderName, "", record.sentAt * 1000L, picture.md5s.first(),
-                            readStart, picture.picType, picture.picSubType, picture.original), QqCachePaths.paths(chatpicRoot, picture))
+                            readStart, picture.picType, picture.picSubType, picture.original), picture, chatpicRoot)
                         pictures++
                     }
                     if (pending.size >= FLUSH_SIZE) flush()

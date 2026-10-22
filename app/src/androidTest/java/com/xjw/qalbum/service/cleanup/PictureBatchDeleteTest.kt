@@ -10,7 +10,6 @@ import com.xjw.qalbum.access.AccessManager
 import com.xjw.qalbum.data.db.AppDatabase
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.db.entity.QqOriginEntity
-import com.xjw.qalbum.data.db.entity.QqOriginPathEntity
 import com.xjw.qalbum.data.db.entity.QqSourceAccountEntity
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.fileops.BoundFileOps
@@ -52,8 +51,8 @@ class PictureBatchDeleteTest {
         val family = families.single()
         val sources = db.qqSourceDao()
         sources.putAccount(QqSourceAccountEntity("account", "Account", 1_000, 1))
-        sources.insertOrigins(listOf(QqOriginEntity("origin", "account", "group", "Photography", 2, "sender", "Alice", "", 1_000, "%032x".format(1))))
-        sources.insertPaths(family.files.map { QqOriginPathEntity(it.path, "origin") })
+        val md5 = "%032x".format(1)
+        sources.insertOrigins(listOf(QqOriginEntity("origin", "account", "group", "Photography", 2, "sender", "Alice", "", 1_000, md5, family = QqCachePaths.md5Family(md5))))
         sources.reconcileLinks()
         QqSourceStatsBuilder(db).rebuild {}
         // .jpg 尚未扫描入库，仍应由精确缓存名发现并一起清理。

@@ -14,6 +14,7 @@ import com.xjw.qalbum.data.db.dao.VideoDao
 import com.xjw.qalbum.data.db.entity.QqAutoArchiveEntity
 import com.xjw.qalbum.data.db.entity.QqSourceAccountEntity
 import com.xjw.qalbum.data.db.entity.QqOriginEntity
+import com.xjw.qalbum.data.db.entity.QqOriginFamilyEntity
 import com.xjw.qalbum.data.db.entity.QqOriginPathEntity
 import com.xjw.qalbum.data.db.entity.QqReadMarkEntity
 import com.xjw.qalbum.data.db.entity.QqPreviewCheckEntity
@@ -47,6 +48,7 @@ import com.xjw.qalbum.data.db.entity.VideoEntity
         QqSourceAccountEntity::class,
         QqOriginEntity::class,
         QqOriginPathEntity::class,
+        QqOriginFamilyEntity::class,
         ImageQqOriginEntity::class,
         QqSourceFacetCacheEntity::class,
         QqSourceCacheEntity::class,
@@ -113,7 +115,7 @@ abstract class AppDatabase : RoomDatabase() {
                     `image_count` INTEGER NOT NULL, `image_bytes` INTEGER NOT NULL, `thumb_count` INTEGER NOT NULL,
                     `thumb_bytes` INTEGER NOT NULL, PRIMARY KEY(`id`))""")
                 db.execSQL(QqSourceStatsSql.ENSURE_CACHE_ROW)
-                QqSourceStatsSql.createTriggers(db)
+                QqSourceStatsSql.createTriggersV17(db)
             }
         }
 
@@ -282,6 +284,14 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v26 → v27：聊天来源不再逐条存路径（每条消息 4 条完整路径，几十万条消息要上百万行、占数据库一半以上），
+         * 改按家族键关联图片，见 [QqFamilyMigration]。
+         */
+        val MIGRATION_26_27 = object : Migration(26, 27) {
+            override fun migrate(db: SupportSQLiteDatabase) = QqFamilyMigration.migrate(db)
+        }
+
         /** v25 → v26：压缩记录记下省下的空间何时腾出来（首页「今日已清理」算压缩省下的） */
         val MIGRATION_25_26 = object : Migration(25, 26) {
             override fun migrate(db: SupportSQLiteDatabase) {
@@ -323,7 +333,7 @@ abstract class AppDatabase : RoomDatabase() {
         const val DB_NAME = "qalbum.db"
 
         /** 当前数据库版本（启动时据此判断要不要显示升级进度） */
-        const val VERSION = 26
+        const val VERSION = 27
 
         /** v1 → v2：Phase 3 增加 Room FTS4 OCR 索引。 */
         val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -574,11 +584,12 @@ abstract class AppDatabase : RoomDatabase() {
                     FOREIGN KEY(image_id) REFERENCES images(id) ON DELETE CASCADE,
                     FOREIGN KEY(origin_id) REFERENCES qq_origins(id) ON DELETE CASCADE)""")
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_image_qq_origins_origin_id ON image_qq_origins(origin_id)")
-                createQqSourceTriggers(db)
+                createQqSourceTriggersV13(db)
             }
         }
 
-        internal fun createQqSourceTriggers(db: SupportSQLiteDatabase) {
+        /** v13～v26 的关联触发器（旧版本迁移里用，保持当时的样子）：按路径关联 */
+        internal fun createQqSourceTriggersV13(db: SupportSQLiteDatabase) {
             listOf("INSERT", "UPDATE OF path").forEachIndexed { index, operation ->
                 db.execSQL("""CREATE TRIGGER IF NOT EXISTS link_qq_image_origin_$index
                     AFTER $operation ON images BEGIN
@@ -587,6 +598,29 @@ abstract class AppDatabase : RoomDatabase() {
                     END""")
             }
         }
+
+        /**
+         * v27 的关联触发器：图片入库、改路径（恢复）、改家族键（发送图片缓存并进原图那一家等）时，关联到家族键相同的消息
+         * （qq_origins.family 与 qq_origin_families），以及路径记在 qq_origin_paths 里的少数消息。
+         */
+        internal fun createQqSourceLinkTriggers(db: SupportSQLiteDatabase) {
+            val origins = """SELECT id FROM qq_origins WHERE family = NEW.variant_group
+                UNION SELECT origin_id FROM qq_origin_families WHERE family = NEW.variant_group
+                UNION SELECT origin_id FROM qq_origin_paths WHERE path = NEW.path"""
+            listOf(
+                "INSERT" to "",
+                "UPDATE OF path" to "WHEN OLD.path IS NOT NEW.path",
+                "UPDATE OF variant_group" to "WHEN NEW.variant_group IS NOT OLD.variant_group",
+            ).forEachIndexed { index, (operation, condition) ->
+                db.execSQL("""CREATE TRIGGER IF NOT EXISTS link_qq_image_origin_$index
+                    AFTER $operation ON images $condition BEGIN
+                    INSERT OR IGNORE INTO image_qq_origins(image_id, origin_id) SELECT NEW.id, id FROM ($origins);
+                    END""")
+            }
+        }
+
+        /** v27 换掉的关联触发器 */
+        internal val LINK_TRIGGERS = listOf("link_qq_image_origin_0", "link_qq_image_origin_1", "link_qq_image_origin_2")
 
         val MIGRATION_13_14 = object : Migration(13, 14) {
             override fun migrate(db: SupportSQLiteDatabase) {
@@ -850,7 +884,7 @@ abstract class AppDatabase : RoomDatabase() {
         /** 新建数据库时补上 Room 不负责的触发器（升级路径由各 Migration 建立同一套） */
         val creationCallback = object : Callback() {
             override fun onCreate(db: SupportSQLiteDatabase) {
-                createQqSourceTriggers(db)
+                createQqSourceLinkTriggers(db)
                 db.execSQL(QqSourceStatsSql.ENSURE_CACHE_ROW)
                 QqSourceStatsSql.createTriggers(db)
                 ImageVariantSql.createTriggers(db)
@@ -863,7 +897,7 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14,
             MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20,
             MIGRATION_20_21, MIGRATION_21_22, MIGRATION_22_23, MIGRATION_23_24,
-            MIGRATION_24_25, MIGRATION_25_26,
+            MIGRATION_24_25, MIGRATION_25_26, MIGRATION_26_27,
         )
 
         /** 每个迁移开始时报告升级到哪一版（升级弹窗里显示），具体步骤由迁移自己细报 */

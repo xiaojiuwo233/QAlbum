@@ -27,6 +27,34 @@ class QqCachePathsTest {
     }
 
     @Test
+    fun `由 MD5 算出的家族键与它各个缓存文件的家族键相同`() {
+        repeat(200) { index ->
+            val md5 = md5("family-$index")
+            val family = QqCachePaths.md5Family(md5)
+            assertNotNull(family)
+            QqCachePaths.relativePaths(md5).forEach { assertEquals(it, family, QqCachePaths.familyKey("$root/$it")) }
+            assertEquals(family, QqCachePaths.md5Family(md5.uppercase()))
+            // 由家族键推回的 chatimg 路径就是这张图的预览图
+            assertEquals("$root/" + QqCachePaths.relativePaths(md5).first(), QqCachePaths.familyPath(root, family!!))
+        }
+        assertNull(QqCachePaths.md5Family("not-a-md5"))
+        assertNull(QqCachePaths.md5Family("g".repeat(32)))
+    }
+
+    @Test
+    fun `一张图的各 MD5 去重后取家族键，推不出家族键的本地路径另记`() {
+        val first = md5("first")
+        val second = md5("second")
+        val odd = "$root/chatimg/odd/not_a_cache_name"
+        val standard = "$root/" + QqCachePaths.relativePaths(first)[1]
+        val picture = QqPictureElement("1", linkedSetOf(first, second, first.uppercase()), linkedSetOf(standard, odd, "/sdcard/DCIM/a.jpg", "$root/../x"))
+        val families = QqCachePaths.families(picture)
+        assertEquals(listOf(QqCachePaths.md5Family(first), QqCachePaths.md5Family(second)), families)
+        // 规范路径由家族键推出，目录外的、带 .. 的不收
+        assertEquals(listOf(odd), QqCachePaths.extraPaths(root, picture, families))
+    }
+
+    @Test
     fun `同一张图的原图、预览图与缩略图得到同一个家族键`() {
         repeat(10_000) { index ->
             val paths = QqCachePaths.relativePaths(md5("qq-cache-synthetic-$index")).flatMap { listOf("$root/$it", "$root/$it.jpg") }

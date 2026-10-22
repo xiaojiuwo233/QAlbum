@@ -15,6 +15,7 @@ import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.db.entity.QqAutoArchiveEntity
 import com.xjw.qalbum.data.db.entity.QqImageContextEntity
 import com.xjw.qalbum.data.db.entity.QqOriginEntity
+import com.xjw.qalbum.data.db.entity.QqOriginFamilyEntity
 import com.xjw.qalbum.data.db.entity.QqOriginPathEntity
 import com.xjw.qalbum.data.db.entity.QqPreviewCheckEntity
 import com.xjw.qalbum.data.db.entity.QqReadMarkEntity
@@ -76,7 +77,12 @@ data class QqFacetKindCount(val kind: Int, val chatType: Int, val count: Int)
 data class QqSeenSummary(val total: Int, val stale: Int)
 
 /** 读取前来源、路径、关联三张表的最大 rowid：之后写入的行 rowid 都比它大（见 QqSourceRepository） */
-data class QqReadBaseline(val origins: Long, val paths: Long, val links: Long)
+data class QqReadBaseline(val origins: Long, val families: Long, val paths: Long, val links: Long) {
+    companion object {
+        /** 从头开始：全部关联 */
+        val START = QqReadBaseline(0, 0, 0, 0)
+    }
+}
 data class QqImageMd5(val imageId: Long, val md5: String)
 data class QqPreviewFamilyMove(val id: Long, val fromGroup: Long?, val toGroup: Long)
 
@@ -94,8 +100,11 @@ data class QqPreviewCandidate(
     val rawTime: Long,
 )
 data class QqPicturePathEdge(val originId: String, val path: String)
+/** 同一张图（按消息里的 MD5，[originId]）的一个家族键 */
+data class QqFamilyEdge(val originId: String, val family: Long)
 data class QqPictureContext(val conversationKey: String, val senderKey: String)
 data class QqPathContext(val path: String, val conversationKey: String, val senderKey: String)
+data class QqFamilyContext(val family: Long, val conversationKey: String, val senderKey: String)
 data class QqOriginDetails(
     val conversationName: String, val senderName: String, val memberName: String,
     val chatType: Int, val messageTime: Long, val messageCount: Int, val accountName: String,
@@ -108,6 +117,11 @@ enum class QqContent { IMAGES, THUMBNAILS }
 
 /** 浏览范围（分类 id）：两者都为空表示全部已关联图片 */
 data class QqScopeIds(val conversationId: Long? = null, val senderId: Long? = null)
+
+/** 引用家族 :families 或路径 :paths 的消息 */
+private const val TOUCHED_ORIGINS = """SELECT id FROM qq_origins WHERE family IN (:families)
+    UNION SELECT origin_id FROM qq_origin_families WHERE family IN (:families)
+    UNION SELECT origin_id FROM qq_origin_paths WHERE path IN (:paths)"""
 
 private const val FACET_COLUMNS = """f.id AS id, f.`key` AS `key`, f.name AS name, '' AS alias,
     f.image_count AS count, f.image_bytes AS bytes, f.thumb_count AS thumbCount, f.thumb_bytes AS thumbBytes,
@@ -124,28 +138,48 @@ private const val CONTEXT_SUMS = """
 
 @Dao
 interface QqSourceDao {
-    /** 合并同一图片的重复消息引用，避免热门图片的历史引用把查询放大成数万行。 */
-    @Query("""SELECT DISTINCT CASE WHEN length(o.md5)=32 THEN lower(o.md5) ELSE o.id END AS originId,p.path
-        FROM qq_origin_paths p JOIN qq_origins o ON o.id=p.origin_id
-        WHERE p.origin_id IN (SELECT origin_id FROM qq_origin_paths WHERE path IN (:paths))""")
-    suspend fun picturePathEdges(paths: List<String>): List<QqPicturePathEdge>
+    /**
+     * 删除规划：引用这些家族（[families]）或路径（[paths]）的消息里，同一张图（按 MD5 合并重复引用，热门图片不会放大成
+     * 数万行）的全部家族键——一张图有多个 MD5 时不止一个。
+     */
+    @Query("""WITH touched(origin_id) AS ($TOUCHED_ORIGINS)
+        SELECT DISTINCT CASE WHEN length(o.md5) = 32 THEN lower(o.md5) ELSE o.id END AS originId, o.family AS family
+        FROM touched t CROSS JOIN qq_origins o ON o.id = t.origin_id WHERE o.family IS NOT NULL
+        UNION SELECT DISTINCT CASE WHEN length(o.md5) = 32 THEN lower(o.md5) ELSE o.id END, f.family
+        FROM touched t CROSS JOIN qq_origin_families f ON f.origin_id = t.origin_id CROSS JOIN qq_origins o ON o.id = t.origin_id""")
+    suspend fun familyEdges(families: List<Long>, paths: List<String>): List<QqFamilyEdge>
 
-    /** 每个路径出现过的会话 / 发送人（删除规划一次查整批，按组合并） */
-    @Query("""SELECT DISTINCT p.path AS path,o.conversation_key AS conversationKey,o.sender_key AS senderKey
-        FROM qq_origin_paths p JOIN qq_origins o ON o.id = p.origin_id WHERE p.path IN (:paths)""")
+    /** 同上，这些消息另记的（推不出家族键的）路径 */
+    @Query("""WITH touched(origin_id) AS ($TOUCHED_ORIGINS)
+        SELECT DISTINCT CASE WHEN length(o.md5) = 32 THEN lower(o.md5) ELSE o.id END AS originId, p.path AS path
+        FROM touched t CROSS JOIN qq_origin_paths p ON p.origin_id = t.origin_id CROSS JOIN qq_origins o ON o.id = t.origin_id""")
+    suspend fun explicitPathEdges(families: List<Long>, paths: List<String>): List<QqPicturePathEdge>
+
+    /** 每个家族出现过的会话 / 发送人（删除规划一次查整批，按组合并） */
+    @Query("""SELECT DISTINCT f.family AS family, o.conversation_key AS conversationKey, o.sender_key AS senderKey FROM (
+            SELECT family, id AS origin_id FROM qq_origins WHERE family IN (:families)
+            UNION SELECT family, origin_id FROM qq_origin_families WHERE family IN (:families)) f
+        CROSS JOIN qq_origins o ON o.id = f.origin_id""")
+    suspend fun familyContexts(families: List<Long>): List<QqFamilyContext>
+
+    /** 每个路径出现过的会话 / 发送人：消息另记的路径，以及已入库那张图的关联（发送图片缓存等） */
+    @Query("""SELECT DISTINCT x.path AS path, o.conversation_key AS conversationKey, o.sender_key AS senderKey FROM (
+            SELECT path, origin_id FROM qq_origin_paths WHERE path IN (:paths)
+            UNION SELECT i.path, l.origin_id FROM images i CROSS JOIN image_qq_origins l ON l.image_id = i.id WHERE i.path IN (:paths)) x
+        CROSS JOIN qq_origins o ON o.id = x.origin_id""")
     suspend fun pathContexts(paths: List<String>): List<QqPathContext>
 
-    /** [paths] 中出现在不止一个会话 / 发送人组合里的（与删除时「共用」的判断一致） */
-    @Query("""SELECT p.path FROM qq_origin_paths p JOIN qq_origins o ON o.id = p.origin_id
-        WHERE p.path IN (:paths)
-        GROUP BY p.path HAVING COUNT(DISTINCT o.conversation_key || char(31) || o.sender_key) > 1""")
-    suspend fun pathsInSeveralContexts(paths: List<String>): List<String>
+    /** [ids] 中出现在不止一个会话 / 发送人组合里的（与删除时「共用」的判断一致） */
+    @Query("""SELECT l.image_id FROM image_qq_origins l CROSS JOIN qq_origins o ON o.id = l.origin_id
+        WHERE l.image_id IN (:ids)
+        GROUP BY l.image_id HAVING COUNT(DISTINCT o.conversation_key || char(31) || o.sender_key) > 1""")
+    suspend fun idsInSeveralContexts(ids: List<Long>): List<Long>
 
-    /** [paths] 中也出现在范围之外的：会话不是 [groupKey]，或发送人不是 [senderKey]（为 null 的不限） */
-    @Query("""SELECT DISTINCT p.path FROM qq_origin_paths p JOIN qq_origins o ON o.id = p.origin_id
-        WHERE p.path IN (:paths)
+    /** [ids] 中也出现在范围之外的：会话不是 [groupKey]，或发送人不是 [senderKey]（为 null 的不限） */
+    @Query("""SELECT DISTINCT l.image_id FROM image_qq_origins l CROSS JOIN qq_origins o ON o.id = l.origin_id
+        WHERE l.image_id IN (:ids)
           AND ((:groupKey IS NOT NULL AND o.conversation_key <> :groupKey) OR (:senderKey IS NOT NULL AND o.sender_key <> :senderKey))""")
-    suspend fun pathsOutsideScope(paths: List<String>, groupKey: String?, senderKey: String?): List<String>
+    suspend fun idsOutsideScope(ids: List<Long>, groupKey: String?, senderKey: String?): List<Long>
 
     // ---- 统计缓存（增量维护；标脏后由仓库分段重建，见 QqSourceStatsSql） ----
 
@@ -266,6 +300,9 @@ interface QqSourceDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertPaths(paths: List<QqOriginPathEntity>)
 
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertFamilies(families: List<QqOriginFamilyEntity>)
+
     /** 这次读取又见到了这些消息：记下读取时间，顺带补上 v23 以前没有的图片属性 */
     @Query("""UPDATE qq_origins SET seen_at = :seenAt, pic_type = :picType, pic_sub_type = :picSubType,
         sent_original = :original WHERE id IN (:ids)""")
@@ -291,57 +328,44 @@ interface QqSourceDao {
         WHERE account_key = :accountKey AND sender_key = :key AND :name <> '' AND sender_name <> :name""")
     suspend fun updateSenderName(accountKey: String, key: String, name: String): Int
 
-    /**
-     * 仅给实际已入库、且符合 QQ 家族命名的别名版本（`Cache_xxx.jpg` / `.png` / `.gif` 等，见 QqCachePaths.ALIAS_EXTENSIONS）
-     * 补来源：沿用不带后缀的同名文件的来源，避免为每条消息预建额外路径。
-     */
-    @Query("""INSERT OR IGNORE INTO qq_origin_paths(path, origin_id)
-        SELECT a.path, p.origin_id FROM (
-            SELECT COALESCE(q.original_path, i.path) AS path FROM images i
-            LEFT JOIN quarantine q ON q.image_id = i.id
-            WHERE i.variant_group IS NOT NULL AND i.status <> 'deleted'
-              AND (lower(substr(COALESCE(q.original_path, i.path), -4)) IN ('.jpg', '.png', '.gif', '.bmp')
-                OR lower(substr(COALESCE(q.original_path, i.path), -5)) IN ('.jpeg', '.webp', '.heic'))
-        ) a
-        JOIN qq_origin_paths p ON p.path = substr(a.path, 1, length(a.path) - CASE WHEN substr(a.path, -5, 1) = '.' THEN 5 ELSE 4 END)""")
-    suspend fun registerIndexedAliasPaths()
-
-    @Query("""INSERT OR IGNORE INTO image_qq_origins(image_id, origin_id)
-        SELECT i.id, p.origin_id FROM images i JOIN qq_origin_paths p ON p.path = i.path
-        WHERE i.status NOT IN ('deleted', 'quarantined')""")
-    suspend fun linkOriginPaths()
-
-    @Query("""INSERT OR IGNORE INTO image_qq_origins(image_id, origin_id)
-        SELECT i.id, p.origin_id FROM images i JOIN qq_origin_paths p ON p.path = i.path WHERE i.id IN (:ids)""")
-    suspend fun linkImages(ids: List<Long>)
-
-    @Transaction
-    suspend fun reconcileLinks() {
-        registerIndexedAliasPaths()
-        linkOriginPaths()
-    }
-
     @Query("""SELECT COALESCE((SELECT MAX(rowid) FROM qq_origins), 0) AS origins,
+        COALESCE((SELECT MAX(rowid) FROM qq_origin_families), 0) AS families,
         COALESCE((SELECT MAX(rowid) FROM qq_origin_paths), 0) AS paths,
         COALESCE((SELECT MAX(rowid) FROM image_qq_origins), 0) AS links""")
     suspend fun readBaseline(): QqReadBaseline
 
-    /** 读取后补关联：只看 [afterRowid] 之后登记的路径（按路径找已入库的图），不必把全部图片与路径对一遍 */
+    /** [afterRowid] 之后新增的消息：按家族键关联已入库的图片（原图、预览图、缩略图、带后缀的别名、Temp 转码图） */
+    @Query("""INSERT OR IGNORE INTO image_qq_origins(image_id, origin_id)
+        SELECT i.id, o.id FROM qq_origins o CROSS JOIN images i ON i.variant_group = o.family
+        WHERE o.rowid > :afterRowid AND o.family IS NOT NULL AND i.status NOT IN ('deleted', 'quarantined')""")
+    suspend fun linkOriginsAfter(afterRowid: Long)
+
+    /** 同上，消息里其他 MD5 的家族键 */
+    @Query("""INSERT OR IGNORE INTO image_qq_origins(image_id, origin_id)
+        SELECT i.id, f.origin_id FROM qq_origin_families f CROSS JOIN images i ON i.variant_group = f.family
+        WHERE f.rowid > :afterRowid AND i.status NOT IN ('deleted', 'quarantined')""")
+    suspend fun linkFamiliesAfter(afterRowid: Long)
+
+    /** 同上，消息另记的推不出家族键的路径 */
     @Query("""INSERT OR IGNORE INTO image_qq_origins(image_id, origin_id)
         SELECT i.id, p.origin_id FROM qq_origin_paths p CROSS JOIN images i ON i.path = p.path
         WHERE p.rowid > :afterRowid AND i.status NOT IN ('deleted', 'quarantined')""")
     suspend fun linkPathsAfter(afterRowid: Long)
 
-    /** 读取来源后的关联：带后缀的别名沿用同名文件的来源，再给 [pathRowid] 之后登记的路径补关联 */
+    /**
+     * 读取来源后补关联：只看 [baseline] 之后新增的消息、家族与路径，不必把全部图片与消息对一遍。
+     * 读取期间入库的图由 images 上的触发器关联。
+     */
     @Transaction
-    suspend fun reconcileLinksAfter(pathRowid: Long) {
-        registerIndexedAliasPaths()
-        linkPathsAfter(pathRowid)
+    suspend fun linkAfter(baseline: QqReadBaseline) {
+        linkOriginsAfter(baseline.origins)
+        linkFamiliesAfter(baseline.families)
+        linkPathsAfter(baseline.paths)
     }
 
-    @Query("""INSERT OR IGNORE INTO qq_origin_paths(path, origin_id)
-        SELECT :path, origin_id FROM qq_origin_paths WHERE path = :referencePath""")
-    suspend fun registerDerivedPath(path: String, referencePath: String)
+    /** 全部重新对一遍（升级后图片家族键变化时） */
+    @Transaction
+    suspend fun reconcileLinks() = linkAfter(QqReadBaseline.START)
 
     /**
      * 发送图片缓存的候选：还没核对过（或文件变了）的 chatimg，配上修改时间在它之前 [before] 毫秒到之后 [after] 毫秒内、

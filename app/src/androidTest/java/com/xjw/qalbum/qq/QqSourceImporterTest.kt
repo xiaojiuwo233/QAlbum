@@ -162,7 +162,7 @@ class QqSourceImporterTest {
         // 改名标的脏在导入时撤掉了：其间扫描入库的图照常由触发器计入
         assertFalse(dao.cacheDirty())
         images(scanned, now)
-        dao.reconcileLinksAfter(baseline.paths)
+        dao.linkAfter(baseline)
         assertTrue(QqSourceStatsBuilder(db).applyNew(baseline, second.renamed))
         val incremental = sourceStats()
         assertTrue(incremental.contains("Alice 新昵称"))
@@ -175,21 +175,30 @@ class QqSourceImporterTest {
     }
 
     @Test
-    fun knownMessagesOnlyRefreshTheirReadTimeAndUnchangedNamesAreNotRewritten() = runBlocking {
+    fun picturesAreLinkedByFamilyAndKnownMessagesOnlyRefreshTheirReadTime() = runBlocking {
+        // 一张图两个 MD5（45406 与 45424 不同）：两个家族的缓存都关联到这条消息；规范路径一条也不存
         val photo = picture(1)
-        images(photo, now - day)
-        message("group_msg_table", 1, "u_alice", 1001, now - day, element(photo, picType = 1000))
+        val other = picture(2)
+        val photoRaw = images(photo, now - day)
+        val otherRaw = images(other, now - day)
+        val odd = image("chatimg/odd/not_a_cache_name", "chatimg", now - day, 100, 100)
+        message("group_msg_table", 1, "u_alice", 1001, now - day, element(photo, picType = 1000, second = other, path = "$root/chatimg/odd/not_a_cache_name"))
         val first = import(now - day)
-        val paths = scalar("SELECT COUNT(*) FROM qq_origin_paths")
-        assertTrue(paths > 0)
-        // 已有来源的路径不再登记：删掉一条后从头再读，它还是不在；解析规则更新后从头读时补上
-        db.openHelper.writableDatabase.execSQL("DELETE FROM qq_origin_paths WHERE rowid = (SELECT MAX(rowid) FROM qq_origin_paths)")
+        assertEquals(QqCachePaths.md5Family(hex(photo)), scalarLong("SELECT family FROM qq_origins"))
+        assertEquals(QqCachePaths.md5Family(hex(other)), scalarLong("SELECT family FROM qq_origin_families"))
+        // 推不出家族键的路径另记
+        assertEquals(1, scalar("SELECT COUNT(*) FROM qq_origin_paths"))
+        assertEquals(5, scalar("SELECT COUNT(*) FROM image_qq_origins"))
+        assertTrue(listOf(photoRaw, otherRaw, odd).all { scalar("SELECT COUNT(*) FROM image_qq_origins WHERE image_id = $it") == 1 })
+
+        // 已有的消息只更新读取时间，不再补登记：删掉另记的家族后从头再读，它还是不在；解析规则更新后从头读时补上
+        db.openHelper.writableDatabase.execSQL("DELETE FROM qq_origin_families")
         val again = import(now)
-        assertEquals(paths - 1, scalar("SELECT COUNT(*) FROM qq_origin_paths"))
+        assertEquals(0, scalar("SELECT COUNT(*) FROM qq_origin_families"))
         assertEquals(1, scalar("SELECT COUNT(*) FROM qq_origins WHERE seen_at = $now"))
         assertTrue(again.renamed.isEmpty() && first.renamed.isEmpty())
         importWith(now + 1, allPaths = true)
-        assertEquals(paths, scalar("SELECT COUNT(*) FROM qq_origin_paths"))
+        assertEquals(1, scalar("SELECT COUNT(*) FROM qq_origin_families"))
     }
 
     @Test
@@ -341,10 +350,12 @@ class QqSourceImporterTest {
 
     private fun hex(md5: ByteArray) = md5.joinToString("") { "%02x".format(it) }
 
-    private fun element(md5: ByteArray, picType: Int, original: Boolean = false) = encode { out ->
+    private fun element(md5: ByteArray, picType: Int, original: Boolean = false, second: ByteArray? = null, path: String? = null) = encode { out ->
         out.writeUInt64(45001, md5[0].toLong() and 0xff)
         out.writeInt32(45002, 2)
         out.writeByteArray(45406, md5)
+        second?.let { out.writeByteArray(45424, it) }
+        path?.let { out.writeString(45403, it) }
         out.writeInt32(QqPictureCodec.PIC_TYPE_FIELD, picType)
         if (original) out.writeInt32(QqPictureCodec.ORIGINAL_FIELD, 1)
     }

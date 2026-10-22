@@ -22,7 +22,7 @@ data class QqSourceAccountEntity(
         parentColumns = ["account_key"], childColumns = ["account_key"],
         onDelete = ForeignKey.CASCADE,
     )],
-    indices = [Index("account_key"), Index("conversation_key"), Index("sender_key")],
+    indices = [Index("account_key"), Index("conversation_key"), Index("sender_key"), Index("family")],
 )
 data class QqOriginEntity(
     @PrimaryKey val id: String,
@@ -43,8 +43,29 @@ data class QqOriginEntity(
     @ColumnInfo(name = "pic_sub_type", defaultValue = "-1") val picSubType: Int = -1,
     /** 以「原图」发送 */
     @ColumnInfo(name = "sent_original", defaultValue = "0") val sentOriginal: Boolean = false,
+    /**
+     * 这张图的家族键（[md5] 在 chatimg 下的文件名 CRC，见 QqCachePaths.md5Family），与 images.variant_group 相同：
+     * 同一张图的原图 / 预览图 / 缩略图、带后缀的别名、Temp 转码图都按它关联到这条消息（v27 起，不再逐条存路径）。
+     */
+    @ColumnInfo(name = "family") val family: Long? = null,
 )
 
+/** 一条消息的图片有多个 MD5 时，第一个之外的家族键（见 [QqOriginEntity.family]） */
+@Entity(
+    tableName = "qq_origin_families",
+    primaryKeys = ["family", "origin_id"],
+    foreignKeys = [ForeignKey(
+        entity = QqOriginEntity::class,
+        parentColumns = ["id"], childColumns = ["origin_id"], onDelete = ForeignKey.CASCADE,
+    )],
+    indices = [Index("origin_id")],
+)
+data class QqOriginFamilyEntity(
+    val family: Long,
+    @ColumnInfo(name = "origin_id") val originId: String,
+)
+
+/** 消息里记的、推不出家族键的本地路径（极少；规范命名的缓存都按家族键关联，见 [QqOriginEntity.family]） */
 @Entity(
     tableName = "qq_origin_paths",
     primaryKeys = ["path", "origin_id"],
