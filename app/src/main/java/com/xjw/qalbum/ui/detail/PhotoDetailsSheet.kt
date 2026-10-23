@@ -35,6 +35,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.xjw.qalbum.access.ChatFeatures
 import com.xjw.qalbum.data.db.AppDatabase
 import com.xjw.qalbum.data.db.dao.QqOriginDetails
 import com.xjw.qalbum.data.db.dao.QqSourceDao
@@ -67,6 +68,8 @@ internal fun PhotoDetailsSheet(
     val sources = koinInject<QqSourceDao>()
     val sourceFlow = remember(image.id, sources) { sources.observeImageOrigins(image.id) }
     val origins by sourceFlow.collectAsState(initial = emptyList())
+    val chatFeatures = koinInject<ChatFeatures>()
+    val chatAvailable by chatFeatures.available.collectAsState(initial = false)
     val backups = koinInject<AppDatabase>().originalBackupDao()
     val recordFlow = remember(image.id, backups) { backups.observeByImageId(image.id) }
     val record by recordFlow.collectAsState(initial = null)
@@ -123,12 +126,13 @@ internal fun PhotoDetailsSheet(
                         CompressionBlock(record, onRestore = { compression.restoreOriginal(image.id) }, canRestore = image.status != "quarantined")
                     }
                 }
-                item(key = "source-header") { SectionHeader("QQ 来源") }
+                // Shizuku 模式下没读过来源时不显示这一节
+                if (origins.isNotEmpty() || chatAvailable) item(key = "source-header") { SectionHeader("QQ 来源") }
                 if (origins.isEmpty()) {
-                    item(key = "source-none") {
+                    if (chatAvailable) item(key = "source-none") {
                         SegmentedCard(SegmentPosition.Single) {
                             Text(
-                                "未关联聊天记录。读取聊天来源（需要 Root）后可看到发送人和会话。",
+                                "未关联聊天记录。读取聊天来源后可看到发送人和会话。",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )

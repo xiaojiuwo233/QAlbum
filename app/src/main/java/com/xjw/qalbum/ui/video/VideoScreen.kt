@@ -232,7 +232,7 @@ fun VideoScreen(
                         item(key = "empty", span = { GridItemSpan(maxLineSpan) }, contentType = "empty") {
                             Box(Modifier.fillMaxWidth().height(400.dp)) {
                                 if (noAccess) {
-                                    EmptyState(icon = Icons.Outlined.FolderOff, title = "需要文件访问", message = "在设置里连接 Root 或 Shizuku")
+                                    EmptyState(icon = Icons.Outlined.FolderOff, title = "需要文件访问", message = "在「设置 → 文件访问」里授权")
                                 } else {
                                     EmptyState(icon = Icons.Outlined.VideoLibrary, title = "没有找到视频")
                                 }

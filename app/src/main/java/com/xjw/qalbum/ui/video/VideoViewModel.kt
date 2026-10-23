@@ -262,7 +262,7 @@ class VideoViewModel(
                 CleanupOpState.purgeProgress.value = null
             }
             CleanupOpState.message.value = when {
-                report.noAccess -> "文件访问未授权，请先在设置中连接 Root 或 Shizuku"
+                report.noAccess -> "文件访问未授权，先在「设置 → 文件访问」里授权"
                 report.failed > 0 -> "已删除 ${report.deleted} 个视频（${formatBytes(report.bytes)}），${report.failed} 个没删掉：文件已变化或无法访问"
                 else -> "已删除 ${report.deleted + report.gone} 个视频（${formatBytes(report.bytes)}）"
             }

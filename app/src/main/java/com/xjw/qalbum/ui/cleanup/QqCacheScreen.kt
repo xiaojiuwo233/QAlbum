@@ -78,7 +78,7 @@ import java.util.Locale
 
 /**
  * QQ 缓存：QQ「清理缓存」会清空的目录，各自的文件数与大小；点开看占用最大的几项、复制路径，勾选后清空
- * （删掉目录里的内容、保留目录本身，与 QQ 一样）。内部目录需要 Root。
+ * （删掉目录里的内容、保留目录本身，与 QQ 一样）。内部目录只在 Root 模式下列出。
  */
 @Composable
 fun QqCacheScreen(
@@ -110,7 +110,7 @@ fun QqCacheScreen(
         Box(Modifier.fillMaxSize().padding(top = padding.calculateTopPadding())) {
             when {
                 ui.loading && ui.entries.isEmpty() -> LoadingState(label = "正在统计…")
-                ui.unavailable -> EmptyState(icon = Icons.Outlined.FolderOff, title = "需要文件访问", message = "在设置里连接 Root 或 Shizuku")
+                ui.unavailable -> EmptyState(icon = Icons.Outlined.FolderOff, title = "需要文件访问", message = "在「设置 → 文件访问」里授权")
                 else -> LazyColumn(
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = contentPadding.calculateBottomPadding() + 112.dp),
@@ -122,7 +122,6 @@ fun QqCacheScreen(
                             chosenBytes = chosenBytes,
                             chosenFiles = chosen.sumOf { it.files },
                             loading = ui.loading,
-                            rootMode = ui.rootMode,
                         )
                     }
                     item(key = "system-header") { SectionHeader("清理缓存时清空") }
@@ -133,7 +132,6 @@ fun QqCacheScreen(
                             checked = entry.path in ui.selected,
                             expanded = entry.path in ui.expanded,
                             children = ui.children[entry.path],
-                            rootMode = ui.rootMode,
                             onToggle = { viewModel.toggle(entry.path) },
                             onExpand = { viewModel.toggleExpanded(entry.path) },
                             onCopy = { copyPath(context, entry.path) },
@@ -154,7 +152,6 @@ fun QqCacheScreen(
                                 checked = entry.path in ui.selected,
                                 expanded = entry.path in ui.expanded,
                                 children = ui.children[entry.path],
-                                rootMode = ui.rootMode,
                                 onToggle = { viewModel.toggle(entry.path) },
                                 onExpand = { viewModel.toggleExpanded(entry.path) },
                                 onCopy = { copyPath(context, entry.path) },
@@ -203,9 +200,9 @@ fun QqCacheScreen(
     }
 }
 
-/** 顶部概览：能清的总量、已选多少；Shizuku 下提示内部目录要 Root */
+/** 顶部概览：能清的总量、已选多少 */
 @Composable
-private fun SummaryCard(total: Long, chosenBytes: Long, chosenFiles: Long, loading: Boolean, rootMode: Boolean) {
+private fun SummaryCard(total: Long, chosenBytes: Long, chosenFiles: Long, loading: Boolean) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.extraLarge,
@@ -226,13 +223,6 @@ private fun SummaryCard(total: Long, chosenBytes: Long, chosenFiles: Long, loadi
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            if (!rootMode) {
-                Text(
-                    "内部的 cache/、code_cache/ 等需要 Root，Shizuku 只能清外部目录",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
         }
     }
 }
@@ -245,7 +235,6 @@ private fun CacheEntryRow(
     checked: Boolean,
     expanded: Boolean,
     children: List<QqCacheCleaner.Child>?,
-    rootMode: Boolean,
     onToggle: () -> Unit,
     onExpand: () -> Unit,
     onCopy: () -> Unit,
@@ -258,7 +247,7 @@ private fun CacheEntryRow(
     val detail = when (entry.state) {
         QqCacheCleaner.State.PRESENT -> if (entry.files > 0) "${String.format(Locale.ROOT, "%,d", entry.files)} 个文件" else "是空的"
         QqCacheCleaner.State.MISSING -> "没有这个目录"
-        QqCacheCleaner.State.DENIED -> if (rootMode) "没有权限" else "需要 Root"
+        QqCacheCleaner.State.DENIED -> "没有权限"
         QqCacheCleaner.State.ERROR -> "读取出错"
     }
     val location = listOfNotNull(area, parent).joinToString(" · ")

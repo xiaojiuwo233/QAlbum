@@ -6,6 +6,7 @@ import androidx.paging.PagingData
 import androidx.paging.cachedIn
 import androidx.paging.insertSeparators
 import androidx.paging.map as pagingMap
+import com.xjw.qalbum.access.ChatFeatures
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.paging.RefreshGate
 import com.xjw.qalbum.data.preferences.SettingsRepository
@@ -57,6 +58,7 @@ class GalleryViewModel(
     private val settings: SettingsRepository,
     private val appScope: CoroutineScope,
     private val tasks: BackgroundTasks,
+    chatFeatures: ChatFeatures,
 ) : ViewModel() {
 
     // ---- 图库偏好 ----
@@ -86,6 +88,10 @@ class GalleryViewModel(
     val stackVariants: StateFlow<Boolean> = settings.galleryStackVariants
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
 
+    /** 顶栏的「按聊天来源浏览」（Shizuku 模式下没读过来源时不显示） */
+    val chatAvailable: StateFlow<Boolean> = chatFeatures.available
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
     /** 快速滚动条（开关在设置里） */
     val fastScroll: StateFlow<Boolean> = settings.fastScrollEnabled
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
@@ -96,7 +102,7 @@ class GalleryViewModel(
     private val refreshGate = RefreshGate()
 
     // 分桶计数固化为热流缓存：withDateHeaders/withSizeHeaders 每个 PagingData generation
-    // 都要读一次计数，若每次冷订阅 Room Flow，扫描/分析期间的高频失效会让 200 万行聚合
+    // 都要读一次计数，若每次冷订阅 Room Flow，扫描 / 清理期间的高频失效会让 200 万行聚合
     // 反复重跑并拖住新 generation 的下发；stateIn 后 generation 读的是最新缓存值（首次
     // 之后即时返回），刷新频率由仓库层 throttleLatest 统一约束。按是否合并显示各备一份。
     private val timelineDateBucketCounts: Map<Boolean, StateFlow<Map<Long, Int>?>> =

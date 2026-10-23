@@ -12,7 +12,7 @@ object FileClassifier {
     data class Result(
         /** 库里没有的文件 → 识别 + insert */
         val newFiles: List<FileInfo>,
-        /** size/mtime 变了 → 重新识别 + update（updateFromScanByPath 会重置分析状态） */
+        /** size/mtime 变了 → 重新识别 + update（updateFromScanByPath 会清掉压缩标记） */
         val changedFiles: List<FileInfo>,
         /** 文件以相同 size/mtime 重新出现且行是 missing → 仅恢复（缩略图恢复为 thumbnail_trash，其余为 active） */
         val reviveIds: List<Long>,
@@ -58,7 +58,7 @@ object FileClassifier {
                 row.size != f.size || row.mtime != f.lastModified -> changedFiles.add(f)
                 else -> {
                     unchangedCount++
-                    // 同内容回归的 missing 行只需恢复，不重置分析状态
+                    // 同内容回归的 missing 行只需恢复
                     if (row.status == STATUS_MISSING) reviveIds.add(row.id)
                     unchangedPairs?.add(f to row)
                 }

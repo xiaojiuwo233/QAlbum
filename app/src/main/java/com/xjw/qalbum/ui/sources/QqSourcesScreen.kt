@@ -125,6 +125,7 @@ fun QqSourcesScreen(
     var showAutoArchive by remember { mutableStateOf(false) }
     val autoArchive by viewModel.autoArchive.collectAsState()
     val autoRefresh by viewModel.autoRefresh.collectAsState()
+    val canRead by viewModel.canRead.collectAsState()
     val listState = rememberLazyListState()
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
 
@@ -142,26 +143,31 @@ fun QqSourcesScreen(
                 title = { Text("聊天来源") },
                 navigationIcon = { BackButton(onBack) },
                 actions = {
-                    IconButton(
-                        onClick = viewModel::refresh,
-                        enabled = progress == null,
-                        shapes = IconButtonDefaults.shapes(),
-                    ) { Icon(Icons.Outlined.Refresh, contentDescription = "重新读取来源") }
+                    // 读取要 Root：Shizuku 模式下只留浏览和名单
+                    if (canRead) {
+                        IconButton(
+                            onClick = viewModel::refresh,
+                            enabled = progress == null,
+                            shapes = IconButtonDefaults.shapes(),
+                        ) { Icon(Icons.Outlined.Refresh, contentDescription = "重新读取来源") }
+                    }
                     Box {
                         IconButton(onClick = { menuOpen = true }, shapes = IconButtonDefaults.shapes()) {
                             Icon(Icons.Outlined.MoreVert, contentDescription = "更多")
                         }
                         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                            DropdownMenuItem(
-                                text = { Text("完整读取") },
-                                enabled = progress == null,
-                                onClick = { menuOpen = false; viewModel.refreshFull() },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("每天自动读取新消息") },
-                                trailingIcon = { Checkbox(checked = autoRefresh, onCheckedChange = null) },
-                                onClick = { menuOpen = false; viewModel.setAutoRefresh(!autoRefresh) },
-                            )
+                            if (canRead) {
+                                DropdownMenuItem(
+                                    text = { Text("完整读取") },
+                                    enabled = progress == null,
+                                    onClick = { menuOpen = false; viewModel.refreshFull() },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("每天自动读取新消息") },
+                                    trailingIcon = { Checkbox(checked = autoRefresh, onCheckedChange = null) },
+                                    onClick = { menuOpen = false; viewModel.setAutoRefresh(!autoRefresh) },
+                                )
+                            }
                             DropdownMenuItem(
                                 text = { Text("自动归档名单" + if (autoArchive.isNotEmpty()) "（${autoArchive.size}）" else "") },
                                 onClick = { menuOpen = false; showAutoArchive = true },
@@ -199,6 +205,7 @@ fun QqSourcesScreen(
                     accounts = accounts,
                     report = report,
                     complete = sourcesComplete,
+                    canRead = canRead,
                     onRefresh = viewModel::refresh,
                     onCancel = viewModel::cancel,
                     onBrowseAll = { onBrowse(SourceBrowseTarget.All) },
@@ -303,6 +310,7 @@ private fun StatusCard(
     accounts: List<QqSourceAccountEntity>?,
     report: String?,
     complete: Boolean,
+    canRead: Boolean,
     onRefresh: () -> Unit,
     onCancel: () -> Unit,
     onBrowseAll: () -> Unit,
@@ -324,7 +332,7 @@ private fun StatusCard(
     ) { current ->
         when (current) {
             0 -> progress?.let { RunningCard(it, onCancel) } ?: Spacer(Modifier.height(1.dp))
-            1 -> IntroCard(onRefresh)
+            1 -> IntroCard(canRead, onRefresh)
             3 -> Box(Modifier.fillMaxWidth().height(160.dp), contentAlignment = Alignment.Center) {
                 androidx.compose.material3.LoadingIndicator()
             }
@@ -334,7 +342,7 @@ private fun StatusCard(
 }
 
 @Composable
-private fun IntroCard(onRefresh: () -> Unit) {
+private fun IntroCard(canRead: Boolean, onRefresh: () -> Unit) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
         shape = MaterialTheme.shapes.extraLarge,
@@ -351,14 +359,17 @@ private fun IntroCard(onRefresh: () -> Unit) {
             )
             Text("还没有读取聊天来源", style = MaterialTheme.typography.titleLargeEmphasized)
             Text(
-                "用 Root 读取 QQ 数据库的副本，把图片关联到群聊、私聊和发送人。不会改动 QQ 的任何数据。",
+                if (canRead) "读取 QQ 数据库的副本，把图片关联到群聊、私聊和发送人。不会改动 QQ 的任何数据。"
+                else "读取聊天记录要用 Root 模式。",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Button(onClick = onRefresh, shapes = ButtonDefaults.shapes()) {
-                Icon(Icons.Outlined.Sync, contentDescription = null, modifier = Modifier.size(ButtonDefaults.IconSize))
-                Spacer(Modifier.width(ButtonDefaults.IconSpacing))
-                Text("读取聊天来源")
+            if (canRead) {
+                Button(onClick = onRefresh, shapes = ButtonDefaults.shapes()) {
+                    Icon(Icons.Outlined.Sync, contentDescription = null, modifier = Modifier.size(ButtonDefaults.IconSize))
+                    Spacer(Modifier.width(ButtonDefaults.IconSpacing))
+                    Text("读取聊天来源")
+                }
             }
         }
     }

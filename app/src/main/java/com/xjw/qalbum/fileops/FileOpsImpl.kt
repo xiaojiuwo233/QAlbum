@@ -20,7 +20,7 @@ import java.io.RandomAccessFile
  *   isFile/length/lastModified 是 3 次）。
  * - mtime 统一**截断到整秒**（×1000 返回毫秒）：与 shell `stat -c %Y` 及历史
  *   入库数据保持同一精度。若返回更高精度，升级后首次扫描会把所有未变文件
- *   误判为"已变化"，导致 200w 行的分析状态被整体重置 —— 绝不能发生。
+ *   误判为"已变化"，200w 行全部重新识别、压缩标记被清掉 —— 绝不能发生。
  *
  * 分页约定（规避 binder 1MB 事务上限）：
  * 对排序后的目录项按 [offset, offset+limit) 取窗口；窗口内不符合类型的项被

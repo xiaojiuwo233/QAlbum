@@ -3,6 +3,7 @@ package com.xjw.qalbum.ui.cleanup
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.xjw.qalbum.domain.model.AccessMode
+import com.xjw.qalbum.qq.QqCacheTargets
 import com.xjw.qalbum.service.cleanup.QqCacheCleaner
 import com.xjw.qalbum.service.work.BackgroundTasks
 import com.xjw.qalbum.ui.common.formatBytes
@@ -20,7 +21,8 @@ import timber.log.Timber
 
 /**
  * 「QQ 缓存」页：列出 QQ 清理缓存时会清空的目录（各自的文件数与大小，可展开看占用最大的几项、复制路径），
- * 勾选后清空。清空跑在 App 级作用域，进度与结果由清理页根部显示。
+ * 勾选后清空。内部目录（cache/、code_cache/ 等）要 Root，只在 Root 模式下列出。
+ * 清空跑在 App 级作用域，进度与结果由清理页根部显示。
  */
 class QqCacheViewModel(
     private val cleaner: QqCacheCleaner,
@@ -32,7 +34,6 @@ class QqCacheViewModel(
         val loading: Boolean = true,
         /** 文件访问没就绪（没连 Root / Shizuku） */
         val unavailable: Boolean = false,
-        val rootMode: Boolean = false,
         /** QQ 清理缓存时整个清空的三个目录（不管有没有） */
         val system: List<QqCacheCleaner.Entry> = emptyList(),
         /** QQ 旧版清理登记的目录里，这台设备上有内容的（大的在前） */
@@ -75,19 +76,19 @@ class QqCacheViewModel(
             CleanupOpState.message.value = "统计失败：${e.message ?: e.javaClass.simpleName}"
             null
         }
-        val rootMode = cleaner.mode() == AccessMode.ROOT
         if (entries == null) {
-            _ui.update { it.copy(loading = false, unavailable = true, rootMode = rootMode) }
+            _ui.update { it.copy(loading = false, unavailable = true) }
             return
         }
-        val system = entries.filter { it.target.system }
-        val legacy = entries.filter { !it.target.system && it.clearable }.sortedByDescending { it.bytes }
+        val rootMode = cleaner.mode() == AccessMode.ROOT
+        val visible = if (rootMode) entries else entries.filter { it.target.area == QqCacheTargets.Area.EXTERNAL }
+        val system = visible.filter { it.target.system }
+        val legacy = visible.filter { !it.target.system && it.clearable }.sortedByDescending { it.bytes }
         val clearable = (system + legacy).filter { it.clearable }.mapTo(HashSet()) { it.path }
         _ui.update { old ->
             old.copy(
                 loading = false,
                 unavailable = false,
-                rootMode = rootMode,
                 system = system,
                 legacy = legacy,
                 selected = if (touched) old.selected.intersect(clearable) else clearable,
@@ -141,7 +142,7 @@ class QqCacheViewModel(
                 CleanupOpState.purgeProgress.value = null
             }
             CleanupOpState.message.value = when {
-                report == null -> "文件访问未授权，请先在设置中连接 Root 或 Shizuku"
+                report == null -> "文件访问未授权，先在「设置 → 文件访问」里授权"
                 report.failed > 0 || report.refused > 0 ->
                     "已清理 ${formatBytes(report.bytes)}，${report.failed + report.refused} 项没删掉（QQ 正在用或没有权限）"
                 else -> "已清理 ${formatBytes(report.bytes)}"

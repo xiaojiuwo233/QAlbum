@@ -551,7 +551,7 @@ class OriginalCompressor(
         private const val MAX_RATIO = 0.9
 
         private const val JPEG = "image/jpeg"
-        private const val NO_ACCESS = "文件访问未授权，请先在设置中连接 Root 或 Shizuku"
+        private const val NO_ACCESS = "文件访问未授权，先在「设置 → 文件访问」里授权"
         private const val CHANGED = "文件已变化，重新扫描后再试"
 
         private const val STATE_PENDING = "pending"

@@ -227,7 +227,7 @@ class QqSourceBrowseViewModel(
                         dao.pagingScope(QqScopeSql.page(key.ids, key.content, QqScopeOrder.valueOf(key.sort.name), key.stacked))
                     },
                 ).flow
-                // 分组计数固化为热流：分析 / 扫描期间 PagingSource 频繁失效，每代分页只取缓存值
+                // 分组计数固化为热流：扫描 / 读取来源期间 PagingSource 频繁失效，每代分页只取缓存值
                 if (key.sort.byDate) {
                     val counts = bucketCounts { dao.observeBuckets(QqScopeSql.dateBuckets(key.ids, key.content, key.stacked)).calmDuringBulkWrites() }
                     buckets.value = BucketSource(counts, key.sort)

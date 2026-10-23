@@ -24,6 +24,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -55,15 +56,20 @@ import com.xjw.qalbum.ui.dashboard.DashboardScreen
 import com.xjw.qalbum.ui.detail.ImageDetailScreen
 import com.xjw.qalbum.ui.gallery.ArchiveScreen
 import com.xjw.qalbum.ui.gallery.GalleryScreen
+import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.ui.logs.LogScreen
+import com.xjw.qalbum.ui.onboarding.OnboardingScreen
+import com.xjw.qalbum.ui.onboarding.needsOnboarding
 import com.xjw.qalbum.ui.settings.AboutSettingsScreen
-import com.xjw.qalbum.ui.settings.StorageSettingsScreen
 import com.xjw.qalbum.ui.settings.AccessSettingsScreen
+import com.xjw.qalbum.ui.settings.AppearanceSettingsScreen
 import com.xjw.qalbum.ui.settings.CleanupSettingsScreen
-import com.xjw.qalbum.ui.settings.PersonalizationSettingsScreen
+import com.xjw.qalbum.ui.settings.CompressSettingsScreen
+import com.xjw.qalbum.ui.settings.GallerySettingsScreen
 import com.xjw.qalbum.ui.settings.ScanSettingsScreen
 import com.xjw.qalbum.ui.settings.SettingsCategory
 import com.xjw.qalbum.ui.settings.SettingsScreen
+import com.xjw.qalbum.ui.settings.StorageSettingsScreen
 import com.xjw.qalbum.ui.sources.QqSourceBrowseScreen
 import com.xjw.qalbum.ui.sources.QqSourcesScreen
 import com.xjw.qalbum.ui.sources.SourceBrowseTarget
@@ -83,6 +89,13 @@ import org.koin.compose.koinInject
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 fun AppNavigation() {
+    val settings = koinInject<SettingsRepository>()
+    val imageDao = koinInject<ImageDao>()
+    // 第一次打开（库里还没有图）先走引导；判断完之前不画，免得先闪一下概览
+    val startRoute by produceState<String?>(null) {
+        value = if (needsOnboarding(settings, imageDao)) ONBOARDING_ROUTE else NavDestination.Dashboard.route
+    }
+    val start = startRoute ?: return
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
@@ -103,14 +116,13 @@ fun AppNavigation() {
     val fadeSpec = MaterialTheme.motionScheme.defaultEffectsSpec<Float>()
     val scaleSpec = MaterialTheme.motionScheme.defaultSpatialSpec<Float>()
     // 详情转场方案开关：true=缩略图共享元素，false=缩放进入 + 图库立即垫底
-    val settings = koinInject<SettingsRepository>()
     val sharedTransition by settings.detailSharedTransition.collectAsState(initial = false)
 
     SharedTransitionLayout {
         Box(Modifier.fillMaxSize()) {
             NavHost(
                 navController = navController,
-                startDestination = NavDestination.Dashboard.route,
+                startDestination = start,
                 enterTransition = {
                     when {
                         targetState.isImage() -> if (sharedTransition) fadeIn(fadeSpec) else imageDetailEnter(fadeSpec, scaleSpec)
@@ -150,10 +162,25 @@ fun AppNavigation() {
                     }
                 },
             ) {
+                composable(ONBOARDING_ROUTE) {
+                    OnboardingScreen(
+                        onDone = {
+                            // 从概览 /「关于」打开的回到原页；第一次打开的进概览
+                            if (navController.previousBackStackEntry != null) {
+                                navController.popBackStack()
+                            } else {
+                                navController.navigate(NavDestination.Dashboard.route) {
+                                    popUpTo(ONBOARDING_ROUTE) { inclusive = true }
+                                }
+                            }
+                        },
+                    )
+                }
                 composable(NavDestination.Dashboard.route) {
                     DashboardScreen(
                         contentPadding = contentPadding,
                         onOpenAccessSettings = { navController.navigate(SettingsCategory.ACCESS.route) },
+                        onOpenGuide = { navController.navigate(ONBOARDING_ROUTE) },
                         onOpenSources = { navController.navigate(QQ_SOURCES_ROUTE) },
                     )
                 }
@@ -238,8 +265,22 @@ fun AppNavigation() {
                         animatedScope = this,
                     )
                 }
-                composable(SettingsCategory.PERSONALIZATION.route) {
-                    PersonalizationSettingsScreen(
+                composable(SettingsCategory.COMPRESS.route) {
+                    CompressSettingsScreen(
+                        onBack = { navController.popBackStack() },
+                        sharedScope = this@SharedTransitionLayout,
+                        animatedScope = this,
+                    )
+                }
+                composable(SettingsCategory.APPEARANCE.route) {
+                    AppearanceSettingsScreen(
+                        onBack = { navController.popBackStack() },
+                        sharedScope = this@SharedTransitionLayout,
+                        animatedScope = this,
+                    )
+                }
+                composable(SettingsCategory.GALLERY.route) {
+                    GallerySettingsScreen(
                         onBack = { navController.popBackStack() },
                         sharedScope = this@SharedTransitionLayout,
                         animatedScope = this,
@@ -253,11 +294,16 @@ fun AppNavigation() {
                     )
                 }
                 composable(SettingsCategory.LOGS.route) {
-                    LogScreen(onBack = { navController.popBackStack() })
+                    LogScreen(
+                        onBack = { navController.popBackStack() },
+                        sharedScope = this@SharedTransitionLayout,
+                        animatedScope = this,
+                    )
                 }
                 composable(SettingsCategory.ABOUT.route) {
                     AboutSettingsScreen(
                         onBack = { navController.popBackStack() },
+                        onOpenGuide = { navController.navigate(ONBOARDING_ROUTE) },
                         sharedScope = this@SharedTransitionLayout,
                         animatedScope = this,
                     )
@@ -325,6 +371,9 @@ fun AppNavigation() {
 
 /** QQ 来源首页路由；浏览页为 `qq-sources/{kind}/{key}` */
 private const val QQ_SOURCES_ROUTE = "qq-sources"
+
+/** 首次引导 */
+private const val ONBOARDING_ROUTE = "onboarding"
 
 private fun SourceBrowseTarget.route(): String = "$QQ_SOURCES_ROUTE/${kind.arg}/$key"
 

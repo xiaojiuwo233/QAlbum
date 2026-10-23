@@ -75,12 +75,12 @@ class ScanPipeline(
         // 200w 行会被判为新增全量重复插入且旧行永久脱离扫描范围
         val root = chatpicRoot.trim().trimEnd('/')
         if (root.isBlank()) {
-            send(ScanProgress.Failed("扫描路径为空，请先在设置页配置 chatpic 路径"))
+            send(ScanProgress.Failed("图片目录为空，先在「设置 → 扫描」里填写"))
             return
         }
         val initialTransport = transportFactory.create()
         if (initialTransport == null) {
-            send(ScanProgress.Failed("文件访问未就绪：请先在设置页授权 Shizuku 或 Root"))
+            send(ScanProgress.Failed("文件访问未就绪，先在「设置 → 文件访问」里授权"))
             return
         }
         // var：传输瞬时故障时按批重建热切换（见 Step 4），finally 关闭的是最新通道
@@ -110,7 +110,7 @@ class ScanPipeline(
                         return
                     }
                     rootChildren.none { it.path.substringAfterLast('/') in SOURCE_DIRS } -> {
-                        send(ScanProgress.Failed("这里没有 chatimg、chatraw 等子目录，请检查扫描路径"))
+                        send(ScanProgress.Failed("这里没有 chatimg、chatraw 等子目录，检查一下图片目录"))
                         return
                     }
                     snapshots.isNotEmpty() -> {
@@ -320,7 +320,7 @@ class ScanPipeline(
 
     private data class MimeFix(val id: Long, val mime: String, val isAnimated: Boolean)
 
-    /** 深度校验：复核未变化文件的 mime/动图标记，仅修正不一致的行（不动分析状态） */
+    /** 深度校验：复核未变化文件的 mime/动图标记，仅修正不一致的行 */
     private suspend fun verifyMime(
         transport: ScanTransport,
         pairs: List<Pair<FileInfo, ImageDao.ScanRow>>,

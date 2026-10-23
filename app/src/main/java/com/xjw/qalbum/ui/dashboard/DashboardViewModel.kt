@@ -2,6 +2,7 @@ package com.xjw.qalbum.ui.dashboard
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.xjw.qalbum.access.ChatFeatures
 import com.xjw.qalbum.data.db.dao.CleanupDao
 import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.db.dao.OriginalBackupDao
@@ -22,6 +23,7 @@ class DashboardViewModel(
     private val scanController: ScanController,
     private val cleanupDao: CleanupDao,
     private val backups: OriginalBackupDao,
+    chatFeatures: ChatFeatures,
 ) : ViewModel() {
 
     private data class CoreStats(val imageCount: Int, val totalSize: Long)
@@ -74,6 +76,10 @@ class DashboardViewModel(
                 started = SharingStarted.WhileSubscribed(5_000),
                 initialValue = CleanedStats(),
             )
+
+    /** 显示「按聊天来源浏览」（Shizuku 模式下没读过来源时不显示） */
+    val chatAvailable: StateFlow<Boolean> = chatFeatures.available
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     val scanRunning: StateFlow<Boolean> = scanController.running
     val scanProgress: StateFlow<ScanProgress?> = scanController.progress

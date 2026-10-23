@@ -14,8 +14,11 @@ import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.xjw.qalbum.domain.model.AccessMode
 import com.xjw.qalbum.domain.model.GallerySort
+import com.xjw.qalbum.domain.model.PaletteStyle
 import com.xjw.qalbum.domain.model.SourceFacetOrder
 import com.xjw.qalbum.domain.model.SourceSort
+import com.xjw.qalbum.domain.model.ThemeMode
+import com.xjw.qalbum.domain.model.ThemeSettings
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
@@ -292,12 +295,45 @@ class SettingsRepository(
         ds.edit { it[Keys.IMAGE_SIZE_CHECK_VERSION] = version }
     }
 
-    // ---- 主题动态取色 ----
+    // ---- 外观 ----
 
-    val dynamicColorEnabled: Flow<Boolean> = prefsData.map { it[Keys.DYNAMIC_COLOR] ?: true }
+    val themeSettings: Flow<ThemeSettings> = prefsData.map { prefs ->
+        ThemeSettings(
+            mode = prefs[Keys.THEME_MODE]?.let { runCatching { ThemeMode.valueOf(it) }.getOrNull() } ?: ThemeMode.SYSTEM,
+            dynamicColor = prefs[Keys.DYNAMIC_COLOR] ?: true,
+            seedColor = prefs[Keys.SEED_COLOR] ?: ThemeSettings.DEFAULT_SEED_COLOR,
+            style = prefs[Keys.PALETTE_STYLE]?.let { runCatching { PaletteStyle.valueOf(it) }.getOrNull() } ?: PaletteStyle.VIBRANT,
+            pureBlack = prefs[Keys.PURE_BLACK] ?: false,
+        )
+    }.distinctUntilChanged()
+
+    suspend fun setThemeMode(mode: ThemeMode) {
+        ds.edit { it[Keys.THEME_MODE] = mode.name }
+    }
 
     suspend fun setDynamicColorEnabled(enabled: Boolean) {
         ds.edit { it[Keys.DYNAMIC_COLOR] = enabled }
+    }
+
+    suspend fun setSeedColor(color: Int) {
+        ds.edit { it[Keys.SEED_COLOR] = color }
+    }
+
+    suspend fun setPaletteStyle(style: PaletteStyle) {
+        ds.edit { it[Keys.PALETTE_STYLE] = style.name }
+    }
+
+    suspend fun setPureBlack(enabled: Boolean) {
+        ds.edit { it[Keys.PURE_BLACK] = enabled }
+    }
+
+    // ---- 首次引导 ----
+
+    /** 首次打开的引导做完了（或已经有图片的老用户） */
+    val onboardingDone: Flow<Boolean> = prefsData.map { it[Keys.ONBOARDING_DONE] ?: false }
+
+    suspend fun setOnboardingDone(done: Boolean) {
+        ds.edit { it[Keys.ONBOARDING_DONE] = done }
     }
 
     // ---- 通知权限（Android 13+）：第一次有后台任务时问一次，之后由用户在系统设置里改 ----
@@ -406,7 +442,12 @@ class SettingsRepository(
         val SCHEDULED_CLEANUP_LAST = stringPreferencesKey("scheduled_cleanup_last")
         val QQ_SOURCE_FACET_ORDER = stringPreferencesKey("qq_source_facet_order")
 
+        val THEME_MODE = stringPreferencesKey("theme_mode")
         val DYNAMIC_COLOR = booleanPreferencesKey("dynamic_color")
+        val SEED_COLOR = intPreferencesKey("seed_color")
+        val PALETTE_STYLE = stringPreferencesKey("palette_style")
+        val PURE_BLACK = booleanPreferencesKey("pure_black")
+        val ONBOARDING_DONE = booleanPreferencesKey("onboarding_done")
         val NOTIFICATION_ASKED = booleanPreferencesKey("notification_permission_asked")
         val DETAIL_SHARED_TRANSITION = booleanPreferencesKey("detail_shared_transition")
         val EXPORT_SUBDIRS = stringPreferencesKey("export_subdirs")

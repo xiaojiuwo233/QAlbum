@@ -30,6 +30,13 @@ class RootFileAccess : FileAccessProvider {
 
     override suspend fun isAvailable(): Boolean = withContext(Dispatchers.IO) {
         try {
+            // libsu 会一直用第一次建的 shell：那时还没授权的话缓存的是普通 shell，
+            // 用户之后在 Root 管理器里允许了也拿不到 root，所以先关掉它，下面重新建（会再请求一次 root）。
+            // 关掉后第一次取缓存还会拿到这个已关的 shell（同时清掉缓存），所以再取一次
+            Shell.getCachedShell()?.takeIf { !it.isRoot }?.let { stale ->
+                stale.close()
+                Shell.getCachedShell()
+            }
             // libsu 在第一次调用时会异步请求 root，需要主动等待结果
             Shell.getShell().isRoot
         } catch (t: Throwable) {

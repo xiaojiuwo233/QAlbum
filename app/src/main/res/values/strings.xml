@@ -1,51 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">QAlbum</string>
-    <string name="app_tagline">QQ 聊天图片智能管理</string>
 
     <!-- 底部导航 -->
     <string name="nav_dashboard">概览</string>
     <string name="nav_gallery">图库</string>
     <string name="nav_cleanup">清理</string>
     <string name="nav_settings">设置</string>
-
-    <!-- 空状态 -->
-    <string name="empty_not_implemented">该模块将在后续 Phase 中实现</string>
-    <string name="empty_coming_soon">即将到来</string>
-
-    <!-- 权限模式 -->
-    <string name="access_mode_shizuku">Shizuku 模式</string>
-    <string name="access_mode_root">Root 模式</string>
-    <string name="access_mode_not_ready">未就绪</string>
-    <string name="access_mode_ready">已就绪</string>
-
-    <!-- Shizuku 引导 -->
-    <string name="shizuku_title">需要 Shizuku 授权</string>
-    <string name="shizuku_desc">QAlbum 需要通过 Shizuku 或 Root 来访问 QQ 的 chatpic 缓存目录。请先安装并启动 Shizuku 服务，然后回到本应用授权。</string>
-    <string name="shizuku_not_installed">未检测到 Shizuku 应用</string>
-    <string name="shizuku_install">前往安装 Shizuku</string>
-    <string name="shizuku_not_running">Shizuku 服务未启动</string>
-    <string name="shizuku_request_permission">请求 Shizuku 授权</string>
-    <string name="shizuku_permission_denied">Shizuku 授权被拒绝</string>
-    <string name="shizuku_granted">已获得 Shizuku 授权</string>
-    <string name="root_not_available">设备未授予 Root 权限</string>
-    <string name="root_granted">已获得 Root 权限</string>
-
-    <!-- 设置 -->
-    <string name="settings_section_access">权限与访问</string>
-    <string name="settings_section_paths">扫描路径</string>
-    <string name="settings_section_ai">AI 配置</string>
-    <string name="settings_section_about">关于</string>
-    <string name="settings_chatpic_path">chatpic 目录路径</string>
-    <string name="settings_chatpic_path_default">/storage/emulated/0/Android/data/com.tencent.mobileqq/Tencent/MobileQQ/chatpic</string>
-    <string name="settings_test_access">测试访问权限</string>
-    <string name="settings_switch_to_root">切换到 Root 模式</string>
-    <string name="settings_switch_to_shizuku">切换到 Shizuku 模式</string>
-    <string name="settings_version">版本</string>
-
-    <!-- 通用 -->
-    <string name="action_ok">确定</string>
-    <string name="action_cancel">取消</string>
-    <string name="action_retry">重试</string>
-    <string name="action_grant">授权</string>
 </resources>

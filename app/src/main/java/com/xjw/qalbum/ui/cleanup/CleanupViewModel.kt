@@ -2,13 +2,13 @@ package com.xjw.qalbum.ui.cleanup
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.xjw.qalbum.access.ChatFeatures
 import com.xjw.qalbum.data.db.AppDatabase
 import com.xjw.qalbum.data.db.dao.CleanupDao
 import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.db.dao.RuleStats
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.data.db.StatsCache
-import com.xjw.qalbum.domain.model.AccessMode
 import com.xjw.qalbum.service.cleanup.ArchiveManager
 import com.xjw.qalbum.service.cleanup.rules.CleanupRule
 import com.xjw.qalbum.service.cleanup.rules.CleanupRunner
@@ -89,6 +89,7 @@ class CleanupViewModel(
     private val archive: ArchiveManager,
     private val settings: SettingsRepository,
     private val statsCache: StatsCache,
+    chatFeatures: ChatFeatures,
 ) : ViewModel() {
 
     private val ruleDao = db.cleanupRuleDao()
@@ -114,8 +115,8 @@ class CleanupViewModel(
         .flatMapLatest { statuses -> statsCache.observe("archive-count:$statuses") { imageDao.archiveCount(statuses) } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
 
-    /** 聊天来源（按群聊 / 私聊清理）需要 Root 读取 QQ 数据库 */
-    val rootMode: StateFlow<Boolean> = settings.accessMode.map { it == AccessMode.ROOT }
+    /** 显示「按聊天」一组（Shizuku 模式下没读过来源时不显示） */
+    val chatAvailable: StateFlow<Boolean> = chatFeatures.available
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     // ---- 规则 ----

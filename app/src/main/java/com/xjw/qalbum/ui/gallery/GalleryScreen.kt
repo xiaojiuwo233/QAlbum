@@ -122,6 +122,7 @@ fun GalleryScreen(
     val fastScroll by viewModel.fastScroll.collectAsState()
     val deleteProgress by viewModel.deleteProgress.collectAsState()
     val archiveVisible by viewModel.archiveVisible.collectAsState()
+    val chatAvailable by viewModel.chatAvailable.collectAsState()
     // 换排序 / 合并方式后回到顶部（网格带占位、知道总数，不回顶会停在新列表的中间）；旋转屏幕不算
     var shownOrder by rememberSaveable { mutableStateOf("${sort.name}/$stackVariants") }
     LaunchedEffect(sort, stackVariants) {
@@ -173,8 +174,10 @@ fun GalleryScreen(
                                 shapes = IconButtonDefaults.shapes(),
                                 modifier = Modifier.sharedContainer("archive-bar", sharedScope, animatedScope),
                             ) { Icon(Icons.Outlined.Archive, contentDescription = "归档") }
-                            IconButton(onClick = onOpenSources, shapes = IconButtonDefaults.shapes()) {
-                                Icon(Icons.Outlined.Forum, contentDescription = "按聊天来源浏览")
+                            if (chatAvailable) {
+                                IconButton(onClick = onOpenSources, shapes = IconButtonDefaults.shapes()) {
+                                    Icon(Icons.Outlined.Forum, contentDescription = "按聊天来源浏览")
+                                }
                             }
                             IconButton(onClick = { showPrefsSheet = true }, shapes = IconButtonDefaults.shapes()) {
                                 Icon(Icons.Outlined.Tune, contentDescription = "显示与排序")
@@ -297,7 +300,7 @@ fun GalleryScreen(
 
 /**
  * 下拉刷新：只在用户主动下拉时显示 Expressive 加载指示器。
- * 扫描 / 分析期间分页源频繁失效也会进入 Loading，不应每次都把指示器拽出来。
+ * 扫描 / 清理期间分页源频繁失效也会进入 Loading，不应每次都把指示器拽出来。
  */
 @Composable
 private fun RefreshableGrid(items: LazyPagingItems<*>, topInset: Dp = 0.dp, content: @Composable () -> Unit) {
@@ -480,7 +483,7 @@ fun ArchiveScreen(
 internal fun archivedText(count: Int, visible: Boolean): String =
     if (visible) "已归档 $count 张，不会被清理" else "已归档 $count 张，可在「归档」里查看"
 
-/** 图库显示与排序：每行张数、排列顺序（连接式按钮组）、大图标记阈值（合并与快速滚动在「设置 → 外观与导出」） */
+/** 图库显示与排序：每行张数、排列顺序（连接式按钮组）、大图标记阈值（合并与快速滚动在「设置 → 图库」） */
 @Composable
 private fun GalleryPreferenceSheet(
     columns: Int,

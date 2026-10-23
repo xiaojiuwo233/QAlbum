@@ -5,115 +5,46 @@ import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialExpressiveTheme
 import androidx.compose.material3.MotionScheme
-import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
-import androidx.compose.material3.expressiveLightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
+import com.xjw.qalbum.domain.model.ThemeMode
+import com.xjw.qalbum.domain.model.ThemeSettings
 
-private val LightColors = expressiveLightColorScheme().copy(
-    primary = md_light_primary,
-    onPrimary = md_light_onPrimary,
-    primaryContainer = md_light_primaryContainer,
-    onPrimaryContainer = md_light_onPrimaryContainer,
-    inversePrimary = md_light_inversePrimary,
-    secondary = md_light_secondary,
-    onSecondary = md_light_onSecondary,
-    secondaryContainer = md_light_secondaryContainer,
-    onSecondaryContainer = md_light_onSecondaryContainer,
-    tertiary = md_light_tertiary,
-    onTertiary = md_light_onTertiary,
-    tertiaryContainer = md_light_tertiaryContainer,
-    onTertiaryContainer = md_light_onTertiaryContainer,
-    background = md_light_background,
-    onBackground = md_light_onBackground,
-    surface = md_light_surface,
-    onSurface = md_light_onSurface,
-    surfaceVariant = md_light_surfaceVariant,
-    onSurfaceVariant = md_light_onSurfaceVariant,
-    surfaceTint = md_light_surfaceTint,
-    inverseSurface = md_light_inverseSurface,
-    inverseOnSurface = md_light_inverseOnSurface,
-    error = md_light_error,
-    onError = md_light_onError,
-    errorContainer = md_light_errorContainer,
-    onErrorContainer = md_light_onErrorContainer,
-    outline = md_light_outline,
-    outlineVariant = md_light_outlineVariant,
-    scrim = md_light_scrim,
-    surfaceBright = md_light_surfaceBright,
-    surfaceDim = md_light_surfaceDim,
-    surfaceContainerLowest = md_light_surfaceContainerLowest,
-    surfaceContainerLow = md_light_surfaceContainerLow,
-    surfaceContainer = md_light_surfaceContainer,
-    surfaceContainerHigh = md_light_surfaceContainerHigh,
-    surfaceContainerHighest = md_light_surfaceContainerHighest,
-)
-
-private val DarkColors = darkColorScheme(
-    primary = md_dark_primary,
-    onPrimary = md_dark_onPrimary,
-    primaryContainer = md_dark_primaryContainer,
-    onPrimaryContainer = md_dark_onPrimaryContainer,
-    inversePrimary = md_dark_inversePrimary,
-    secondary = md_dark_secondary,
-    onSecondary = md_dark_onSecondary,
-    secondaryContainer = md_dark_secondaryContainer,
-    onSecondaryContainer = md_dark_onSecondaryContainer,
-    tertiary = md_dark_tertiary,
-    onTertiary = md_dark_onTertiary,
-    tertiaryContainer = md_dark_tertiaryContainer,
-    onTertiaryContainer = md_dark_onTertiaryContainer,
-    background = md_dark_background,
-    onBackground = md_dark_onBackground,
-    surface = md_dark_surface,
-    onSurface = md_dark_onSurface,
-    surfaceVariant = md_dark_surfaceVariant,
-    onSurfaceVariant = md_dark_onSurfaceVariant,
-    surfaceTint = md_dark_surfaceTint,
-    inverseSurface = md_dark_inverseSurface,
-    inverseOnSurface = md_dark_inverseOnSurface,
-    error = md_dark_error,
-    onError = md_dark_onError,
-    errorContainer = md_dark_errorContainer,
-    onErrorContainer = md_dark_onErrorContainer,
-    outline = md_dark_outline,
-    outlineVariant = md_dark_outlineVariant,
-    scrim = md_dark_scrim,
-    surfaceBright = md_dark_surfaceBright,
-    surfaceDim = md_dark_surfaceDim,
-    surfaceContainerLowest = md_dark_surfaceContainerLowest,
-    surfaceContainerLow = md_dark_surfaceContainerLow,
-    surfaceContainer = md_dark_surfaceContainer,
-    surfaceContainerHigh = md_dark_surfaceContainerHigh,
-    surfaceContainerHighest = md_dark_surfaceContainerHighest,
-)
+/** 系统支持跟随壁纸配色（Android 12+） */
+val supportsWallpaperColors: Boolean get() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
 
 /**
  * QAlbum 主题入口（Material 3 Expressive）。
  *
  * - [MaterialExpressiveTheme] + [MotionScheme.expressive]：组件与转场统一使用带回弹的 spring 规格；
  * - 标准字阶与形状阶梯（见 [AppTypography] / [AppShapes]）；
- * - Android 12+ 默认跟随壁纸动态取色，可在「设置 → 外观」关闭，关闭后使用完整的品牌色调方案。
+ * - 配色见「设置 → 外观」：深浅色跟随系统或固定，Android 12+ 默认跟随壁纸，也可以自选主题色和配色风格（[seedColorScheme]），
+ *   深色模式可用纯黑背景。
  */
 @Composable
 fun QAlbumTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
-    dynamicColor: Boolean = true,
+    settings: ThemeSettings = ThemeSettings(),
     content: @Composable () -> Unit,
 ) {
-    val colorScheme = when {
-        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-            val context = LocalContext.current
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        }
-        darkTheme -> DarkColors
-        else -> LightColors
+    val darkTheme = when (settings.mode) {
+        ThemeMode.SYSTEM -> isSystemInDarkTheme()
+        ThemeMode.LIGHT -> false
+        ThemeMode.DARK -> true
     }
+    val context = LocalContext.current
+    val wallpaper = settings.dynamicColor && supportsWallpaperColors
+    val base = if (wallpaper) {
+        if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+    } else {
+        remember(settings.seedColor, settings.style, darkTheme) { seedColorScheme(settings.seedColor, settings.style, darkTheme) }
+    }
+    val colorScheme = if (darkTheme && settings.pureBlack) base.withPureBlack() else base
 
     // 系统栏透明由 Activity.enableEdgeToEdge() 处理，这里只同步图标明暗
     val view = LocalView.current

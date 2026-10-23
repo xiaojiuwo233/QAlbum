@@ -2,6 +2,7 @@ package com.xjw.qalbum.ui.sources
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.xjw.qalbum.access.ChatFeatures
 import com.xjw.qalbum.data.db.dao.QqFacetKindCount
 import com.xjw.qalbum.data.db.dao.QqSourceFacet
 import com.xjw.qalbum.data.db.dao.QqSourceSummary
@@ -49,14 +50,20 @@ data class SourceBrowseTarget(val kind: SourceKind, val key: String) {
 
 /**
  * QQ 来源首页：读取 / 刷新来源索引，按群聊、私聊、发送人列出分类及其占用空间。
+ * 读取要 Root；Shizuku 模式下只能浏览以前读过的来源。
  */
 class QqSourcesViewModel(
     val repository: QqSourceRepository,
     private val settings: SettingsRepository,
+    chatFeatures: ChatFeatures,
 ) : ViewModel() {
     init {
         repository.startFacetCache()
     }
+
+    /** 能读取 / 刷新来源（Root 模式） */
+    val canRead: StateFlow<Boolean> = chatFeatures.canRead
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     val tab = MutableStateFlow(SourceTab.GROUPS)
     val search = MutableStateFlow("")

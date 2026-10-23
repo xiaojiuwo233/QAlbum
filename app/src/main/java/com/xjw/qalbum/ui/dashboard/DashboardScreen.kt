@@ -54,6 +54,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.toShape
 import androidx.compose.runtime.Composable
@@ -94,10 +95,12 @@ import org.koin.androidx.compose.koinViewModel
 fun DashboardScreen(
     contentPadding: PaddingValues,
     onOpenAccessSettings: () -> Unit = {},
+    onOpenGuide: () -> Unit = {},
     onOpenSources: () -> Unit = {},
     viewModel: DashboardViewModel = koinViewModel(),
 ) {
     val state by viewModel.uiState.collectAsState()
+    val chatAvailable by viewModel.chatAvailable.collectAsState()
     val running by viewModel.scanRunning.collectAsState()
     val progress by viewModel.scanProgress.collectAsState()
     val cleanedStats by viewModel.cleanedStats.collectAsState()
@@ -130,19 +133,21 @@ fun DashboardScreen(
                 enter = expandVertically() + fadeIn(),
                 exit = shrinkVertically() + fadeOut(),
             ) {
-                FirstRunGuideCard(onOpenAccessSettings = onOpenAccessSettings)
+                FirstRunGuideCard(onOpenGuide = onOpenGuide, onOpenAccess = onOpenAccessSettings)
             }
             StaggeredEntrance(index++) { MetricsGrid(state) }
-            StaggeredEntrance(index++) {
-                SegmentedNavigationItem(
-                    position = SegmentPosition.Single,
-                    icon = Icons.Outlined.Forum,
-                    title = "按聊天来源浏览",
-                    subtitle = "按群聊、私聊和发送人查看图片",
-                    onClick = onOpenSources,
-                    iconContainerColor = MaterialTheme.colorScheme.tertiaryContainer,
-                    iconContentColor = MaterialTheme.colorScheme.onTertiaryContainer,
-                )
+            if (chatAvailable) {
+                StaggeredEntrance(index++) {
+                    SegmentedNavigationItem(
+                        position = SegmentPosition.Single,
+                        icon = Icons.Outlined.Forum,
+                        title = "按聊天来源浏览",
+                        subtitle = "按群聊、私聊和发送人查看图片",
+                        onClick = onOpenSources,
+                        iconContainerColor = MaterialTheme.colorScheme.tertiaryContainer,
+                        iconContentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                    )
+                }
             }
             StaggeredEntrance(index++) {
                 ScanCard(
@@ -158,14 +163,11 @@ fun DashboardScreen(
     }
 }
 
-// ── 首启引导（库为空时） ─────────────────────────────────────────────
+// ── 新手引导（库为空时） ─────────────────────────────────────────────
 
-/**
- * 库为空时页面全是 0，而「先授权 Shizuku / 确认路径」的提示原本只在扫描失败后才出现。
- * 这里主动给出三步配置路径，点击直达「权限与访问」。扫描进行中隐藏。
- */
+/** 库里还没有图时显示（扫描中隐藏）：重新走一遍引导，或直接去文件访问 */
 @Composable
-private fun FirstRunGuideCard(onOpenAccessSettings: () -> Unit) {
+private fun FirstRunGuideCard(onOpenGuide: () -> Unit, onOpenAccess: () -> Unit) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
         shape = MaterialTheme.shapes.extraLarge,
@@ -174,7 +176,7 @@ private fun FirstRunGuideCard(onOpenAccessSettings: () -> Unit) {
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 ShapeIcon(
@@ -184,29 +186,16 @@ private fun FirstRunGuideCard(onOpenAccessSettings: () -> Unit) {
                     shape = MaterialShapes.Cookie7Sided.toShape(),
                     size = 44.dp,
                 )
-                Spacer(Modifier.width(12.dp))
-                Text("开始使用", style = MaterialTheme.typography.titleLargeEmphasized)
-            }
-            listOf(
-                "在「权限与访问」中授权 Shizuku，或切换为 Root",
-                "在「设置 → 扫描」确认图片目录（默认是 QQ 聊天图片目录）",
-                "回到本页点「全量扫描」建立索引",
-            ).forEachIndexed { i, step ->
-                Row(verticalAlignment = Alignment.Top) {
-                    Box(
-                        modifier = Modifier
-                            .size(22.dp)
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.12f)),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text("${i + 1}", style = MaterialTheme.typography.labelMedium)
-                    }
-                    Spacer(Modifier.width(10.dp))
-                    Text(step, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 1.dp))
+                Spacer(Modifier.width(14.dp))
+                Column {
+                    Text("还没有图片", style = MaterialTheme.typography.titleLargeEmphasized)
+                    Text("授权文件访问，再扫描一次 QQ 图片目录", style = MaterialTheme.typography.bodyMedium)
                 }
             }
-            Button(onClick = onOpenAccessSettings, shapes = ButtonDefaults.shapes()) { Text("去授权与设置") }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = onOpenGuide, shapes = ButtonDefaults.shapes()) { Text("开始引导") }
+                TextButton(onClick = onOpenAccess, shapes = ButtonDefaults.shapes()) { Text("文件访问") }
+            }
         }
     }
 }
@@ -578,7 +567,8 @@ private fun compactCount(n: Int): String = when {
     else -> n.toString()
 }
 
-private fun statusText(running: Boolean, progress: ScanProgress?): String = when (progress) {
+/** 扫描进度的文字（概览与设置的扫描页共用） */
+internal fun statusText(running: Boolean, progress: ScanProgress?): String = when (progress) {
     is ScanProgress.Cancelled -> "已取消"
     is ScanProgress.Failed -> "失败：${progress.reason}"
     is ScanProgress.Done -> "完成，新增或更新 ${progress.total} 张"
@@ -589,7 +579,7 @@ private fun statusText(running: Boolean, progress: ScanProgress?): String = when
 }
 
 /** 进度比例：null 不显示，-1 表示不确定进度 */
-private fun ScanProgress?.toProgressFraction(): Float? = when (this) {
+internal fun ScanProgress?.toProgressFraction(): Float? = when (this) {
     is ScanProgress.Indexing -> if (total > 0) processed.toFloat() / total else -1f
     is ScanProgress.Enumerating -> -1f
     else -> null

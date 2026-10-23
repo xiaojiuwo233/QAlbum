@@ -76,6 +76,8 @@ val appModule = module {
     single { ShizukuFileAccess() }
     single { RootFileAccess() }
     single { AccessManager(get(), get(), get()) }
+    // 聊天来源相关的入口在 Shizuku 模式下（没读过来源时）不显示
+    single { com.xjw.qalbum.access.ChatFeatures(settings = get(), sources = get()) }
 
     // ---- 索引服务 ----
 
@@ -164,11 +166,13 @@ val appModule = module {
 
     viewModel {
         SettingsViewModel(
+            context = get(),
             settings = get(),
             accessManager = get(),
             scanController = get(),
             appScope = get(),
             compressDemo = get(),
+            chatFeatures = get(),
         )
     }
     viewModel {
@@ -177,6 +181,7 @@ val appModule = module {
             scanController = get(),
             cleanupDao = get(),
             backups = get<AppDatabase>().originalBackupDao(),
+            chatFeatures = get(),
         )
     }
     viewModel {
@@ -188,6 +193,7 @@ val appModule = module {
             settings = get(),
             appScope = get(),
             tasks = get(),
+            chatFeatures = get(),
         )
     }
     viewModel {
@@ -207,6 +213,7 @@ val appModule = module {
             archive = get(),
             settings = get(),
             statsCache = get(),
+            chatFeatures = get(),
         )
     }
     viewModel {
@@ -243,7 +250,7 @@ val appModule = module {
     }
     viewModel { com.xjw.qalbum.ui.settings.StorageViewModel(maintenance = get()) }
     viewModel { LogViewModel() }
-    viewModel { QqSourcesViewModel(repository = get(), settings = get()) }
+    viewModel { QqSourcesViewModel(repository = get(), settings = get(), chatFeatures = get()) }
     viewModel { params ->
         com.xjw.qalbum.ui.sources.QqSourceBrowseViewModel(
             target = params.get(),

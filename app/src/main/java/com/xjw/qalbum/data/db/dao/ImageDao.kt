@@ -24,6 +24,10 @@ interface ImageDao {
     @Query("SELECT * FROM images WHERE path IN (:paths)")
     suspend fun getAnyByPaths(paths: List<String>): List<ImageEntity>
 
+    /** 库里有没有图（判断要不要显示首次引导） */
+    @Query("SELECT EXISTS(SELECT 1 FROM images)")
+    suspend fun hasAny(): Boolean
+
     /** 这些家族里已入库、还在原位置的文件（含 Temp 转码图、并进来的发送图片缓存；回收站里的与删掉的路径已换成内部地址） */
     @Query("SELECT * FROM images WHERE variant_group IN (:groups) AND path NOT LIKE 'qalbum-internal:%'")
     suspend fun getByFamilies(groups: List<Long>): List<ImageEntity>
@@ -169,11 +173,11 @@ interface ImageDao {
     @Query("UPDATE images SET status = 'missing' WHERE path >= :low AND path < :high AND status IN ('active', 'thumbnail_trash', 'archived') AND last_seen < :scanStart")
     suspend fun markMissingInPathRange(low: String, high: String, scanStart: Long)
 
-    /** 文件以相同 size/mtime 重新出现：仅恢复 missing（缩略图回到 thumbnail_trash，其余 active），不重置分析状态 */
+    /** 文件以相同 size/mtime 重新出现：仅恢复 missing（缩略图回到 thumbnail_trash，其余 active） */
     @Query("UPDATE images SET status = CASE WHEN source_type = 'chatthumb' THEN 'thumbnail_trash' ELSE 'active' END WHERE id IN (:ids) AND status = 'missing'")
     suspend fun reviveByIds(ids: List<Long>)
 
-    /** 深度校验：仅修正 mime / 动图标记，不动分析状态 */
+    /** 深度校验：仅修正 mime / 动图标记 */
     @Query("UPDATE images SET mime = :mime, is_animated = :isAnimated WHERE id = :id")
     suspend fun fixMimeType(id: Long, mime: String, isAnimated: Boolean)
 

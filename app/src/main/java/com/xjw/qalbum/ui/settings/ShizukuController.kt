@@ -1,17 +1,12 @@
 package com.xjw.qalbum.ui.settings
 
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.MutableState
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.ui.platform.LocalContext
 import rikka.shizuku.Shizuku
 
 /**
- * Shizuku 状态封装：把 Shizuku 的回调 API 转成可在 Compose 中观察的 State。
+ * Shizuku 状态（文件访问页与首次引导检测时用）。
  *
  * 状态机：
  * - NotInstalled  ：当前设备没有装 Shizuku 应用（按包可见性探测）
@@ -52,37 +47,6 @@ fun probeShizuku(context: Context): ShizukuStatus {
     }
 }
 
-/**
- * 在 Compose 中观察 Shizuku 状态：
- * - 注册 Binder 接收监听，服务起来/挂掉时自动刷新
- * - 注册权限回调，处理 requestPermission 的结果
- */
-@Composable
-fun rememberShizukuStatus(): MutableState<ShizukuStatus> {
-    val appContext = LocalContext.current.applicationContext
-    val state = remember { mutableStateOf(probeShizuku(appContext)) }
-
-    DisposableEffect(Unit) {
-        val binderReceived = Shizuku.OnBinderReceivedListener { state.value = probeShizuku(appContext) }
-        val binderDead = Shizuku.OnBinderDeadListener { state.value = probeShizuku(appContext) }
-        val permissionResult = Shizuku.OnRequestPermissionResultListener { _, _ ->
-            state.value = probeShizuku(appContext)
-        }
-
-        Shizuku.addBinderReceivedListenerSticky(binderReceived)
-        Shizuku.addBinderDeadListener(binderDead)
-        Shizuku.addRequestPermissionResultListener(permissionResult)
-
-        onDispose {
-            Shizuku.removeBinderReceivedListener(binderReceived)
-            Shizuku.removeBinderDeadListener(binderDead)
-            Shizuku.removeRequestPermissionResultListener(permissionResult)
-        }
-    }
-
-    return state
-}
-
 /** 主动向 Shizuku 申请权限。结果通过 [Shizuku.OnRequestPermissionResultListener] 回调，不阻塞调用方 */
 fun requestShizukuPermission(requestCode: Int = REQ_CODE) {
     try {
@@ -99,7 +63,16 @@ fun requestShizukuPermission(requestCode: Int = REQ_CODE) {
     }
 }
 
+/** 打开 Shizuku 应用（去启动服务） */
+internal fun openShizuku(context: Context) {
+    val intent = context.packageManager.getLaunchIntentForPackage(SHIZUKU_PACKAGE) ?: return
+    runCatching { context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+}
+
 private const val REQ_CODE = 0x51AB1
+
+/** Shizuku 官网（没装时去下载） */
+internal const val SHIZUKU_SITE = "https://shizuku.rikka.app/"
 
 /** Shizuku 管理端应用包名（与 AndroidManifest 的 <queries> 声明一致） */
 private const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"

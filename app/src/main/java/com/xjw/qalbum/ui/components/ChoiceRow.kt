@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.text.TextAutoSize
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material3.ButtonDefaults
@@ -17,14 +18,16 @@ import androidx.compose.material3.ToggleButton
 import androidx.compose.material3.ToggleButtonDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 
 /**
  * M3 Expressive 连接式按钮组的单选行：首尾按钮外侧全圆角、相邻处小圆角，
- * 选中项填充并显示对勾，按压时形变。[selected] 为 null 表示当前不匹配任何选项（如自定义配置）。
+ * 选中项填充，三项以内再加对勾（四项以上放不下对勾和文字；给了 [icon] 时显示各自的图标），按压时形变。[selected] 为 null 表示当前不匹配任何选项（如自定义配置）。
  */
 @Composable
 fun <T> ConnectedChoiceRow(
@@ -34,6 +37,7 @@ fun <T> ConnectedChoiceRow(
     onSelect: (T) -> Unit,
     modifier: Modifier = Modifier,
     enabled: (T) -> Boolean = { true },
+    icon: ((T) -> ImageVector)? = null,
 ) {
     Row(
         modifier = modifier.fillMaxWidth(),
@@ -59,11 +63,18 @@ fun <T> ConnectedChoiceRow(
                     .weight(1f)
                     .semantics { role = Role.RadioButton },
             ) {
-                if (checked && options.size <= 4) {
-                    Icon(Icons.Outlined.Check, contentDescription = null, modifier = Modifier.size(ButtonDefaults.IconSize))
+                val leading = icon?.invoke(option) ?: Icons.Outlined.Check.takeIf { checked && options.size <= 3 }
+                if (leading != null) {
+                    Icon(leading, contentDescription = null, modifier = Modifier.size(ButtonDefaults.IconSize))
                     Spacer(Modifier.width(4.dp))
                 }
-                Text(label(option), maxLines = 1)
+                // 字放不下时（字号调大、选项多）缩小字号，不截掉
+                Text(
+                    label(option),
+                    maxLines = 1,
+                    softWrap = false,
+                    autoSize = TextAutoSize.StepBased(minFontSize = 10.sp, maxFontSize = MaterialTheme.typography.labelLarge.fontSize, stepSize = 0.5.sp),
+                )
             }
         }
     }

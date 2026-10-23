@@ -189,7 +189,7 @@ class ImageRepository(
 private fun List<ImageDao.BucketCountRow>.toBucketCountMap(): Map<Long, Int> =
     associate { row -> row.bucketKey to row.count }
 
-/** 聚合观察流节流周期：扫描 / 分析批量提交期间把 200w 行 COUNT/SUM/GROUP BY 重查压到每周期至多一次（批量删除等期间更长） */
+/** 聚合观察流节流周期：扫描批量提交期间把 200w 行 COUNT/SUM/GROUP BY 重查压到每周期至多一次（批量删除等期间更长） */
 private const val AGGREGATE_THROTTLE_MS = 1_500L
 
 /**

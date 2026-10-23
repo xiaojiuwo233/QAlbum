@@ -46,7 +46,7 @@ if (providers.gradleProperty("requireReleaseSigning").getOrElse("false").toBoole
 // 并读取 .git/HEAD 与 reflog 作为配置输入，使每次提交后缓存失效、hash/时间戳重新计算
 // （否则命中旧缓存会导致 hash 不刷新）。git worktree/submodule 下 .git 为文件、
 // 此锚点会失效，属可接受退化；CI 全新 checkout 不受影响。
-val baseVersionName = "0.3.9"
+val baseVersionName = "0.4.0"
 
 @Suppress("UNUSED_VARIABLE")
 val gitStateKey = listOf(".git/HEAD", ".git/logs/HEAD").joinToString("|") {
@@ -167,10 +167,6 @@ android {
         }
     }
 
-    sourceSets.getByName("main") {
-        // 后续 Phase 4 引入 sqlite-vec 时把预编译的 .so 放在这里
-        jniLibs.srcDirs("src/main/jniLibs")
-    }
     sourceSets.getByName("androidTest") {
         assets.srcDir("$projectDir/schemas")
     }

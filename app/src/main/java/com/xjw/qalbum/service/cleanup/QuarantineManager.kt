@@ -114,7 +114,7 @@ class QuarantineManager(
 
     /** 文件访问是否就绪：未就绪时返回可读原因（大量选择时删除弹窗用它代替逐个核对） */
     suspend fun fileAccessError(): String? = withContext(Dispatchers.IO) {
-        if (accessManager.current().isAvailable()) null else "文件访问未授权，请先在设置中连接 Root 或 Shizuku"
+        if (accessManager.current().isAvailable()) null else "文件访问未授权，先在「设置 → 文件访问」里授权"
     }
 
     /** [onProgress]（已处理的所选张数, 总数）每批回调一次，供 UI 显示进度 */
@@ -404,7 +404,7 @@ class QuarantineManager(
                 Timber.w("Restore fallback size mismatch for $targetPath: ${staging.length()} != ${image.size}")
                 return RestoreFileResult.NOT_WRITTEN
             }
-            // mv 保留 mtime：恢复后不触发扫描重置分析状态/时间线错位
+            // mv 保留 mtime：恢复后扫描不会当成改过的文件，时间线也不错位
             staging.setLastModified(image.mtime)
             if (!provider.moveFileNoReplace(staging.absolutePath, targetPath)) {
                 Timber.w("Restore fallback: move back failed for $targetPath")
@@ -905,7 +905,7 @@ class QuarantineManager(
         private const val STATE_READY = "ready"
         private const val STATE_RESTORING = "restoring"
 
-        /** 缩略图源文件读取上限：超过则跳过缩略图，与分析期单图读取上限同级。 */
+        /** 缩略图源文件读取上限：超过则跳过缩略图。 */
         private const val THUMB_SOURCE_MAX = 32 * 1024 * 1024
 
         /** 不超过这个大小与边长的源图直接当缩略图存下 */

@@ -335,14 +335,14 @@ abstract class AppDatabase : RoomDatabase() {
         /** 当前数据库版本（启动时据此判断要不要显示升级进度） */
         const val VERSION = 27
 
-        /** v1 → v2：Phase 3 增加 Room FTS4 OCR 索引。 */
+        /** v1 → v2：增加 OCR 全文索引（FTS4，v20 随 OCR 一起删除）。 */
         val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("CREATE VIRTUAL TABLE IF NOT EXISTS `ocr_fts` USING FTS4(`text` TEXT NOT NULL)")
             }
         }
 
-        /** v2 → v3：Phase 4 增加图片语义向量表。 */
+        /** v2 → v3：增加图片语义向量表（v20 删除）。 */
         val MIGRATION_2_3 = object : Migration(2, 3) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL(

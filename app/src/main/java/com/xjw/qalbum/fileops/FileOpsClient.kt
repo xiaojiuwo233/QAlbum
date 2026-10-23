@@ -48,7 +48,7 @@ class BoundFileOps(
 
     /**
      * 带超时的 binder 调用：特权进程卡死在存储 IO 时同步 binder 事务永不回复，
-     * 裸调用会让扫描 / 分析 / 清理无限期挂起。超时抛 [BinderCallTimeoutException]
+     * 裸调用会让扫描 / 清理无限期挂起。超时抛 [BinderCallTimeoutException]
      * （调用方按 binder 死亡降级即可）；被放弃的调用在后台挂到自然返回，其迟到的
      * 返回值经 [onAbandoned] 清理（如关闭 fd），不清理则直接丢弃。
      */
@@ -87,7 +87,7 @@ class BoundFileOps(
 /**
  * 绑定 [IFileOps] 特权服务：Root → libsu [RootService]；Shizuku → UserService。
  *
- * 共享绑定 + 引用计数：扫描 / 分析 / 清理等消费方并发 bind 时复用同一底层连接。
+ * 共享绑定 + 引用计数：扫描 / 清理 / 看图等消费方并发 bind 时复用同一底层连接。
  * Shizuku 侧同一 UserServiceArgs 本就对应同一个 UserService 进程，若各消费方独立
  * unbind(remove=true)，先结束的一方会把还在用的服务一并销毁；现在每个 [BoundFileOps]
  * 句柄 close 一次引用计数减一，归零后闲置一小段时间（见 [release]）才真正解绑回收特权进程。

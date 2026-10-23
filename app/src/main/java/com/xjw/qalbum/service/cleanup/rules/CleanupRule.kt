@@ -22,7 +22,7 @@ data class SqlPart(val sql: String, val args: List<Any> = emptyList())
 
 /**
  * 清理规则：一条 SQL 条件 + 处理范围 + 一个可调参数。只用扫描得到的文件信息（版本、大小、时间、文件头），
- * 不需要预先分析图片，只有 Shizuku 也能用。所有规则都排除归档的图。
+ * 不需要预先分析图片；按聊天的几条要先用 Root 读取聊天来源。所有规则都排除归档的图。
  */
 sealed class CleanupRule(val id: String) {
     abstract val title: String

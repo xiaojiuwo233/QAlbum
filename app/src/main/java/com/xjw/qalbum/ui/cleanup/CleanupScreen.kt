@@ -241,7 +241,7 @@ private fun CleanupMainScreen(
     val quarantineStats by viewModel.quarantineStats.collectAsState()
     val backupStats by viewModel.backupStats.collectAsState()
     val videoStats by viewModel.videoStats.collectAsState()
-    val rootMode by viewModel.rootMode.collectAsState()
+    val chatAvailable by viewModel.chatAvailable.collectAsState()
     val quality by viewModel.compressQuality.collectAsState()
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior(barState)
 
@@ -287,29 +287,30 @@ private fun CleanupMainScreen(
                     }
                 }
             }
-            StaggeredEntrance(2) {
-                SegmentedGroup(header = "按聊天") {
-                    item("sources") { position ->
-                        SegmentedNavigationItem(
-                            position = position,
-                            icon = Icons.Outlined.Forum,
-                            title = "按聊天清理",
-                            subtitle = if (rootMode) "按群聊、私聊和发送人清理"
-                            else "按群聊、私聊和发送人清理（需要 Root）",
-                            onClick = onOpenSources,
-                        )
-                    }
-                    chatRules.forEach { card ->
-                        item(card.rule.id) { position ->
-                            // 没有 Root 或还没读取来源时先去来源页
-                            val blocked = chatRuleBlocker(card.rule, rootMode, sources)
+            if (chatAvailable) {
+                StaggeredEntrance(2) {
+                    SegmentedGroup(header = "按聊天") {
+                        item("sources") { position ->
                             SegmentedNavigationItem(
                                 position = position,
-                                icon = ruleIcon(card.rule),
-                                title = card.rule.title,
-                                subtitle = blocked ?: ruleSubtitle(card, quality),
-                                onClick = { if (blocked != null) onOpenSources() else onOpenRule(card.rule) },
+                                icon = Icons.Outlined.Forum,
+                                title = "按聊天清理",
+                                subtitle = "按群聊、私聊和发送人清理",
+                                onClick = onOpenSources,
                             )
+                        }
+                        chatRules.forEach { card ->
+                            item(card.rule.id) { position ->
+                                // 还没读取来源时先去来源页
+                                val blocked = chatRuleBlocker(card.rule, sources)
+                                SegmentedNavigationItem(
+                                    position = position,
+                                    icon = ruleIcon(card.rule),
+                                    title = card.rule.title,
+                                    subtitle = blocked ?: ruleSubtitle(card, quality),
+                                    onClick = { if (blocked != null) onOpenSources() else onOpenRule(card.rule) },
+                                )
+                            }
                         }
                     }
                 }
@@ -397,8 +398,8 @@ internal fun ruleIcon(rule: CleanupRule): ImageVector = when (rule) {
  * 按聊天的规则还不能用时的说明（null = 可以用）。读过来源就能用（之后切回 Shizuku 也行，清理只需要文件访问）；
  * 「聊天记录已删除」还要完整读取过一次。
  */
-internal fun chatRuleBlocker(rule: CleanupRule, rootMode: Boolean, sources: SourcesState): String? = when {
-    !sources.read -> if (rootMode) "先读取一次聊天来源" else "需要 Root 读取聊天记录"
+internal fun chatRuleBlocker(rule: CleanupRule, sources: SourcesState): String? = when {
+    !sources.read -> "先读取一次聊天来源"
     rule == CleanupRule.DeletedChats && sources.completeReadAt <= 0 -> "需要完整读取一次聊天来源"
     else -> null
 }
