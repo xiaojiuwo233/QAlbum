@@ -103,6 +103,7 @@ fun DashboardScreen(
     val chatAvailable by viewModel.chatAvailable.collectAsState()
     val running by viewModel.scanRunning.collectAsState()
     val progress by viewModel.scanProgress.collectAsState()
+    val automaticScan by viewModel.scanAutomatic.collectAsState()
     val cleanedStats by viewModel.cleanedStats.collectAsState()
     val todayCleanedStats by viewModel.todayCleanedStats.collectAsState()
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
@@ -153,6 +154,7 @@ fun DashboardScreen(
                 ScanCard(
                     running = running,
                     progress = progress,
+                    automatic = automaticScan,
                     onIncremental = viewModel::startScan,
                     onFull = viewModel::startFullScan,
                     onCancel = viewModel::cancelScan,
@@ -510,6 +512,7 @@ private fun LegendItem(color: Color, label: String, value: String, percentage: F
 private fun ScanCard(
     running: Boolean,
     progress: ScanProgress?,
+    automatic: Boolean,
     onIncremental: () -> Unit,
     onFull: () -> Unit,
     onCancel: () -> Unit,
@@ -517,7 +520,7 @@ private fun ScanCard(
     DashboardCard(title = "扫描图片", icon = Icons.Outlined.TravelExplore) {
         Text(
             when {
-                running || progress != null -> statusText(running, progress)
+                running || progress != null -> statusText(running, progress, automatic)
                 else -> "增量扫描只看有变化的目录，几秒完成；全量扫描核对全部文件，能发现已删除的。"
             },
             style = MaterialTheme.typography.bodyMedium,
@@ -567,15 +570,18 @@ private fun compactCount(n: Int): String = when {
     else -> n.toString()
 }
 
-/** 扫描进度的文字（概览与设置的扫描页共用） */
-internal fun statusText(running: Boolean, progress: ScanProgress?): String = when (progress) {
-    is ScanProgress.Cancelled -> "已取消"
-    is ScanProgress.Failed -> "失败：${progress.reason}"
-    is ScanProgress.Done -> "完成，新增或更新 ${progress.total} 张"
-    is ScanProgress.Indexing -> "正在扫描目录 ${progress.processed}/${progress.total}"
-    is ScanProgress.Enumerating ->
-        if (progress.total > 0) "正在比对目录… 已发现 ${progress.total}" else "正在比对目录…"
-    null -> if (running) "启动中…" else ""
+/** 扫描进度的文字（概览与设置的扫描页共用）；[automatic] 为后台定时的自动扫描时标出来，免得以为是自己点的 */
+internal fun statusText(running: Boolean, progress: ScanProgress?, automatic: Boolean = false): String {
+    val text = when (progress) {
+        is ScanProgress.Cancelled -> "已取消"
+        is ScanProgress.Failed -> "失败：${progress.reason}"
+        is ScanProgress.Done -> "完成，新增或更新 ${progress.total} 张"
+        is ScanProgress.Indexing -> "正在扫描目录 ${progress.processed}/${progress.total}"
+        is ScanProgress.Enumerating ->
+            if (progress.total > 0) "正在比对目录… 已发现 ${progress.total}" else "正在比对目录…"
+        null -> if (running) "启动中…" else ""
+    }
+    return if (automatic && text.isNotEmpty()) "自动扫描 · $text" else text
 }
 
 /** 进度比例：null 不显示，-1 表示不确定进度 */

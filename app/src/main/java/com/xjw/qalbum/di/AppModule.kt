@@ -173,6 +173,7 @@ val appModule = module {
             appScope = get(),
             compressDemo = get(),
             chatFeatures = get(),
+            cleanupScheduler = get(),
         )
     }
     viewModel {

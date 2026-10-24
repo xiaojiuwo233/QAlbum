@@ -292,6 +292,19 @@ abstract class AppDatabase : RoomDatabase() {
             override fun migrate(db: SupportSQLiteDatabase) = QqFamilyMigration.migrate(db)
         }
 
+        /**
+         * v27 → v28：只换触发器，移入回收站与恢复时少做无用功（几万张图时数据库写入快好几倍）：
+         * - 家族重算只在成员「看得到 / 看不到」变化时才跑（见 [ImageVariantSql]），移入回收站与恢复中途的几步不再重算；
+         * - 路径改成回收站的内部路径时不再重新关联聊天来源（见 [createQqSourceLinkTriggers]）。
+         */
+        val MIGRATION_27_28 = object : Migration(27, 28) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                ImageVariantSql.recreateTriggers(db)
+                LINK_TRIGGERS.forEach { db.execSQL("DROP TRIGGER IF EXISTS $it") }
+                createQqSourceLinkTriggers(db)
+            }
+        }
+
         /** v25 → v26：压缩记录记下省下的空间何时腾出来（首页「今日已清理」算压缩省下的） */
         val MIGRATION_25_26 = object : Migration(25, 26) {
             override fun migrate(db: SupportSQLiteDatabase) {
@@ -333,7 +346,7 @@ abstract class AppDatabase : RoomDatabase() {
         const val DB_NAME = "qalbum.db"
 
         /** 当前数据库版本（启动时据此判断要不要显示升级进度） */
-        const val VERSION = 27
+        const val VERSION = 28
 
         /** v1 → v2：增加 OCR 全文索引（FTS4，v20 随 OCR 一起删除）。 */
         val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -600,8 +613,10 @@ abstract class AppDatabase : RoomDatabase() {
         }
 
         /**
-         * v27 的关联触发器：图片入库、改路径（恢复）、改家族键（发送图片缓存并进原图那一家等）时，关联到家族键相同的消息
+         * 关联触发器：图片入库、改路径（恢复）、改家族键（发送图片缓存并进原图那一家等）时，关联到家族键相同的消息
          * （qq_origins.family 与 qq_origin_families），以及路径记在 qq_origin_paths 里的少数消息。
+         * 移入回收站时路径改成内部路径，不用关联（关联本来就在；在回收站期间新读到的消息，恢复改回原路径时再关联）；
+         * 以前这一步对每张图都把几十条消息重新试插一遍，移入回收站时数据库写入慢十几倍。
          */
         internal fun createQqSourceLinkTriggers(db: SupportSQLiteDatabase) {
             val origins = """SELECT id FROM qq_origins WHERE family = NEW.variant_group
@@ -609,7 +624,7 @@ abstract class AppDatabase : RoomDatabase() {
                 UNION SELECT origin_id FROM qq_origin_paths WHERE path = NEW.path"""
             listOf(
                 "INSERT" to "",
-                "UPDATE OF path" to "WHEN OLD.path IS NOT NEW.path",
+                "UPDATE OF path" to "WHEN OLD.path IS NOT NEW.path AND NEW.path NOT LIKE 'qalbum-internal://%'",
                 "UPDATE OF variant_group" to "WHEN NEW.variant_group IS NOT OLD.variant_group",
             ).forEachIndexed { index, (operation, condition) ->
                 db.execSQL("""CREATE TRIGGER IF NOT EXISTS link_qq_image_origin_$index
@@ -897,7 +912,7 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14,
             MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20,
             MIGRATION_20_21, MIGRATION_21_22, MIGRATION_22_23, MIGRATION_23_24,
-            MIGRATION_24_25, MIGRATION_25_26, MIGRATION_26_27,
+            MIGRATION_24_25, MIGRATION_25_26, MIGRATION_26_27, MIGRATION_27_28,
         )
 
         /** 每个迁移开始时报告升级到哪一版（升级弹窗里显示），具体步骤由迁移自己细报 */

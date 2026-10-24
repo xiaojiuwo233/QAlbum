@@ -283,10 +283,8 @@ internal class LinkedPictureOperations(
             val moved=HashMap<Long,Boolean>()
             if(moving.isNotEmpty()) {
                 db.withTransaction {
-                    for(record in moving) {
-                        check(cleanup.markQuarantineRestoring(record.id)==1)
-                        check(images.markRestorePending(record.imageId,record.originalPath)==1)
-                    }
+                    for(page in moving.chunked(SQL_CHUNK))check(cleanup.markQuarantineRestoringBatch(page.map { it.id })==page.size)
+                    for(record in moving)check(images.markRestorePending(record.imageId,record.originalPath)==1)
                 }
                 val stamps=moving.map { sources.getValue(it.id)!!.stamp }
                 val direct=if(restoreRenames)move(moving.map { it.quarantinePath },moving.map { it.originalPath },stamps) else List(moving.size) { false }
@@ -436,10 +434,12 @@ internal class LinkedPictureOperations(
 
     private suspend fun finishRestore(records:List<QuarantineEntity>) {
         if(records.isEmpty())return
+        val now=System.currentTimeMillis()
+        // 整批两条语句（以前每张两次调用）
         db.withTransaction {
-            for(r in records) {
-                check(images.finalizeRestore(r.imageId,System.currentTimeMillis())==1)
-                cleanup.deleteQuarantine(r.id)
+            for(page in records.chunked(SQL_CHUNK)) {
+                check(images.finalizeRestoreBatch(page.map { it.imageId },now)==page.size)
+                check(cleanup.deleteQuarantineBatch(page.map { it.id })==page.size)
             }
         }
         records.forEach { it.thumbnailPath?.let { path->runCatching { File(path).delete() } } }

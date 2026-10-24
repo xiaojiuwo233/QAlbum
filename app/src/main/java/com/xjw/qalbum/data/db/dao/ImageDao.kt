@@ -118,6 +118,13 @@ interface ImageDao {
     """)
     suspend fun finalizeRestore(id: Long, lastSeen: Long): Int
 
+    /** [finalizeRestore] 的整批版本（一批最多几百行，一条语句） */
+    @Query("""
+        UPDATE images SET status = CASE WHEN source_type='chatthumb' THEN 'thumbnail_trash' ELSE 'active' END, last_seen = :lastSeen
+        WHERE id IN (:ids) AND status = 'restore_pending'
+    """)
+    suspend fun finalizeRestoreBatch(ids: List<Long>, lastSeen: Long): Int
+
     @Query("""
         UPDATE images
         SET status = 'quarantined', path = 'qalbum-internal://quarantine/' || id

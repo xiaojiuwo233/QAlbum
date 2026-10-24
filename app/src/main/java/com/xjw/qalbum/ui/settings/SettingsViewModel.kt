@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.xjw.qalbum.access.AccessManager
 import com.xjw.qalbum.access.ChatFeatures
 import com.xjw.qalbum.data.db.AppDatabase
+import com.xjw.qalbum.data.db.dao.RuleStats
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.domain.model.AccessMode
 import com.xjw.qalbum.domain.model.PaletteStyle
@@ -47,6 +48,7 @@ class SettingsViewModel(
     private val appScope: CoroutineScope,
     private val compressDemo: CompressDemo,
     chatFeatures: ChatFeatures,
+    private val cleanupScheduler: ScheduledCleanup,
 ) : ViewModel() {
 
     /**
@@ -136,6 +138,13 @@ class SettingsViewModel(
     val chatpicPath: StateFlow<String> = settings.chatpicPath.state(SettingsRepository.DEFAULT_CHATPIC_PATH)
     val scanRunning: StateFlow<Boolean> = scanController.running
     val scanProgress: StateFlow<ScanProgress?> = scanController.progress
+    val scanAutomatic: StateFlow<Boolean> = scanController.automatic
+
+    /** 后台自动扫描（每 6 小时）与上次的结果 */
+    val autoScan: StateFlow<Boolean> = settings.autoScan.state(true)
+    val autoScanLast: StateFlow<String?> = settings.autoScanLast.state(null)
+
+    fun setAutoScan(enabled: Boolean) = persist { settings.setAutoScan(enabled) }
 
     /** 保存图片目录；空的不保存，返回是否保存了 */
     fun setChatpicPath(path: String): Boolean {
@@ -181,6 +190,9 @@ class SettingsViewModel(
         persist { settings.setScheduledCleanupRule(ruleId, enabled) }
     }
 
+    /** 这条规则现在执行会移入多少张、多大（开启每周自动清理前确认用） */
+    suspend fun scheduledRulePreview(rule: CleanupRule): RuleStats = withContext(Dispatchers.IO) { cleanupScheduler.preview(rule) }
+
     // ---- 原图压缩 ----
 
     val compressQuality: StateFlow<Int> = settings.compressQuality.state(SettingsRepository.DEFAULT_COMPRESS_QUALITY)
@@ -213,7 +225,7 @@ class SettingsViewModel(
     val galleryStackVariants: StateFlow<Boolean> = settings.galleryStackVariants.state(true)
     val fastScrollEnabled: StateFlow<Boolean> = settings.fastScrollEnabled.state(true)
     val archiveVisible: StateFlow<Boolean> = settings.archiveVisible.state(false)
-    val detailSharedTransition: StateFlow<Boolean> = settings.detailSharedTransition.state(false)
+    val detailSharedTransition: StateFlow<Boolean> = settings.detailSharedTransition.state(true)
     val exportSubdirs: StateFlow<List<String>> = settings.exportSubdirs.state(emptyList())
 
     fun setGalleryStackVariants(enabled: Boolean) = persist { settings.setGalleryStackVariants(enabled) }

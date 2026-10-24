@@ -84,6 +84,9 @@ class DashboardViewModel(
     val scanRunning: StateFlow<Boolean> = scanController.running
     val scanProgress: StateFlow<ScanProgress?> = scanController.progress
 
+    /** 正在跑（或刚跑完）的是后台自动扫描 */
+    val scanAutomatic: StateFlow<Boolean> = scanController.automatic
+
     fun startScan() = scanController.startIncrementalScan()
     fun startFullScan() = scanController.startFullScan()
     fun cancelScan() = scanController.cancel()

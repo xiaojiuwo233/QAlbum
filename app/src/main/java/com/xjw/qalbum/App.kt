@@ -104,9 +104,7 @@ class App : Application(), Configuration.Provider {
         get<ImageSizeBackfill>().startIfNeeded()
 
         // 后台任务排程（均 KEEP 幂等，重复调用无副作用）：
-        // - 增量扫描：每 6 小时一次（目录剪枝后常态秒级完成）
         // - 回收站到期清理：每日一次，兑现 UI 承诺的「N 天后自动删除」（含压缩前的原图）
-        IncrementalScanWorker.schedulePeriodic(this)
         WorkManager.getInstance(this).enqueueUniquePeriodicWork(
             QuarantinePurgeWorker.NAME_UNIQUE,
             ExistingPeriodicWorkPolicy.KEEP,
@@ -118,6 +116,10 @@ class App : Application(), Configuration.Provider {
 
         // - 定时清理：设置里选了规则才每周跑一次，全部取消即撤掉排程
         val settings = get<SettingsRepository>()
+        // - 自动扫描：每 6 小时增量扫描一次（设置 → 扫描里可关，关掉即撤掉排程）
+        get<CoroutineScope>().launch {
+            settings.autoScan.distinctUntilChanged().collect { enabled -> IncrementalScanWorker.schedule(this@App, enabled) }
+        }
         get<CoroutineScope>().launch {
             settings.scheduledCleanupRules.map { it.isNotEmpty() }.distinctUntilChanged().collect { enabled ->
                 ScheduledCleanupWorker.schedule(this@App, enabled)

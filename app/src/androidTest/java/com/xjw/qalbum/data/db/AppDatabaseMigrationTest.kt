@@ -31,6 +31,49 @@ class AppDatabaseMigrationTest {
     }
 
     @Test
+    fun migrate27To28_familyRecomputesOnlyWhenVisibilityChanges() {
+        val name = "migration-27-28"
+        val root = "/storage/emulated/0/Android/data/com.tencent.mobileqq/Tencent/MobileQQ/chatpic"
+        val (img, raw) = QqCachePaths.relativePaths("0123456789abcdef0123456789abcdef").map { "$root/$it" }
+        helper.createDatabase(name, 27).use { db ->
+            image(db, 1, raw)
+            image(db, 2, img)
+        }
+        helper.runMigrationsAndValidate(name, 28, true, AppDatabase.MIGRATION_27_28).use { db ->
+            // 迁移后触发器在：原图变大，原图成了代表图，两个版本、合计 400
+            db.execSQL("UPDATE images SET size = 300 WHERE id = 1")
+            assertEquals(2L, scalarLong(db, "SELECT variant_count FROM images WHERE id = 1"))
+            assertEquals(400L, scalarLong(db, "SELECT variant_bytes FROM images WHERE id = 1"))
+            // 原图移入回收站（看得到 → 看不到）：预览图自己一张，不再合并
+            db.execSQL("UPDATE images SET status = 'quarantine_pending' WHERE id = 1")
+            assertEquals(0L, scalarLong(db, "SELECT variant_hidden FROM images WHERE id = 2"))
+            assertEquals(100L, scalarLong(db, "SELECT variant_bytes FROM images WHERE id = 2"))
+            // 看不到的状态之间变化不重算：先写一个记号，变完记号还在
+            db.execSQL("UPDATE images SET variant_bytes = 7 WHERE id = 2")
+            db.execSQL("UPDATE images SET status = 'quarantined' WHERE id = 1")
+            db.execSQL("UPDATE images SET status = 'restore_pending' WHERE id = 1")
+            assertEquals(7L, scalarLong(db, "SELECT variant_bytes FROM images WHERE id = 2"))
+            // 恢复（看不到 → 看得到）照常重算
+            db.execSQL("UPDATE images SET status = 'active' WHERE id = 1")
+            assertEquals(400L, scalarLong(db, "SELECT variant_bytes FROM images WHERE id = 1"))
+            assertEquals(100L, scalarLong(db, "SELECT variant_bytes FROM images WHERE id = 2"))
+            assertEquals(1L, scalarLong(db, "SELECT variant_hidden FROM images WHERE id = 2"))
+
+            // 在回收站期间读到的新消息：路径改成内部路径时不关联，恢复改回原路径时才关联
+            db.execSQL("INSERT INTO qq_source_accounts VALUES('a', '账号', 1, 1)")
+            db.execSQL(
+                """INSERT INTO qq_origins(id, account_key, conversation_key, conversation_name, chat_type, sender_key, sender_name,
+                    member_name, message_time, md5, seen_at, pic_type, pic_sub_type, sent_original, family)
+                    VALUES('o', 'a', 'g', '群', 2, 's', '人', '', 1000, 'm', 0, 0, 0, 0, ${QqCachePaths.familyKey(raw)})""",
+            )
+            db.execSQL("UPDATE images SET path = 'qalbum-internal://quarantine/1' WHERE id = 1")
+            assertEquals(0L, scalarLong(db, "SELECT COUNT(*) FROM image_qq_origins WHERE image_id = 1"))
+            db.execSQL("UPDATE images SET path = '$raw' WHERE id = 1")
+            assertEquals(1L, scalarLong(db, "SELECT COUNT(*) FROM image_qq_origins WHERE image_id = 1 AND origin_id = 'o'"))
+        }
+    }
+
+    @Test
     fun migrate26To27_linksPicturesByFamilyInsteadOfStoredPaths() {
         val name = "migration-26-27"
         val root = "/storage/emulated/0/Android/data/com.tencent.mobileqq/Tencent/MobileQQ/chatpic"

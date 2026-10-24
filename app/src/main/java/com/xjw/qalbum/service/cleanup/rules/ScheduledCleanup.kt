@@ -1,6 +1,7 @@
 package com.xjw.qalbum.service.cleanup.rules
 
 import com.xjw.qalbum.data.db.AppDatabase
+import com.xjw.qalbum.data.db.dao.RuleStats
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.ui.common.formatBytes
 import com.xjw.qalbum.ui.common.formatDateTime
@@ -38,14 +39,21 @@ class ScheduledCleanup(
         return summary
     }
 
+    /** [rule] 现在执行的话会移入多少（开启前给用户确认） */
+    suspend fun preview(rule: CleanupRule, now: Long = System.currentTimeMillis()): RuleStats =
+        db.cleanupRuleDao().stats(RuleSql.stats(rule.where(optionOf(rule), now), rule.scope))
+
+    /** 规则页上选的条件（选项已经没有了就用默认的） */
+    private suspend fun optionOf(rule: CleanupRule): Int =
+        settings.cleanupRuleParam(rule.id).first()?.takeIf { rule.option(it) != null } ?: rule.defaultOption
+
     private suspend fun trashAll(rules: List<CleanupRule>, now: Long): Summary {
         val dao = db.cleanupRuleDao()
         var moved = 0
         var bytes = 0L
         val parts = ArrayList<String>()
         for (rule in rules) {
-            val option = settings.cleanupRuleParam(rule.id).first()?.takeIf { rule.option(it) != null } ?: rule.defaultOption
-            val part = rule.where(option, now)
+            val part = rule.where(optionOf(rule), now)
             val stats = dao.stats(RuleSql.stats(part, rule.scope))
             if (stats.count == 0) continue
             val done = trash(dao.ids(RuleSql.ids(part)), rule.title, rule.scope == RuleScope.PICTURE)

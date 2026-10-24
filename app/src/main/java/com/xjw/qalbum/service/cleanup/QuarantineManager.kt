@@ -25,7 +25,12 @@ import com.xjw.qalbum.service.cleanup.LinkedPictureOperations.RestoreResult
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import timber.log.Timber
@@ -34,6 +39,7 @@ import java.io.File
 import java.io.InputStream
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 回收站
@@ -231,7 +237,8 @@ class QuarantineManager(
     /**
      * 批量恢复（[quarantineIds] 每组一条，整组恢复）。原位置已经有文件（多是 QQ 又下载了一份）的组默认不动、记在
      * [RestoreReport.occupied] 里；[keepExisting] 时用现有的文件，其余照常送回。每 [RESTORE_PAGE] 组一批整批处理
-     * （见 LinkedPictureOperations.restoreGroups）；归档最后同步一次。
+     * （见 LinkedPictureOperations.restoreGroups），两批同时进行：一批在特权进程里移动文件时，另一批写数据库；
+     * 归档最后同步一次。
      */
     suspend fun restoreAll(
         quarantineIds: List<Long>, keepExisting: Boolean = false, onProgress: (done: Int, total: Int) -> Unit = { _, _ -> },
@@ -246,35 +253,46 @@ class QuarantineManager(
         val bound = fileOpsClient.bind(provider.getAccessMode()) ?: return@withContext RestoreReport()
         try {
             val operations = linkedOperations(bound, provider)
-            var done = 0
-            for (page in quarantineIds.chunked(RESTORE_PAGE)) {
-                ensureActive()
-                val heads = cleanupDao.getQuarantineByIds(page).associateBy { it.id }
-                val members = heads.values.mapNotNull { it.groupId }.distinct().chunked(SQL_CHUNK)
-                    .flatMap { cleanupDao.getQuarantineGroups(it) }.groupBy { it.groupId }
-                val seen = HashSet<String>()
-                val grouped = page.mapNotNull { heads[it] }.filter { it.groupId != null && seen.add(it.groupId) }
-                val results = operations.restoreGroups(grouped.map { members[it.groupId].orEmpty() }, keepExisting)
-                grouped.forEachIndexed { k, head ->
-                    when (results[k].outcome) {
-                        RestoreOutcome.RESTORED -> {
-                            restored += members[head.groupId].orEmpty().map { it.imageId }
-                            groups += head.id
-                            adopted += results[k].archive
+            val done = AtomicInteger(0)
+            val lock = Any()
+            val permits = Semaphore(RESTORE_PARALLEL)
+            coroutineScope {
+                quarantineIds.chunked(RESTORE_PAGE).map { page ->
+                    async {
+                        permits.withPermit {
+                            ensureActive()
+                            val heads = cleanupDao.getQuarantineByIds(page).associateBy { it.id }
+                            val members = heads.values.mapNotNull { it.groupId }.distinct().chunked(SQL_CHUNK)
+                                .flatMap { cleanupDao.getQuarantineGroups(it) }.groupBy { it.groupId }
+                            val seen = HashSet<String>()
+                            val grouped = page.mapNotNull { heads[it] }.filter { it.groupId != null && seen.add(it.groupId) }
+                            val results = operations.restoreGroups(grouped.map { members[it.groupId].orEmpty() }, keepExisting)
+                            synchronized(lock) {
+                                grouped.forEachIndexed { k, head ->
+                                    when (results[k].outcome) {
+                                        RestoreOutcome.RESTORED -> {
+                                            restored += members[head.groupId].orEmpty().map { it.imageId }
+                                            groups += head.id
+                                            adopted += results[k].archive
+                                        }
+                                        RestoreOutcome.OCCUPIED -> occupied += head.id
+                                        RestoreOutcome.FAILED -> Unit
+                                    }
+                                }
+                            }
+                            // 旧版没有组的记录逐条恢复
+                            for (head in page.mapNotNull { heads[it] }.filter { it.groupId == null }) {
+                                if (restoreRecord(head.id, keepExisting).outcome == RestoreOutcome.RESTORED) {
+                                    synchronized(lock) {
+                                        restored += head.imageId
+                                        groups += head.id
+                                    }
+                                }
+                            }
+                            onProgress(done.addAndGet(page.size), quarantineIds.size)
                         }
-                        RestoreOutcome.OCCUPIED -> occupied += head.id
-                        RestoreOutcome.FAILED -> Unit
                     }
-                }
-                // 旧版没有组的记录逐条恢复
-                for (head in page.mapNotNull { heads[it] }.filter { it.groupId == null }) {
-                    if (restoreRecord(head.id, keepExisting).outcome == RestoreOutcome.RESTORED) {
-                        restored += head.imageId
-                        groups += head.id
-                    }
-                }
-                done += page.size
-                onProgress(done, quarantineIds.size)
+                }.awaitAll()
             }
         } finally {
             bound.close()
@@ -899,6 +917,9 @@ class QuarantineManager(
 
         /** 批量恢复每批的组数 */
         private const val RESTORE_PAGE = 100
+
+        /** 同时进行的恢复批数：一批移动文件（特权进程）时另一批写数据库，两边错开 */
+        private const val RESTORE_PARALLEL = 2
         private const val RESTORE_NAME_ATTEMPTS = 1_000
 
         private const val STATE_PENDING = "pending"

@@ -81,11 +81,17 @@ interface CleanupDao {
     @Query("UPDATE quarantine SET state = 'restoring' WHERE id = :id AND state = 'ready'")
     suspend fun markQuarantineRestoring(id: Long): Int
 
+    @Query("UPDATE quarantine SET state = 'restoring' WHERE id IN (:ids) AND state = 'ready'")
+    suspend fun markQuarantineRestoringBatch(ids: List<Long>): Int
+
     @Query("UPDATE quarantine SET state = 'ready' WHERE id = :id AND state = 'restoring'")
     suspend fun rollbackQuarantineRestore(id: Long): Int
 
     @Query("DELETE FROM quarantine WHERE id = :id")
     suspend fun deleteQuarantine(id: Long)
+
+    @Query("DELETE FROM quarantine WHERE id IN (:ids)")
+    suspend fun deleteQuarantineBatch(ids: List<Long>): Int
 
     /** 批量删除回收站记录（一键清理逐页批删，避免逐条事务）；调用方分块控制在 SQLite 变量上限内。 */
     @Query("DELETE FROM quarantine WHERE id IN (:ids)")

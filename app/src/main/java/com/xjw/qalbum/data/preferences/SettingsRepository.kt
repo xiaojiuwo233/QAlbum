@@ -146,6 +146,20 @@ class SettingsRepository(
         }
     }
 
+    /** 后台自动扫描新图片（每 6 小时一次，增量） */
+    val autoScan: Flow<Boolean> = prefsData.map { it[Keys.AUTO_SCAN] ?: true }
+
+    suspend fun setAutoScan(enabled: Boolean) {
+        ds.edit { it[Keys.AUTO_SCAN] = enabled }
+    }
+
+    /** 上次自动扫描的结果（扫描页显示），没跑过为 null */
+    val autoScanLast: Flow<String?> = prefsData.map { it[Keys.AUTO_SCAN_LAST] }
+
+    suspend fun setAutoScanLast(text: String) {
+        ds.edit { it[Keys.AUTO_SCAN_LAST] = text }
+    }
+
     /** 上次定时清理的结果（设置页显示），没跑过为 null */
     val scheduledCleanupLast: Flow<String?> = prefsData.map { it[Keys.SCHEDULED_CLEANUP_LAST] }
 
@@ -344,9 +358,9 @@ class SettingsRepository(
         ds.edit { it[Keys.NOTIFICATION_ASKED] = true }
     }
 
-    // ---- 图库动画增强：true=缩略图共享元素（实验性），false=缩放进入+飞出下滑（默认稳定）----
+    // ---- 优雅动画：true=缩略图共享元素（默认），false=缩放进入+飞出下滑 ----
 
-    val detailSharedTransition: Flow<Boolean> = prefsData.map { it[Keys.DETAIL_SHARED_TRANSITION] ?: false }
+    val detailSharedTransition: Flow<Boolean> = prefsData.map { it[Keys.DETAIL_SHARED_TRANSITION] ?: true }
 
     suspend fun setDetailSharedTransition(enabled: Boolean) {
         ds.edit { it[Keys.DETAIL_SHARED_TRANSITION] = enabled }
@@ -440,6 +454,8 @@ class SettingsRepository(
         val VIDEO_INCLUDE_FILES = booleanPreferencesKey("video_include_files")
         val SCHEDULED_CLEANUP = stringSetPreferencesKey("scheduled_cleanup_rules")
         val SCHEDULED_CLEANUP_LAST = stringPreferencesKey("scheduled_cleanup_last")
+        val AUTO_SCAN = booleanPreferencesKey("auto_scan")
+        val AUTO_SCAN_LAST = stringPreferencesKey("auto_scan_last")
         val QQ_SOURCE_FACET_ORDER = stringPreferencesKey("qq_source_facet_order")
 
         val THEME_MODE = stringPreferencesKey("theme_mode")

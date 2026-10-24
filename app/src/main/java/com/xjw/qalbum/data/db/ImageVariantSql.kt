@@ -5,8 +5,9 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 /**
  * 图片家族（同一张 QQ 图片的原图 / 预览图 / 缩略图）的派生字段维护。
  *
- * 家族键 `variant_group` 由路径算出（见 QqCachePaths.familyKey）。每次家族成员的状态 / 大小 / 类型变化，
- * 触发器重算这个家族（成员通常 2~4 个）：
+ * 家族键 `variant_group` 由路径算出（见 QqCachePaths.familyKey）。家族成员的大小 / 类型变化，或者状态在
+ * 「看得到」（active、thumbnail_trash）与「看不到」之间变化时，触发器重算这个家族（成员通常 2~4 个）；
+ * 看不到的几种状态之间互相变化（移入回收站、恢复中途的那几步）不影响结果，不重算：
  * - 代表图：在图库可见的成员（active 且非缩略图）里最大的那张；其余可见成员 `variant_hidden = 1`；
  * - 代表图记录家族现存版本数（缩略图也算在内，≥2 个版本才记）；
  * - `variant_bytes` 是合并显示时这张图的大小：代表图为全部版本合计，其余（含不属于任何家族的图）为自身大小，
@@ -65,6 +66,9 @@ object ImageVariantSql {
 
     private val PLAIN_TRIGGERS = listOf("image_plain_bytes_insert", "image_plain_bytes_update")
 
+    /** 家族重算会看的状态（[count]、[bytes] 算的就是这两种） */
+    private const val VISIBLE = "'active', 'thumbnail_trash'"
+
     fun createTriggers(db: SupportSQLiteDatabase) {
         db.execSQL("""CREATE TRIGGER IF NOT EXISTS image_variants_insert
             AFTER INSERT ON images WHEN NEW.variant_group IS NOT NULL
@@ -72,7 +76,8 @@ object ImageVariantSql {
         db.execSQL("""CREATE TRIGGER IF NOT EXISTS image_variants_update
             AFTER UPDATE OF status, size, source_type ON images
             WHEN NEW.variant_group IS NOT NULL
-              AND (OLD.status IS NOT NEW.status OR OLD.size IS NOT NEW.size OR OLD.source_type IS NOT NEW.source_type)
+              AND (OLD.size IS NOT NEW.size OR OLD.source_type IS NOT NEW.source_type
+                   OR (OLD.status IS NOT NEW.status AND (OLD.status IN ($VISIBLE) OR NEW.status IN ($VISIBLE))))
             BEGIN ${recomputeFamily("NEW.variant_group")} END""")
         db.execSQL("""CREATE TRIGGER IF NOT EXISTS image_variants_delete
             AFTER DELETE ON images WHEN OLD.variant_group IS NOT NULL

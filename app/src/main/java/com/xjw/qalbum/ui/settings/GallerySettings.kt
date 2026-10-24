@@ -87,8 +87,8 @@ fun GallerySettingsScreen(
                 SegmentedSwitchItem(
                     position = position,
                     icon = Icons.Outlined.Animation,
-                    title = "从缩略图放大打开",
-                    subtitle = "打开图片时缩略图放大成全屏（实验性）",
+                    title = "优雅动画",
+                    subtitle = "打开图片时从缩略图放大，返回时缩回格子",
                     checked = sharedTransition,
                     onCheckedChange = viewModel::setDetailSharedTransition,
                 )

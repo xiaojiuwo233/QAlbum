@@ -1,7 +1,9 @@
 package com.xjw.qalbum.ui.navigation
 
+import androidx.compose.animation.AnimatedContentScope
 import androidx.compose.animation.AnimatedContentTransitionScope
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterExitState
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
@@ -29,12 +31,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.navigation.NamedNavArgument
 import androidx.navigation.NavBackStackEntry
+import androidx.navigation.NavGraphBuilder
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -116,8 +122,8 @@ fun AppNavigation() {
     val slideSpec = MaterialTheme.motionScheme.defaultSpatialSpec<IntOffset>()
     val fadeSpec = MaterialTheme.motionScheme.defaultEffectsSpec<Float>()
     val scaleSpec = MaterialTheme.motionScheme.defaultSpatialSpec<Float>()
-    // 详情转场方案开关：true=缩略图共享元素，false=缩放进入 + 图库立即垫底
-    val sharedTransition by settings.detailSharedTransition.collectAsState(initial = false)
+    // 看图转场（设置里的「优雅动画」）：true=从缩略图放大、返回时缩回格子，false=缩放进入 + 图库立即垫底
+    val sharedTransition by settings.detailSharedTransition.collectAsState(initial = true)
     // 图库 / 归档 ↔ 大图的转场进行中（含预测性返回拖动中）：这时顶栏、底栏画到飞行的图上面
     val visibleEntries by navController.visibleEntries.collectAsState()
     val imageTransition = sharedTransition && visibleEntries.size > 1 && visibleEntries.any { it.isImage() }
@@ -166,7 +172,7 @@ fun AppNavigation() {
                     }
                 },
             ) {
-                composable(ONBOARDING_ROUTE) {
+                page(ONBOARDING_ROUTE) {
                     OnboardingScreen(
                         onDone = {
                             // 从概览 /「关于」打开的回到原页；第一次打开的进概览
@@ -180,7 +186,7 @@ fun AppNavigation() {
                         },
                     )
                 }
-                composable(NavDestination.Dashboard.route) {
+                page(NavDestination.Dashboard.route) {
                     DashboardScreen(
                         contentPadding = contentPadding,
                         onOpenAccessSettings = { navController.navigate(SettingsCategory.ACCESS.route) },
@@ -188,7 +194,7 @@ fun AppNavigation() {
                         onOpenSources = { navController.navigate(QQ_SOURCES_ROUTE) },
                     )
                 }
-                composable(NavDestination.Gallery.route) {
+                page(NavDestination.Gallery.route) {
                     GalleryScreen(
                         contentPadding = contentPadding,
                         onImageClick = { id -> navController.navigate("image/$id") },
@@ -201,7 +207,7 @@ fun AppNavigation() {
                         imageTransition = imageTransition,
                     )
                 }
-                composable("archive") {
+                page("archive") {
                     ArchiveScreen(
                         contentPadding = secondaryPadding,
                         onBack = { navController.popBackStack() },
@@ -212,13 +218,13 @@ fun AppNavigation() {
                         imageTransition = imageTransition,
                     )
                 }
-                composable(QQ_SOURCES_ROUTE) {
+                page(QQ_SOURCES_ROUTE) {
                     QqSourcesScreen(
                         onBack = { navController.popBackStack() },
                         onBrowse = { target -> navController.navigate(target.route()) },
                     )
                 }
-                composable(
+                page(
                     route = "$QQ_SOURCES_ROUTE/{kind}/{key}",
                     arguments = listOf(
                         navArgument("kind") { type = NavType.StringType },
@@ -235,14 +241,14 @@ fun AppNavigation() {
                         onBrowse = { next -> navController.navigate(next.route()) },
                     )
                 }
-                composable(NavDestination.Cleanup.route) {
+                page(NavDestination.Cleanup.route) {
                     CleanupScreen(
                         contentPadding = contentPadding,
                         onOpenSources = { navController.navigate(QQ_SOURCES_ROUTE) },
                         onSubPageChange = { cleanupSubPage = it },
                     )
                 }
-                composable(NavDestination.Settings.route) {
+                page(NavDestination.Settings.route) {
                     SettingsScreen(
                         contentPadding = contentPadding,
                         onOpenCategory = { category -> navController.navigate(category.route) },
@@ -250,63 +256,63 @@ fun AppNavigation() {
                         animatedScope = this,
                     )
                 }
-                composable(SettingsCategory.ACCESS.route) {
+                page(SettingsCategory.ACCESS.route) {
                     AccessSettingsScreen(
                         onBack = { navController.popBackStack() },
                         sharedScope = this@SharedTransitionLayout,
                         animatedScope = this,
                     )
                 }
-                composable(SettingsCategory.SCAN.route) {
+                page(SettingsCategory.SCAN.route) {
                     ScanSettingsScreen(
                         onBack = { navController.popBackStack() },
                         sharedScope = this@SharedTransitionLayout,
                         animatedScope = this,
                     )
                 }
-                composable(SettingsCategory.CLEANUP.route) {
+                page(SettingsCategory.CLEANUP.route) {
                     CleanupSettingsScreen(
                         onBack = { navController.popBackStack() },
                         sharedScope = this@SharedTransitionLayout,
                         animatedScope = this,
                     )
                 }
-                composable(SettingsCategory.COMPRESS.route) {
+                page(SettingsCategory.COMPRESS.route) {
                     CompressSettingsScreen(
                         onBack = { navController.popBackStack() },
                         sharedScope = this@SharedTransitionLayout,
                         animatedScope = this,
                     )
                 }
-                composable(SettingsCategory.APPEARANCE.route) {
+                page(SettingsCategory.APPEARANCE.route) {
                     AppearanceSettingsScreen(
                         onBack = { navController.popBackStack() },
                         sharedScope = this@SharedTransitionLayout,
                         animatedScope = this,
                     )
                 }
-                composable(SettingsCategory.GALLERY.route) {
+                page(SettingsCategory.GALLERY.route) {
                     GallerySettingsScreen(
                         onBack = { navController.popBackStack() },
                         sharedScope = this@SharedTransitionLayout,
                         animatedScope = this,
                     )
                 }
-                composable(SettingsCategory.STORAGE.route) {
+                page(SettingsCategory.STORAGE.route) {
                     StorageSettingsScreen(
                         onBack = { navController.popBackStack() },
                         sharedScope = this@SharedTransitionLayout,
                         animatedScope = this,
                     )
                 }
-                composable(SettingsCategory.LOGS.route) {
+                page(SettingsCategory.LOGS.route) {
                     LogScreen(
                         onBack = { navController.popBackStack() },
                         sharedScope = this@SharedTransitionLayout,
                         animatedScope = this,
                     )
                 }
-                composable(SettingsCategory.ABOUT.route) {
+                page(SettingsCategory.ABOUT.route) {
                     AboutSettingsScreen(
                         onBack = { navController.popBackStack() },
                         onOpenGuide = { navController.navigate(ONBOARDING_ROUTE) },
@@ -314,7 +320,7 @@ fun AppNavigation() {
                         animatedScope = this,
                     )
                 }
-                composable(
+                page(
                     route = "image/{imageId}",
                     arguments = listOf(navArgument("imageId") { type = NavType.LongType }),
                 ) { entry ->
@@ -327,7 +333,7 @@ fun AppNavigation() {
                         imageTransition = imageTransition,
                     )
                 }
-                composable(
+                page(
                     route = "archive/image/{imageId}",
                     arguments = listOf(navArgument("imageId") { type = NavType.LongType }),
                 ) { entry ->
@@ -376,6 +382,30 @@ fun AppNavigation() {
                 }
             }
         }
+    }
+}
+
+/**
+ * 注册一个页面：转场进行中（进入或离开）整页不接收触摸。返回时离开的页面在上层，布局还整屏铺着
+ * （容器变换时画面上它已经缩回入口了），这时点下去会点到看不见的旧页面里的开关；进入时新页面还没长开，
+ * 点到的却是它里面的东西。转场只有几百毫秒，期间的点按直接忽略。
+ */
+private fun NavGraphBuilder.page(
+    route: String,
+    arguments: List<NamedNavArgument> = emptyList(),
+    content: @Composable AnimatedContentScope.(NavBackStackEntry) -> Unit,
+) = composable(route, arguments) { entry ->
+    val scope = this
+    val settled = transition.currentState == EnterExitState.Visible && transition.targetState == EnterExitState.Visible
+    Box(modifier = if (settled) Modifier else Modifier.blockTouches(), propagateMinConstraints = true) {
+        scope.content(entry)
+    }
+}
+
+/** 吞掉所有触摸（在最外层先拿到，里面的控件收不到） */
+private fun Modifier.blockTouches(): Modifier = pointerInput(Unit) {
+    awaitPointerEventScope {
+        while (true) awaitPointerEvent(PointerEventPass.Initial).changes.forEach { it.consume() }
     }
 }
 

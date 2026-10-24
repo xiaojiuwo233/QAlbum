@@ -47,6 +47,11 @@ class ScanController(
     private val _running = MutableStateFlow(false)
     val running: StateFlow<Boolean> = _running.asStateFlow()
 
+    private val _automatic = MutableStateFlow(false)
+
+    /** 当前（或最近一次）扫描是后台定时的自动扫描（界面上标出来，不让用户以为是自己点的） */
+    val automatic: StateFlow<Boolean> = _automatic.asStateFlow()
+
     /** 守护 [currentJob] 与 _running/_progress 写入的一致性 */
     private val stateLock = Any()
 
@@ -59,25 +64,49 @@ class ScanController(
     fun startDeepVerify() = start(ScanMode.DEEP_VERIFY)
 
     private fun start(mode: ScanMode) {
+        launch(mode, automatic = false)
+    }
+
+    /**
+     * 后台定时的自动扫描（Worker 里调用，扫完才返回）：与手动扫描共用进度，打开着 App 时概览和扫描页都看得到；
+     * 不登记前台服务（后台起不了）。已有扫描在跑就跳过，返回 null；否则返回最后的进度。
+     * 调用方被取消（Worker 被停：关了自动扫描、电量低）时扫描跟着停。
+     */
+    suspend fun runAutomatic(): ScanProgress? {
+        val job = launch(ScanMode.INCREMENTAL, automatic = true) ?: return null
+        try {
+            job.join()
+        } catch (ce: CancellationException) {
+            job.cancel()
+            throw ce
+        }
+        return synchronized(stateLock) { _progress.value }
+    }
+
+    private fun launch(mode: ScanMode, automatic: Boolean): Job? {
         // LAZY 启动：在锁内完成「判定 + 置 running + 记录 job」的原子发布，
         // 协程体开始执行时自身引用已可用于身份校验，消除 check-then-act 双开窗口
         synchronized(stateLock) {
             if (currentJob?.isActive == true) {
                 Timber.w("ScanController.start($mode): another scan is running, ignore")
-                return
+                return null
             }
             val job = scope.launch(start = CoroutineStart.LAZY) {
                 val self = coroutineContext[Job]
                 try {
                     val root = settings.chatpicPath.first()
-                    // 登记为后台任务：通知栏显示进度，切到后台也保持前台优先级
-                    tasks.track(if (mode == ScanMode.INCREMENTAL) "扫描图片" else "全量扫描图片") { handle ->
-                        pipeline.scan(root, mode).collect { p ->
-                            setProgressIfCurrent(self, p)
-                            when (p) {
-                                is ScanProgress.Enumerating -> handle.update("正在比对目录… 已发现 ${p.total} 个")
-                                is ScanProgress.Indexing -> handle.update("已扫描 ${p.processed} / ${p.total} 个目录", p.processed.toLong(), p.total.toLong())
-                                else -> Unit
+                    if (automatic) {
+                        pipeline.scan(root, mode).collect { p -> setProgressIfCurrent(self, p) }
+                    } else {
+                        // 登记为后台任务：通知栏显示进度，切到后台也保持前台优先级
+                        tasks.track(if (mode == ScanMode.INCREMENTAL) "扫描图片" else "全量扫描图片") { handle ->
+                            pipeline.scan(root, mode).collect { p ->
+                                setProgressIfCurrent(self, p)
+                                when (p) {
+                                    is ScanProgress.Enumerating -> handle.update("正在比对目录… 已发现 ${p.total} 个")
+                                    is ScanProgress.Indexing -> handle.update("已扫描 ${p.processed} / ${p.total} 个目录", p.processed.toLong(), p.total.toLong())
+                                    else -> Unit
+                                }
                             }
                         }
                     }
@@ -101,7 +130,10 @@ class ScanController(
             }
             currentJob = job
             _running.value = true
+            _automatic.value = automatic
+            _progress.value = null
             job.start()
+            return job
         }
     }
 

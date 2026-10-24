@@ -12,6 +12,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.FactCheck
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.FolderOpen
+import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.TravelExplore
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -37,6 +38,7 @@ import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.ui.components.SegmentedCard
 import com.xjw.qalbum.ui.components.SegmentedGroup
 import com.xjw.qalbum.ui.components.SegmentedListItem
+import com.xjw.qalbum.ui.components.SegmentedSwitchItem
 import com.xjw.qalbum.ui.components.ShapeIcon
 import com.xjw.qalbum.ui.components.WavyProgress
 import com.xjw.qalbum.ui.dashboard.statusText
@@ -54,6 +56,9 @@ fun ScanSettingsScreen(
     val path by viewModel.chatpicPath.collectAsState()
     val running by viewModel.scanRunning.collectAsState()
     val progress by viewModel.scanProgress.collectAsState()
+    val automatic by viewModel.scanAutomatic.collectAsState()
+    val autoScan by viewModel.autoScan.collectAsState()
+    val autoScanLast by viewModel.autoScanLast.collectAsState()
     var editing by rememberSaveable { mutableStateOf(false) }
 
     SettingsPageScaffold(SettingsCategory.SCAN, onBack, sharedScope, animatedScope) { notify ->
@@ -77,7 +82,7 @@ fun ScanSettingsScreen(
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                         ShapeIcon(Icons.Outlined.TravelExplore)
                         Text(
-                            if (running || progress != null) statusText(running, progress)
+                            if (running || progress != null) statusText(running, progress, automatic)
                             else "增量扫描只看有变化的目录，几秒完成；全量扫描核对全部文件，能发现删掉的。",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -101,6 +106,16 @@ fun ScanSettingsScreen(
                     }
                 }
             }
+            item("auto") { position ->
+                SegmentedSwitchItem(
+                    position = position,
+                    icon = Icons.Outlined.Schedule,
+                    title = "自动扫描",
+                    subtitle = if (autoScan) "每 6 小时在后台增量扫描一次，打开 App 时也可能补上" else "只在手动点扫描时扫描",
+                    checked = autoScan,
+                    onCheckedChange = viewModel::setAutoScan,
+                )
+            }
             item("deep") { position ->
                 SegmentedListItem(
                     position = position,
@@ -112,6 +127,8 @@ fun ScanSettingsScreen(
                 )
             }
         }
+
+        autoScanLast?.takeIf { autoScan }?.let { SettingsNote("上次自动扫描：$it") }
 
         if (editing) {
             PathDialog(

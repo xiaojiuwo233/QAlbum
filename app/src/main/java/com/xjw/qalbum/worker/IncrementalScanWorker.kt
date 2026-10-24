@@ -9,8 +9,9 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.domain.model.ScanProgress
-import com.xjw.qalbum.service.indexer.ScanMode
-import com.xjw.qalbum.service.indexer.ScanPipeline
+import com.xjw.qalbum.service.indexer.ScanController
+import com.xjw.qalbum.ui.common.formatDateTime
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
@@ -18,11 +19,10 @@ import timber.log.Timber
 import java.util.concurrent.TimeUnit
 
 /**
- * 增量扫描 Worker
+ * 自动扫描 Worker：每 [INTERVAL_HOURS] 小时增量扫描一次新图片（设置 → 扫描 →「自动扫描」可关）。
  *
- * 调度入口是 [schedulePeriodic]（App 启动时调用，KEEP 幂等）。
- * 目录剪枝后增量常态秒级完成，定时任务的电量/IO 开销可忽略。
- * Worker 内部把扫描进度直接吃掉，不传回 UI（UI 需要进度时用 [com.xjw.qalbum.service.indexer.ScanController]）。
+ * 经 [ScanController] 跑，打开着 App 时概览和扫描页能看到进度；结果记在设置里，扫描页显示「上次自动扫描」。
+ * 系统常在打开 App 时才补跑到期的任务，所以看起来像「一打开就扫描」。
  */
 class IncrementalScanWorker(
     appContext: Context,
@@ -30,22 +30,29 @@ class IncrementalScanWorker(
 ) : CoroutineWorker(appContext, params), KoinComponent {
 
     private val settings: SettingsRepository by inject()
-    private val pipeline: ScanPipeline by inject()
+    private val scans: ScanController by inject()
 
     override suspend fun doWork(): Result {
+        if (!settings.autoScan.first()) return Result.success()
         return try {
-            val root = settings.chatpicPath.first()
-            var lastProgress: ScanProgress? = null
-            pipeline.scan(root, ScanMode.INCREMENTAL).collect { lastProgress = it }
-            Timber.i("IncrementalScanWorker finished with progress=$lastProgress")
-            when (lastProgress) {
-                is ScanProgress.Failed -> Result.retry()
-                else -> Result.success()
-            }
+            // 已有扫描在跑（用户手动点的）就不再扫
+            val last = scans.runAutomatic() ?: return Result.success()
+            Timber.i("IncrementalScanWorker finished with progress=$last")
+            settings.setAutoScanLast("${formatDateTime(System.currentTimeMillis())} · ${summary(last)}")
+            if (last is ScanProgress.Failed) Result.retry() else Result.success()
+        } catch (ce: CancellationException) {
+            throw ce
         } catch (t: Throwable) {
             Timber.e(t, "IncrementalScanWorker failed")
             Result.retry()
         }
+    }
+
+    private fun summary(progress: ScanProgress?): String = when (progress) {
+        is ScanProgress.Done -> if (progress.total > 0) "新增或更新 ${progress.total} 张" else "没有新图片"
+        is ScanProgress.Failed -> "失败：${progress.reason}"
+        ScanProgress.Cancelled -> "已取消"
+        else -> "没有完成"
     }
 
     companion object {
@@ -54,19 +61,19 @@ class IncrementalScanWorker(
         private const val INTERVAL_HOURS = 6L
 
         /**
-         * 注册每 [INTERVAL_HOURS] 小时的后台增量扫描（App 启动时调用一次）。
-         * KEEP 策略：已有排程保持不变，重复调用幂等；WorkManager 会在满足
-         * 约束时顺带补上「启动后不久跑一次」的首次执行。
+         * 打开「自动扫描」就排一个每 [INTERVAL_HOURS] 小时的任务（已有则保持），关掉就撤掉。
+         * KEEP 策略：重复调用幂等；WorkManager 会在满足约束时顺带补上「排上后不久跑一次」的首次执行。
          */
-        fun schedulePeriodic(context: Context) {
+        fun schedule(context: Context, enabled: Boolean) {
+            val work = WorkManager.getInstance(context)
+            if (!enabled) {
+                work.cancelUniqueWork(NAME_UNIQUE)
+                return
+            }
             val request = PeriodicWorkRequestBuilder<IncrementalScanWorker>(INTERVAL_HOURS, TimeUnit.HOURS)
                 .setConstraints(Constraints.Builder().setRequiresBatteryNotLow(true).build())
                 .build()
-            WorkManager.getInstance(context).enqueueUniquePeriodicWork(
-                NAME_UNIQUE,
-                ExistingPeriodicWorkPolicy.KEEP,
-                request,
-            )
+            work.enqueueUniquePeriodicWork(NAME_UNIQUE, ExistingPeriodicWorkPolicy.KEEP, request)
         }
     }
 }
