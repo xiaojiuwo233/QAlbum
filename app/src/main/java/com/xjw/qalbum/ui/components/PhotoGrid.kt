@@ -93,7 +93,9 @@ import com.xjw.qalbum.domain.model.TimelineSection
 import com.xjw.qalbum.ui.anim.sharedImage
 import com.xjw.qalbum.ui.common.formatBytes
 import com.xjw.qalbum.ui.gallery.GalleryTimelineItem
+import com.xjw.qalbum.ui.detail.OpeningImage
 import com.xjw.qalbum.ui.imageloading.ImageEntityModel
+import com.xjw.qalbum.ui.imageloading.TileImageKeys
 
 /** 网格图块上显示哪些角标 */
 @Immutable
@@ -385,7 +387,12 @@ fun PhotoGrid(
                                 .animateItem()
                                 .onGloballyPositioned { photoBounds[id] = it.boundsInRoot() },
                             onClick = {
-                                if (selectionMode) onSelectedIdsChange(if (selected) selectedIds - id else selectedIds + id) else onOpen(image)
+                                if (selectionMode) {
+                                    onSelectedIdsChange(if (selected) selectedIds - id else selectedIds + id)
+                                } else {
+                                    OpeningImage.set(image)
+                                    onOpen(image)
+                                }
                             },
                             onLongClick = {
                                 haptic.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -513,6 +520,8 @@ fun PhotoTile(
                 model = ImageRequest.Builder(context).data(model).crossfade(true).build(),
                 contentDescription = image.filename,
                 contentScale = contentScale,
+                // 记下解码好的小图在内存缓存里的 key：看图页拿它当占位图
+                onSuccess = { state -> state.result.memoryCacheKey?.let { TileImageKeys.put(image.id, it) } },
                 modifier = Modifier
                     .fillMaxSize()
                     .sharedImage("image-${image.id}", sharedScope, animatedScope),

@@ -10,7 +10,10 @@ import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.FiniteAnimationSpec
 import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.VisibilityThreshold
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -24,6 +27,8 @@ import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.graphicsLayer
@@ -128,7 +133,9 @@ fun Modifier.sharedContainer(
 
 /**
  * 共享元素：同一元素在两个页面间 morph（缩略图 ↔ 全屏图）。
- * scope 为空时退化为无动画。
+ * scope 为空时退化为无动画。转场中只画目标页那一份（打开时是大图，返回时是格子的小图），
+ * 两边的边界都要是图片本身（大图按宽高比放、格子是正方形），内容按 Crop 填满。
+ * 边界用不回弹的弹簧：落回格子时不会冲出格子、盖到旁边的图上。
  */
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
@@ -138,7 +145,9 @@ fun Modifier.sharedImage(
     animatedScope: AnimatedVisibilityScope?,
 ): Modifier {
     if (sharedScope == null || animatedScope == null) return this
-    val boundsSpec = MaterialTheme.motionScheme.defaultSpatialSpec<Rect>()
+    val boundsSpec = remember {
+        spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow, visibilityThreshold = Rect.VisibilityThreshold)
+    }
     return with(sharedScope) {
         this@sharedImage.sharedElement(
             rememberSharedContentState(key = key),
@@ -146,4 +155,29 @@ fun Modifier.sharedImage(
             boundsTransform = { _, _ -> boundsSpec },
         )
     }
+}
+
+/**
+ * 看图的共享元素转场期间（[active]），把这一块（顶栏、底栏、看图页的操作栏）画到共享元素上面：
+ * 飞回格子的图从栏下面钻过去，不会一路盖在栏上、落定后再跳到栏下面。
+ * 画在共享元素层时页面的淡入淡出管不到它，所以给了 [animatedScope] 时自己跟着页面淡入淡出。
+ */
+@OptIn(ExperimentalSharedTransitionApi::class)
+@Composable
+fun Modifier.aboveSharedImages(
+    sharedScope: SharedTransitionScope?,
+    animatedScope: AnimatedVisibilityScope?,
+    active: Boolean,
+): Modifier {
+    if (sharedScope == null) return this
+    val latestActive by rememberUpdatedState(active)
+    val overlay = with(sharedScope) {
+        this@aboveSharedImages.renderInSharedTransitionScopeOverlay(
+            renderInOverlay = { isTransitionActive && latestActive },
+            zIndexInOverlay = 1f,
+        )
+    }
+    if (animatedScope == null) return overlay
+    val fadeSpec = MaterialTheme.motionScheme.defaultEffectsSpec<Float>()
+    return with(animatedScope) { overlay.animateEnterExit(enter = fadeIn(fadeSpec), exit = fadeOut(fadeSpec)) }
 }

@@ -69,6 +69,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.xjw.qalbum.data.db.entity.ImageEntity
+import com.xjw.qalbum.ui.anim.aboveSharedImages
 import com.xjw.qalbum.ui.anim.sharedImage
 import com.xjw.qalbum.ui.common.formatBytes
 import com.xjw.qalbum.ui.common.formatTitleDate
@@ -83,6 +84,7 @@ import com.xjw.qalbum.ui.components.ViewerActionBar
 import com.xjw.qalbum.ui.components.ViewerIconButton
 import com.xjw.qalbum.ui.components.ZoomableImage
 import com.xjw.qalbum.ui.imageloading.ImageEntityModel
+import com.xjw.qalbum.ui.imageloading.TileImageKeys
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import org.koin.androidx.compose.koinViewModel
@@ -96,9 +98,12 @@ fun ImageDetailScreen(
     archiveOnly: Boolean = false,
     sharedScope: SharedTransitionScope? = null,
     animatedScope: AnimatedVisibilityScope? = null,
+    /** 看图的共享元素转场进行中：顶部信息和底部操作栏画到飞行的图上面 */
+    imageTransition: Boolean = false,
     viewModel: ImageDetailViewModel = koinViewModel(),
 ) {
-    LaunchedEffect(imageId, archiveOnly) { viewModel.load(imageId, archiveOnly) }
+    // 在组合里同步加载：从网格点开的图第一帧就画出来（共享元素转场要从第一帧就有终点）
+    remember(imageId, archiveOnly) { viewModel.load(imageId, archiveOnly) }
     val state by viewModel.state.collectAsState()
     val toast by viewModel.toast.collectAsState()
     val context = LocalContext.current
@@ -150,6 +155,7 @@ fun ImageDetailScreen(
                 archiveOnly = archiveOnly,
                 sharedScope = sharedScope,
                 animatedScope = animatedScope,
+                imageTransition = imageTransition,
             )
         }
     }
@@ -186,6 +192,7 @@ private fun ImmersivePhotoViewer(
     archiveOnly: Boolean = false,
     sharedScope: SharedTransitionScope? = null,
     animatedScope: AnimatedVisibilityScope? = null,
+    imageTransition: Boolean = false,
 ) {
     var chromeVisible by rememberSaveable { mutableStateOf(true) }
     var detailsVisible by rememberSaveable { mutableStateOf(false) }
@@ -347,6 +354,8 @@ private fun ImmersivePhotoViewer(
                     fallback = if (page == state.currentIndex) state.current else null,
                     entityFor = entityFor,
                     isActive = page == pagerState.currentPage,
+                    // 共享元素只挂在当前这张图上（按 id 认，不看 pager 的页码：补齐前后的图时页码会变）
+                    shared = state.ids[page] == state.ids.getOrNull(state.currentIndex),
                     resetSignal = zoomReset,
                     onTap = {
                         chromeVisible = !chromeVisible
@@ -364,7 +373,9 @@ private fun ImmersivePhotoViewer(
                 visible = chromeVisible && notDismissing,
                 enter = fadeIn(chromeFade),
                 exit = fadeOut(chromeFade),
-                modifier = Modifier.align(Alignment.TopCenter),
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .aboveSharedImages(sharedScope, animatedScope, imageTransition),
             ) {
                 TopChrome(
                     image = state.current,
@@ -381,7 +392,9 @@ private fun ImmersivePhotoViewer(
                 visible = chromeVisible && !detailsVisible && notDismissing,
                 enter = slideInVertically(chromeSlideIn) { it / 2 } + fadeIn(chromeFade),
                 exit = slideOutVertically(chromeSlideOut) { it / 2 } + fadeOut(chromeFade),
-                modifier = Modifier.align(Alignment.BottomCenter),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .aboveSharedImages(sharedScope, animatedScope, imageTransition),
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     if (state.variants.size >= 2) {
@@ -442,6 +455,7 @@ private fun FullscreenPhoto(
     fallback: ImageEntity?,
     entityFor: suspend (Long) -> ImageEntity?,
     isActive: Boolean,
+    shared: Boolean,
     resetSignal: Int,
     onTap: () -> Unit,
     onZoomChanged: (Float) -> Unit,
@@ -467,9 +481,12 @@ private fun FullscreenPhoto(
             resetSignal = resetSignal,
             onTap = onTap,
             onZoomChanged = onZoomChanged,
-            modifier = Modifier
-                .fillMaxSize()
-                .sharedImage("image-$id", sharedScope, animatedScope),
+            aspectRatio = entity.aspectRatioOrNull(),
+            // 只有当前这张图参与共享元素：翻过页后留在内存里的相邻页不会在返回时一起飞回各自的格子
+            imageModifier = Modifier.sharedImage("image-$id", if (shared) sharedScope else null, animatedScope),
+            // 网格小图先顶上，放大动画一开始就有图
+            placeholderKey = TileImageKeys[id],
+            modifier = Modifier.fillMaxSize(),
         )
     }
 }
@@ -550,3 +567,7 @@ private fun CenteredText(text: String) {
         Text(text, style = MaterialTheme.typography.bodyLarge, color = Color.White)
     }
 }
+
+/** 图片的宽 / 高（库里没记宽高时为 null） */
+private fun ImageEntity.aspectRatioOrNull(): Float? =
+    if (width > 0 && height > 0) width.toFloat() / height else null

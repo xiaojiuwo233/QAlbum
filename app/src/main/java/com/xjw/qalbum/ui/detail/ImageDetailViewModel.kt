@@ -88,6 +88,12 @@ class ImageDetailViewModel(
         this.archiveOnly = archiveOnly
         headExhausted = false
         tailExhausted = false
+        // 从网格点开的图先直接显示（同步，页面第一帧就有），数据库查完再补齐版本与前后的图
+        OpeningImage.peek(imageId)?.let { opened ->
+            if (_state.value !is ImageDetailState.Ready) {
+                _state.value = ImageDetailState.Ready(ids = listOf(imageId), currentIndex = 0, current = opened)
+            }
+        }
         viewModelScope.launch {
             val image = imageRepository.getById(imageId)
             if (image == null) {

@@ -43,6 +43,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.xjw.qalbum.data.preferences.SettingsRepository
+import com.xjw.qalbum.ui.anim.aboveSharedImages
 import com.xjw.qalbum.ui.anim.fadeThroughEnter
 import com.xjw.qalbum.ui.anim.fadeThroughExit
 import com.xjw.qalbum.ui.anim.imageDetailEnter
@@ -117,6 +118,9 @@ fun AppNavigation() {
     val scaleSpec = MaterialTheme.motionScheme.defaultSpatialSpec<Float>()
     // 详情转场方案开关：true=缩略图共享元素，false=缩放进入 + 图库立即垫底
     val sharedTransition by settings.detailSharedTransition.collectAsState(initial = false)
+    // 图库 / 归档 ↔ 大图的转场进行中（含预测性返回拖动中）：这时顶栏、底栏画到飞行的图上面
+    val visibleEntries by navController.visibleEntries.collectAsState()
+    val imageTransition = sharedTransition && visibleEntries.size > 1 && visibleEntries.any { it.isImage() }
 
     SharedTransitionLayout {
         Box(Modifier.fillMaxSize()) {
@@ -194,6 +198,7 @@ fun AppNavigation() {
                         sharedScope = this@SharedTransitionLayout,
                         animatedScope = this,
                         imageShared = sharedTransition,
+                        imageTransition = imageTransition,
                     )
                 }
                 composable("archive") {
@@ -204,6 +209,7 @@ fun AppNavigation() {
                         sharedScope = this@SharedTransitionLayout,
                         animatedScope = this,
                         imageShared = sharedTransition,
+                        imageTransition = imageTransition,
                     )
                 }
                 composable(QQ_SOURCES_ROUTE) {
@@ -318,6 +324,7 @@ fun AppNavigation() {
                         onBack = { navController.popBackStack() },
                         sharedScope = if (sharedTransition) this@SharedTransitionLayout else null,
                         animatedScope = this,
+                        imageTransition = imageTransition,
                     )
                 }
                 composable(
@@ -331,6 +338,7 @@ fun AppNavigation() {
                         onBack = { navController.popBackStack() },
                         sharedScope = if (sharedTransition) this@SharedTransitionLayout else null,
                         animatedScope = this,
+                        imageTransition = imageTransition,
                     )
                 }
             }
@@ -338,7 +346,9 @@ fun AppNavigation() {
                 visible = showBottomBar,
                 enter = slideInVertically(slideSpec) { it } + fadeIn(fadeSpec),
                 exit = slideOutVertically(slideSpec) { it } + fadeOut(fadeSpec),
-                modifier = Modifier.align(Alignment.BottomCenter),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .aboveSharedImages(if (sharedTransition) this@SharedTransitionLayout else null, null, imageTransition),
             ) {
                 ShortNavigationBar(
                     modifier = Modifier.onSizeChanged { bottomBarHeight = with(density) { it.height.toDp() } },

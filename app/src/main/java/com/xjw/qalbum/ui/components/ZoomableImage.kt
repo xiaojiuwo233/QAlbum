@@ -7,6 +7,7 @@ import androidx.compose.foundation.gestures.calculateCentroid
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.tween
@@ -36,11 +37,13 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.IntSize
 import coil3.compose.AsyncImage
+import coil3.memory.MemoryCache
 import coil3.request.ImageRequest
 import coil3.request.crossfade
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlin.math.abs
 
 private const val MAX_ZOOM = 5f
 private const val DOUBLE_TAP_ZOOM = 2.5f
@@ -50,6 +53,9 @@ private const val DOUBLE_TAP_ZOOM = 2.5f
  *
  * 与 HorizontalPager 协作：缩放=1 时**不消费**手势（横滑交给 Pager 翻页）；
  * 放大后才消费拖动用于平移，避免与翻页冲突。状态按 [model] 记忆——切换到另一张图自动复位为 1x。
+ *
+ * 图片节点按宽高比放在视口中间（手势仍然整个视口都能用）：[imageModifier]（如共享元素）的边界就是
+ * 图片本身，而不是整屏；转场里边界变成正方形格子时内容按 Crop 裁成正方形，不会被拉成竖屏整屏。
  */
 @Composable
 internal fun ZoomableImage(
@@ -61,6 +67,12 @@ internal fun ZoomableImage(
     resetSignal: Any? = null,
     onTap: (() -> Unit)? = null,
     onZoomChanged: (Float) -> Unit = {},
+    /** 图片的宽 / 高（库里记的，加载前就知道）；不知道时按加载出来的图 */
+    aspectRatio: Float? = null,
+    /** 加在图片节点上、缩放之前的修饰（如共享元素） */
+    imageModifier: Modifier = Modifier,
+    /** 图片加载出来之前先显示的内存缓存（网格里已经解码好的小图） */
+    placeholderKey: MemoryCache.Key? = null,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -68,6 +80,8 @@ internal fun ZoomableImage(
     var offset by remember(stateKey) { mutableStateOf(Offset.Zero) }
     var viewport by remember { mutableStateOf(IntSize.Zero) }
     var imageSize by remember(stateKey) { mutableStateOf(Size.Zero) }
+    // 占位小图的尺寸：库里没有宽高时先按它定宽高比
+    var placeholderSize by remember(stateKey) { mutableStateOf(Size.Zero) }
     var failed by remember(stateKey) { mutableStateOf(false) }
     var zoomAnimation by remember { mutableStateOf<Job?>(null) }
     val latestOnTap by rememberUpdatedState(onTap)
@@ -86,14 +100,22 @@ internal fun ZoomableImage(
         offset = ImageZoomGeometry.clamp(offset, scale, viewportSize(), imageSize)
     }
 
-    Box(modifier = modifier.clipToBounds().onSizeChanged { viewport = it }) {
-        AsyncImage(
-            model = ImageRequest.Builder(context).data(model).crossfade(true).build(),
-            contentDescription = contentDescription,
-            contentScale = ContentScale.Fit,
-            onSuccess = { imageSize = it.painter.intrinsicSize; failed = false },
-            onError = { failed = true },
-            modifier = Modifier.fillMaxSize().pointerInput(stateKey) {
+    val loadedRatio = (imageSize.takeIf { it.width > 0f && it.height > 0f } ?: placeholderSize.takeIf { it.width > 0f && it.height > 0f })
+        ?.let { it.width / it.height }
+    val knownRatio = aspectRatio?.takeIf { it > 0f && it.isFinite() }
+    val ratio = when {
+        knownRatio == null -> loadedRatio
+        // 库里的宽高和实际解码出来的对不上（如方向没算对）时以实际的为准
+        loadedRatio != null && abs(loadedRatio - knownRatio) > knownRatio * 0.02f -> loadedRatio
+        else -> knownRatio
+    }
+
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = modifier
+            .clipToBounds()
+            .onSizeChanged { viewport = it }
+            .pointerInput(stateKey) {
                 detectTapGestures(
                     onTap = { latestOnTap?.invoke() },
                     onDoubleTap = { position ->
@@ -142,13 +164,24 @@ internal fun ZoomableImage(
                         }
                     } while (event.changes.any { it.pressed })
                 }
-            }
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-                translationX = offset.x
-                translationY = offset.y
             },
+    ) {
+        AsyncImage(
+            model = ImageRequest.Builder(context).data(model).placeholderMemoryCacheKey(placeholderKey).crossfade(true).build(),
+            contentDescription = contentDescription,
+            // 节点已按宽高比放好，Crop 与 Fit 看起来一样；转场中边界变形时 Crop 填满、不留空
+            contentScale = if (ratio != null) ContentScale.Crop else ContentScale.Fit,
+            onLoading = { state -> state.painter?.intrinsicSize?.let { placeholderSize = it } },
+            onSuccess = { imageSize = it.painter.intrinsicSize; failed = false },
+            onError = { failed = true },
+            modifier = (if (ratio != null) Modifier.aspectRatio(ratio) else Modifier.fillMaxSize())
+                .then(imageModifier)
+                .graphicsLayer {
+                    scaleX = scale
+                    scaleY = scale
+                    translationX = offset.x
+                    translationY = offset.y
+                },
         )
         if (failed) Text("图片加载失败", color = Color.White, modifier = Modifier.align(Alignment.Center))
     }

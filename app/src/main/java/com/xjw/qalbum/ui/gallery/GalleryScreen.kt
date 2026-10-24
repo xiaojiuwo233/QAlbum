@@ -74,6 +74,7 @@ import androidx.paging.compose.collectAsLazyPagingItems
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.domain.model.GallerySort
 import com.xjw.qalbum.service.cleanup.CompressionCoordinator
+import com.xjw.qalbum.ui.anim.aboveSharedImages
 import com.xjw.qalbum.ui.anim.sharedContainer
 import com.xjw.qalbum.ui.cleanup.PurgeProgressDialog
 import com.xjw.qalbum.ui.common.deleteResultText
@@ -109,6 +110,8 @@ fun GalleryScreen(
     sharedScope: SharedTransitionScope? = null,
     animatedScope: AnimatedVisibilityScope? = null,
     imageShared: Boolean = false,
+    /** 看图的共享元素转场进行中：顶栏画到飞行的图上面 */
+    imageTransition: Boolean = false,
     viewModel: GalleryViewModel = koinViewModel(),
 ) {
     val items = viewModel.timeline.collectAsLazyPagingItems()
@@ -162,6 +165,7 @@ fun GalleryScreen(
                 targetState = selectionMode,
                 transitionSpec = { fadeIn(topBarEnter) togetherWith fadeOut(topBarExit) },
                 label = "galleryTopBar",
+                modifier = Modifier.aboveSharedImages(if (imageShared) sharedScope else null, animatedScope, imageTransition),
             ) { selecting ->
                 if (selecting) {
                     SelectionTopBar(count = selectedIds.size, onClose = clearSelection)
@@ -343,6 +347,7 @@ fun ArchiveScreen(
     sharedScope: SharedTransitionScope? = null,
     animatedScope: AnimatedVisibilityScope? = null,
     imageShared: Boolean = false,
+    imageTransition: Boolean = false,
     viewModel: GalleryViewModel = koinViewModel(),
 ) {
     val items = viewModel.archiveTimeline.collectAsLazyPagingItems()
@@ -374,6 +379,7 @@ fun ArchiveScreen(
                 targetState = selectionMode,
                 transitionSpec = { fadeIn(topBarEnter) togetherWith fadeOut(topBarExit) },
                 label = "archiveTopBar",
+                modifier = Modifier.aboveSharedImages(if (imageShared) sharedScope else null, animatedScope, imageTransition),
             ) { selecting ->
                 if (selecting) {
                     SelectionTopBar(count = selectedIds.size, onClose = clearSelection)
