@@ -139,10 +139,11 @@ class ImageDetailViewModel(
         }
     }
 
-    fun selectIndex(index: Int) {
+    /** 翻到了 [id] 这张（看图页的 pager 停稳后调用） */
+    fun select(id: Long) {
         val ready = _state.value as? ImageDetailState.Ready ?: return
-        if (index == ready.currentIndex || index !in ready.ids.indices) return
-        val id = ready.ids[index]
+        val index = ready.ids.indexOf(id)
+        if (index < 0 || index == ready.currentIndex) return
         selectJob?.cancel()
         selectJob = viewModelScope.launch {
             val image = imageRepository.getById(id) ?: return@launch

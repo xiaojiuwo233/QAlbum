@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -42,6 +43,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -86,6 +89,7 @@ import com.xjw.qalbum.ui.components.ZoomableImage
 import com.xjw.qalbum.ui.imageloading.ImageEntityModel
 import com.xjw.qalbum.ui.imageloading.TileImageKeys
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
 import org.koin.androidx.compose.koinViewModel
 import org.koin.compose.koinInject
@@ -131,7 +135,7 @@ fun ImageDetailScreen(
                 state = s,
                 entityFor = viewModel::entityFor,
                 onBack = onBack,
-                onPageSelected = viewModel::selectIndex,
+                onPageSelected = viewModel::select,
                 onToggleArchive = { viewModel.toggleArchive(onExhausted = onBack) },
                 onExport = { showSaveSheet = true },
                 onCompress = { compression.start(listOf(s.current.id)) },
@@ -180,7 +184,8 @@ private fun ImmersivePhotoViewer(
     state: ImageDetailState.Ready,
     entityFor: suspend (Long) -> ImageEntity?,
     onBack: () -> Unit,
-    onPageSelected: (Int) -> Unit,
+    /** 翻到了这张图（pager 停稳后） */
+    onPageSelected: (Long) -> Unit,
     onSelectVariant: (Long) -> Unit,
     onToggleArchive: () -> Unit,
     onExport: () -> Unit,
@@ -214,20 +219,19 @@ private fun ImmersivePhotoViewer(
     val chromeSlideIn = MaterialTheme.motionScheme.defaultSpatialSpec<androidx.compose.ui.unit.IntOffset>()
     val chromeSlideOut = MaterialTheme.motionScheme.fastSpatialSpec<androidx.compose.ui.unit.IntOffset>()
     val latestOnPageSelected by rememberUpdatedState(onPageSelected)
+    // pager 的页数、key、每页的图都从 pagerIds 读：换窗口时和页码一起改（见 FollowIds）
+    val pagerIds = remember { mutableStateOf(state.ids) }
     val pagerState = rememberPagerState(
         initialPage = state.currentIndex,
-        pageCount = { state.ids.size },
+        pageCount = { pagerIds.value.size },
     )
+    FollowIds(pagerState, pagerIds, state.ids, state.currentIndex)
 
-    LaunchedEffect(pagerState, state.ids) {
-        if (pagerState.currentPage != state.currentIndex) {
-            pagerState.scrollToPage(state.currentIndex)
-        }
-        snapshotFlow { pagerState.settledPage }
+    LaunchedEffect(pagerState) {
+        snapshotFlow { pagerIds.value.getOrNull(pagerState.settledPage) }
+            .filterNotNull()
             .distinctUntilChanged()
-            .collect { page ->
-                latestOnPageSelected(page)
-            }
+            .collect { id -> latestOnPageSelected(id) }
     }
     BackHandler(enabled = detailsVisible || currentZoom > 1f) {
         if (detailsVisible) detailsVisible = false else zoomReset++
@@ -346,16 +350,18 @@ private fun ImmersivePhotoViewer(
             HorizontalPager(
                 state = pagerState,
                 modifier = Modifier.fillMaxSize(),
-                key = { index -> state.ids[index] },
+                key = { index -> pagerIds.value[index] },
             ) { page ->
+                val id = pagerIds.value[page]
+                val currentId = state.ids.getOrNull(state.currentIndex)
                 FullscreenPhoto(
-                    id = state.ids[page],
+                    id = id,
                     // 当前页显示正在选中的版本（合并显示时可在底部版本条切换）
-                    fallback = if (page == state.currentIndex) state.current else null,
+                    fallback = if (id == currentId) state.current else null,
                     entityFor = entityFor,
                     isActive = page == pagerState.currentPage,
                     // 共享元素只挂在当前这张图上（按 id 认，不看 pager 的页码：补齐前后的图时页码会变）
-                    shared = state.ids[page] == state.ids.getOrNull(state.currentIndex),
+                    shared = id == currentId,
                     resetSignal = zoomReset,
                     onTap = {
                         chromeVisible = !chromeVisible
@@ -446,6 +452,23 @@ private fun ImmersivePhotoViewer(
                 },
             )
         }
+    }
+}
+
+/**
+ * 把 [ids] 交给 pager（写进 [pagerIds]，pager 的页数、key、每页的图都从那里读）。换了一份（补齐前后的图、续页、删图）时，
+ * 同时把 [pagerState] 挪到正在看的那张图在新 ids 里的位置（那张图不在了就到 [fallbackPage]）。
+ * pager 要是先拿到新 ids、页码还没动：它按 key 对位只在当前页前后一百来项里找，找不到就先换成别的图，当前这张图整个重建 ——
+ * 共享元素当成新的一张，从格子里再飞一次。从图库靠后的位置点开的图都会这样：窗口补齐后它前面一下多出几百张。
+ */
+@Composable
+internal fun FollowIds(pagerState: PagerState, pagerIds: MutableState<List<Long>>, ids: List<Long>, fallbackPage: Int) {
+    SideEffect {
+        val before = pagerIds.value
+        if (before === ids) return@SideEffect
+        val page = before.getOrNull(pagerState.currentPage)?.let(ids::indexOf)?.takeIf { it >= 0 } ?: fallbackPage
+        if (page != pagerState.currentPage) pagerState.requestScrollToPage(page, pagerState.currentPageOffsetFraction)
+        pagerIds.value = ids
     }
 }
 
