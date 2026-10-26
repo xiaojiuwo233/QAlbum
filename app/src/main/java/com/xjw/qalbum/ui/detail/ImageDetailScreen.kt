@@ -5,6 +5,7 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.AnimatedVisibilityScope
+import androidx.compose.animation.EnterExitState
 import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
@@ -489,6 +490,11 @@ private fun FullscreenPhoto(
     val loaded by produceState<ImageEntity?>(initialValue = fallback, key1 = id) {
         if (value == null) value = entityFor(id)
     }
+    // 打开的转场结束后长图才自动放大；返回时先缩回整张再飞回格子（看 NavHost 那一层，见 AppNavigation.page）
+    val pageTransition = animatedScope?.transition
+    val navTransition = pageTransition?.let { it.parentTransition ?: it }
+    val settled = navTransition == null || navTransition.currentState == navTransition.targetState
+    val leaving = pageTransition?.targetState == EnterExitState.PostExit
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         val entity = fallback ?: loaded
         if (entity == null) {
@@ -509,6 +515,8 @@ private fun FullscreenPhoto(
             imageModifier = Modifier.sharedImage("image-$id", if (shared) sharedScope else null, animatedScope),
             // 网格小图先顶上，放大动画一开始就有图
             placeholderKey = TileImageKeys[id],
+            settled = settled,
+            leaving = leaving,
             modifier = Modifier.fillMaxSize(),
         )
     }

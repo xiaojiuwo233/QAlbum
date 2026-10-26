@@ -160,7 +160,9 @@ fun Modifier.sharedImage(
 /**
  * 看图的共享元素转场期间（[active]），把这一块（顶栏、底栏、看图页的操作栏）画到共享元素上面：
  * 飞回格子的图从栏下面钻过去，不会一路盖在栏上、落定后再跳到栏下面。
- * 画在共享元素层时页面的淡入淡出管不到它，所以给了 [animatedScope] 时自己跟着页面淡入淡出。
+ * 画在共享元素层时页面的淡入淡出管不到它，所以给了 [animatedScope] 时自己跟着页面淡入淡出 ——
+ * 只在页面转场进行中（看 NavHost 那一层）：预测性返回拖到一半又取消后，页面自己的进出场状态会停在
+ * PostExit→Visible 不动（[active] 也会一直为真），之后还跟着它的话，新显示出来的栏一直是透明的。
  */
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
@@ -177,7 +179,8 @@ fun Modifier.aboveSharedImages(
             zIndexInOverlay = 1f,
         )
     }
-    if (animatedScope == null) return overlay
+    val navTransition = animatedScope?.transition?.let { it.parentTransition ?: it }
+    if (animatedScope == null || navTransition?.currentState == navTransition?.targetState) return overlay
     val fadeSpec = MaterialTheme.motionScheme.defaultEffectsSpec<Float>()
     return with(animatedScope) { overlay.animateEnterExit(enter = fadeIn(fadeSpec), exit = fadeOut(fadeSpec)) }
 }

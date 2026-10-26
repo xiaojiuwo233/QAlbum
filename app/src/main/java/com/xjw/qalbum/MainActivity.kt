@@ -13,6 +13,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.RequiresApi
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
@@ -26,6 +27,8 @@ import com.xjw.qalbum.domain.model.ThemeMode
 import com.xjw.qalbum.service.work.BackgroundTasks
 import com.xjw.qalbum.ui.components.DatabaseUpgradeDialog
 import com.xjw.qalbum.ui.compress.CompressionHost
+import com.xjw.qalbum.ui.imageloading.ImageTileSources
+import com.xjw.qalbum.ui.imageloading.LocalImageTileSources
 import com.xjw.qalbum.ui.navigation.AppNavigation
 import com.xjw.qalbum.ui.theme.QAlbumTheme
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -39,6 +42,7 @@ class MainActivity : ComponentActivity() {
     // 设置仓库通过 Koin 注入，避免 Compose 端重复注入
     private val settings: SettingsRepository by inject()
     private val tasks: BackgroundTasks by inject()
+    private val tileSources: ImageTileSources by inject()
 
     // 结果不用处理：拒绝时任务照常在后台跑，只是看不到进度通知
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
@@ -55,12 +59,15 @@ class MainActivity : ComponentActivity() {
             // 外观设置读到之前不画（一两帧，显示窗口背景），免得固定深色的用户先闪一下浅色
             val theme by settings.themeSettings.collectAsState(initial = null)
             QAlbumTheme(theme ?: return@setContent) {
-                Surface(modifier = Modifier.fillMaxSize()) {
-                    AppNavigation()
+                // 看图放大后分块解码（看图页与各处的全屏预览共用）
+                CompositionLocalProvider(LocalImageTileSources provides tileSources) {
+                    Surface(modifier = Modifier.fillMaxSize()) {
+                        AppNavigation()
+                    }
+                    // 数据库升级进度；任何页面发起的压缩对比与清理结果提示
+                    DatabaseUpgradeDialog()
+                    CompressionHost()
                 }
-                // 数据库升级进度；任何页面发起的压缩对比与清理结果提示
-                DatabaseUpgradeDialog()
-                CompressionHost()
             }
         }
         askNotificationPermissionOnFirstTask()

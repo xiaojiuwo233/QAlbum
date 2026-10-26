@@ -3,7 +3,6 @@ package com.xjw.qalbum.ui.navigation
 import androidx.compose.animation.AnimatedContentScope
 import androidx.compose.animation.AnimatedContentTransitionScope
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.EnterExitState
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
@@ -389,6 +388,9 @@ fun AppNavigation() {
  * 注册一个页面：转场进行中（进入或离开）整页不接收触摸。返回时离开的页面在上层，布局还整屏铺着
  * （容器变换时画面上它已经缩回入口了），这时点下去会点到看不见的旧页面里的开关；进入时新页面还没长开，
  * 点到的却是它里面的东西。转场只有几百毫秒，期间的点按直接忽略。
+ *
+ * 转场是否结束看 NavHost 那一层：预测性返回拖到一半又取消后，页面自己的进出场状态会停在 PostExit→Visible
+ * 不再变，按它判断的话这一页一直点不了。
  */
 private fun NavGraphBuilder.page(
     route: String,
@@ -396,7 +398,8 @@ private fun NavGraphBuilder.page(
     content: @Composable AnimatedContentScope.(NavBackStackEntry) -> Unit,
 ) = composable(route, arguments) { entry ->
     val scope = this
-    val settled = transition.currentState == EnterExitState.Visible && transition.targetState == EnterExitState.Visible
+    val navTransition = transition.parentTransition ?: transition
+    val settled = navTransition.currentState == navTransition.targetState
     Box(modifier = if (settled) Modifier else Modifier.blockTouches(), propagateMinConstraints = true) {
         scope.content(entry)
     }

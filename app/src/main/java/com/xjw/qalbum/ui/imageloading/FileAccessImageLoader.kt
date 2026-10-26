@@ -82,7 +82,7 @@ data class VideoFrameModel(val path: String, val size: Long, val mtime: Long)
  * 绑定在独立 scope 异步进行：fetch 永不等待绑定（期间降级 provider 读），也不会因滑动取消
  * 把绑定协程一并取消；绑定失败按退避重试，binder 死亡/超时后失活并同样按退避重绑。
  */
-private class FdFastPath(
+internal class FdFastPath(
     private val accessManager: AccessManager,
     private val fileOpsClient: FileOpsClient,
 ) {
@@ -469,7 +469,7 @@ private object VideoFrameKeyer : Keyer<VideoFrameModel> {
 }
 
 /** 磁盘缓存 key：同一文件只存一份源字节，size+mtime 版本化（文件被替换后自动失效） */
-private fun entityDiskKey(entity: ImageEntity): String =
+internal fun entityDiskKey(entity: ImageEntity): String =
     "qalbum://${entity.path}?size=${entity.size}&mt=${entity.mtime}"
 
 /**
@@ -503,14 +503,13 @@ private object FilePathKeyer : Keyer<FileAccessPath> {
         "qalbum-path://${data.path}?vp=${options.size}"
 }
 
-/** 构造 QAlbum 全局 ImageLoader，带磁盘缓存 + 自定义 Fetcher + 动画解码 */
-fun buildImageLoader(
+/** 构造 QAlbum 全局 ImageLoader，带磁盘缓存 + 自定义 Fetcher + 动画解码；[fastPath] 与看图分块解码（[ImageTileSources]）共用 */
+internal fun buildImageLoader(
     context: Context,
     accessManager: AccessManager,
-    fileOpsClient: FileOpsClient,
+    fastPath: FdFastPath,
 ): ImageLoader {
     val platform: PlatformContext = context
-    val fastPath = FdFastPath(accessManager, fileOpsClient)
     return ImageLoader.Builder(platform)
         .memoryCachePolicy(CachePolicy.ENABLED)
         .diskCachePolicy(CachePolicy.ENABLED)

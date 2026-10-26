@@ -24,6 +24,8 @@ import com.xjw.qalbum.ui.dashboard.DashboardViewModel
 import com.xjw.qalbum.ui.gallery.GalleryViewModel
 import com.xjw.qalbum.qq.QqSourceRepository
 import com.xjw.qalbum.ui.sources.QqSourcesViewModel
+import com.xjw.qalbum.ui.imageloading.FdFastPath
+import com.xjw.qalbum.ui.imageloading.ImageTileSources
 import com.xjw.qalbum.ui.imageloading.buildImageLoader
 import com.xjw.qalbum.ui.logs.LogViewModel
 import com.xjw.qalbum.ui.settings.SettingsViewModel
@@ -160,7 +162,10 @@ val appModule = module {
 
     // ---- Coil ImageLoader（全局单例，通过 Koin 暴露，App.onCreate 安装为 SingletonImageLoader） ----
 
-    single { buildImageLoader(context = get(), accessManager = get(), fileOpsClient = get()) }
+    single { FdFastPath(accessManager = get(), fileOpsClient = get()) }
+    single { buildImageLoader(context = get(), accessManager = get(), fastPath = get()) }
+    // 看图放大后分块解码（读磁盘缓存里的那份或特权进程的 fd）
+    single { ImageTileSources(imageLoader = get(), fastPath = get()) }
 
     // ---- ViewModel ----
 
