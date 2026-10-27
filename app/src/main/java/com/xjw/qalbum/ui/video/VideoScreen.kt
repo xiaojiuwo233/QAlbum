@@ -288,8 +288,7 @@ fun VideoScreen(
             onCreateSubdir = viewModel::addExportSubdir,
             onSave = { video, subdir -> viewModel.export(video.id, subdir) },
             onDelete = { video ->
-                viewModel.delete(listOf(video.id))
-                preview = preview?.without(video.id)
+                if (viewModel.delete(listOf(video.id))) preview = preview?.without(video.id)
             },
         )
     }

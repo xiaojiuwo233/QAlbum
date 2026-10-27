@@ -73,6 +73,7 @@ import androidx.paging.compose.LazyPagingItems
 import androidx.paging.compose.collectAsLazyPagingItems
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.domain.model.GallerySort
+import com.xjw.qalbum.ui.sources.SourceSortMenuButton
 import com.xjw.qalbum.service.cleanup.CompressionCoordinator
 import com.xjw.qalbum.ui.anim.aboveSharedImages
 import com.xjw.qalbum.ui.anim.sharedContainer
@@ -356,9 +357,18 @@ fun ArchiveScreen(
     val directory by viewModel.archiveDirectory.collectAsState()
     val fastScroll by viewModel.fastScroll.collectAsState()
     val largeThreshold by viewModel.largeThresholdBytes.collectAsState()
+    val sort by viewModel.archiveSort.collectAsState()
     val gridState = rememberLazyGridState()
     val context = LocalContext.current
     var columns by rememberSaveable { mutableIntStateOf(4) }
+    // 换排序后回到顶部；从看图页回来、旋转屏幕不算
+    var shownSort by rememberSaveable { mutableStateOf(sort.name) }
+    LaunchedEffect(sort) {
+        if (sort.name != shownSort) {
+            shownSort = sort.name
+            gridState.scrollToItem(0)
+        }
+    }
     var selectedIds by rememberSaveable(stateSaver = SelectedIdsSaver) { mutableStateOf(setOf<Long>()) }
     var showSaveSheet by rememberSaveable { mutableStateOf(false) }
     var showDeleteConfirm by rememberSaveable { mutableStateOf(false) }
@@ -387,6 +397,7 @@ fun ArchiveScreen(
                     TopAppBar(
                         title = { Text("归档") },
                         navigationIcon = { BackButton(onBack) },
+                        actions = { SourceSortMenuButton(sort = sort, onSort = viewModel::setArchiveSort) },
                     )
                 }
             }
@@ -410,7 +421,7 @@ fun ArchiveScreen(
                     onSelectedIdsChange = { selectedIds = it },
                     onColumnsChange = { columns = it },
                     maxColumns = 6,
-                    badges = PhotoBadges(archived = false, largeThresholdBytes = largeThreshold),
+                    badges = PhotoBadges(archived = false, largeThresholdBytes = largeThreshold, size = !sort.byDate),
                     sectionIds = viewModel::archiveSectionIds,
                     directory = directory,
                     fastScroll = fastScroll,

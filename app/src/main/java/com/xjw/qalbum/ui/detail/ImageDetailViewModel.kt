@@ -13,6 +13,7 @@ import com.xjw.qalbum.service.cleanup.ImageFileManager
 import com.xjw.qalbum.service.cleanup.OriginalCompressor
 import com.xjw.qalbum.service.cleanup.QuarantineManager
 import com.xjw.qalbum.service.cleanup.PictureDeleteOptions
+import com.xjw.qalbum.service.demo.DemoMode
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -37,6 +38,7 @@ class ImageDetailViewModel(
     private val archive: ArchiveManager,
     private val settings: SettingsRepository,
     compressor: OriginalCompressor,
+    private val demo: DemoMode,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow<ImageDetailState>(ImageDetailState.Loading)
@@ -102,7 +104,7 @@ class ImageDetailViewModel(
             }
             stacked = !archiveOnly && settings.galleryStackVariants.first()
             if (archiveOnly) {
-                val ids = imageRepository.archiveTimelineIds(archive.pageStatuses.first())
+                val ids = imageRepository.archiveTimelineIds(archive.pageStatuses.first(), settings.archiveSort.first())
                 val index = ids.indexOf(imageId)
                 if (index < 0) {
                     _state.value = ImageDetailState.NotFound
@@ -181,6 +183,7 @@ class ImageDetailViewModel(
      */
     fun toggleArchive(onExhausted: () -> Unit = {}) {
         val image = (_state.value as? ImageDetailState.Ready)?.current ?: return
+        if (demo.blocks()) return
         if (!_operationBusy.compareAndSet(expect = false, update = true)) return
         viewModelScope.launch {
             try {
@@ -218,6 +221,7 @@ class ImageDetailViewModel(
      */
     fun saveCurrent(subdir: String?, alsoTrash: Boolean, onExhausted: () -> Unit = {}) {
         val image = (_state.value as? ImageDetailState.Ready)?.current ?: return
+        if (demo.blocks()) return
         if (!_operationBusy.compareAndSet(expect = false, update = true)) return
         viewModelScope.launch {
             try {
@@ -250,6 +254,7 @@ class ImageDetailViewModel(
 
     fun prepareOpenExternal(onReady: (ExternalOpenTarget?) -> Unit) {
         val image = (_state.value as? ImageDetailState.Ready)?.current ?: return
+        if (demo.blocks()) return
         viewModelScope.launch {
             val target = imageFileManager.prepareExternalView(image.id)
             if (target == null) {
@@ -263,6 +268,7 @@ class ImageDetailViewModel(
 
     fun moveCurrentToTrash(options: PictureDeleteOptions = PictureDeleteOptions(), onExhausted: () -> Unit = {}) {
         val image = (_state.value as? ImageDetailState.Ready)?.current ?: return
+        if (demo.blocks()) return
         if (!_operationBusy.compareAndSet(expect = false, update = true)) return
         viewModelScope.launch {
             try {
@@ -283,6 +289,7 @@ class ImageDetailViewModel(
 
     fun deleteCurrentPermanently(options: PictureDeleteOptions = PictureDeleteOptions(), onExhausted: () -> Unit = {}) {
         val image = (_state.value as? ImageDetailState.Ready)?.current ?: return
+        if (demo.blocks()) return
         if (!_operationBusy.compareAndSet(expect = false, update = true)) return
         viewModelScope.launch {
             try {

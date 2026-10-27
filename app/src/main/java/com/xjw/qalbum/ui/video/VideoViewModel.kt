@@ -18,6 +18,7 @@ import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.data.repository.ImageRepository
 import com.xjw.qalbum.domain.model.SourceSort
 import com.xjw.qalbum.domain.model.TimelineSection
+import com.xjw.qalbum.service.demo.DemoMode
 import com.xjw.qalbum.service.video.VideoFiles
 import com.xjw.qalbum.service.video.VideoLibrary
 import com.xjw.qalbum.service.work.BackgroundTasks
@@ -80,6 +81,7 @@ class VideoViewModel(
     private val settings: SettingsRepository,
     private val tasks: BackgroundTasks,
     private val appScope: CoroutineScope,
+    private val demo: DemoMode,
 ) : ViewModel() {
     private val dao = db.videoDao()
 
@@ -235,18 +237,18 @@ class VideoViewModel(
     suspend fun selectionBytes(ids: Collection<Long>): Long =
         ids.distinct().chunked(SQL_CHUNK).flatMap { dao.byIds(it) }.sumOf { it.size }
 
-    fun tileModel(photo: GalleryTimelineItem.Photo): Any = (photo.tag as? VideoEntity)?.frameModel() ?: VideoFrameModel(photo.image.path, photo.image.size, photo.image.mtime)
+    fun tileModel(photo: GalleryTimelineItem.Photo): Any = (photo.tag as? VideoEntity)?.frameModel() ?: VideoFrameModel(photo.image.path, photo.image.size, photo.image.mtime, photo.image.width, photo.image.height)
 
     /** 播放：只读打开视频 */
     suspend fun open(video: VideoEntity): ParcelFileDescriptor? = library.open(video.path)
 
     // ---- 操作 ----
 
-    /** 永久删除 */
-    fun delete(ids: Collection<Long>, onDone: () -> Unit = {}) {
-        if (ids.isEmpty()) return
+    /** 永久删除；没有执行（演示模式）时返回 false */
+    fun delete(ids: Collection<Long>, onDone: () -> Unit = {}): Boolean {
+        if (ids.isEmpty() || demo.blocks()) return false
         val label = "删除视频"
-        appScope.launchCleanupOp(label) {
+        appScope.launchCleanupOp(label, demo) {
             val total = ids.size
             CleanupOpState.purgeProgress.value = PurgeProgress(0, total, "正在删除视频…")
             val report = try {
@@ -268,11 +270,12 @@ class VideoViewModel(
             }
             withContext(Dispatchers.Main) { onDone() }
         }
+        return true
     }
 
     /** 保存到相册 */
     fun export(id: Long, subdir: String?) {
-        appScope.launchCleanupOp("保存视频") {
+        appScope.launchCleanupOp("保存视频", demo) {
             CleanupOpState.message.value = if (library.export(id, subdir)) {
                 "已保存到相册" + (subdir?.let { "「$it」" } ?: "")
             } else {
@@ -314,7 +317,7 @@ internal fun VideoEntity.asImage(): ImageEntity = ImageEntity(
     height = height,
 )
 
-internal fun VideoEntity.frameModel(): VideoFrameModel = VideoFrameModel(path, size, mtime)
+internal fun VideoEntity.frameModel(): VideoFrameModel = VideoFrameModel(path, size, mtime, width, height)
 
 /** 时长：1:05、1:02:03；还没读出来为 null */
 internal fun formatDuration(ms: Long): String? {

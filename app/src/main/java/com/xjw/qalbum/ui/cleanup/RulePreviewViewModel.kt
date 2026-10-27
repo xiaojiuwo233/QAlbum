@@ -27,6 +27,7 @@ import com.xjw.qalbum.service.cleanup.rules.CleanupRunner
 import com.xjw.qalbum.service.cleanup.rules.RuleScope
 import com.xjw.qalbum.service.cleanup.rules.RuleSql
 import com.xjw.qalbum.service.cleanup.rules.SqlPart
+import com.xjw.qalbum.service.demo.DemoMode
 import com.xjw.qalbum.ui.components.ScrollDirectory
 import com.xjw.qalbum.ui.gallery.FileSize
 import com.xjw.qalbum.ui.gallery.GalleryTimelineItem
@@ -68,6 +69,7 @@ class RulePreviewViewModel(
     private val settings: SettingsRepository,
     private val appScope: CoroutineScope,
     private val statsCache: StatsCache,
+    private val demo: DemoMode,
 ) : ViewModel() {
 
     val rule: CleanupRule = CleanupRule.byId(ruleId) ?: CleanupRule.Thumbnails
@@ -194,9 +196,11 @@ class RulePreviewViewModel(
     /** 右上角全选：当前参数下的全部命中项 */
     suspend fun allIds(): Set<Long> = dao.ids(RuleSql.ids(rule.where(option.value, now))).toSet()
 
-    /** 移入回收站（整张图的规则连同其他版本，只删某个版本的规则只删选中的文件），后台执行 */
-    fun trash(ids: Collection<Long>) {
+    /** 移入回收站（整张图的规则连同其他版本，只删某个版本的规则只删选中的文件），后台执行；演示模式下不执行，返回 false */
+    fun trash(ids: Collection<Long>): Boolean {
+        if (demo.blocks()) return false
         runner.trash(ids, rule.title, linkedVersions = rule.scope == RuleScope.PICTURE, ruleId = rule.id)
+        return true
     }
 
     /** 压缩选中的图（先对比，见 [CompressionCoordinator]） */
@@ -204,13 +208,15 @@ class RulePreviewViewModel(
 
     fun cancel() = runner.cancel()
 
-    /** 把选中的图归档：之后任何清理都不会动它们（同时从本规则里消失） */
-    fun archive(ids: Collection<Long>, onDone: () -> Unit = {}) {
+    /** 把选中的图归档：之后任何清理都不会动它们（同时从本规则里消失）；演示模式下不执行，返回 false */
+    fun archive(ids: Collection<Long>, onDone: () -> Unit = {}): Boolean {
+        if (demo.blocks()) return false
         appScope.launch {
             val count = archive.archive(ids)
             _message.value = "已归档 $count 张，不会被清理"
             withContext(Dispatchers.Main) { onDone() }
         }
+        return true
     }
 
     /** 看图快照里刷新一张（压缩后大小与状态变了） */
@@ -223,10 +229,12 @@ class RulePreviewViewModel(
     fun createSubdir(name: String) = settings.addExportSubdir(name)
 
     fun share(id: Long, onReady: (ExternalViewTarget) -> Unit) {
+        if (demo.blocks()) return
         viewModelScope.launch { imageFiles.prepareShare(id)?.let(onReady) }
     }
 
     fun save(id: Long, subdir: String?) {
+        if (demo.blocks()) return
         appScope.launch {
             val ok = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q || imageFiles.canExportPreQ()) &&
                 imageFiles.exportToGallery(id, subdir)

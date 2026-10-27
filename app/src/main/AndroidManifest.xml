@@ -2,7 +2,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- 前台服务：扫描、读取聊天来源、清理等长任务切到后台时保持运行（QAlbum 不联网） -->
+    <!-- 联网只用来检查更新（读 GitHub Releases 的版本信息） -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 前台服务：扫描、读取聊天来源、清理等长任务切到后台时保持运行 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 

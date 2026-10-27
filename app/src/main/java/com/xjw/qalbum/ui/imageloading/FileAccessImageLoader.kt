@@ -29,6 +29,7 @@ import com.xjw.qalbum.domain.model.AccessMode
 import com.xjw.qalbum.fileops.BoundFileOps
 import com.xjw.qalbum.fileops.FileOpsClient
 import com.xjw.qalbum.qq.QqCachePaths
+import com.xjw.qalbum.service.demo.DemoMode
 import com.xjw.qalbum.service.video.VideoProbe
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -68,11 +69,28 @@ import java.util.concurrent.atomic.AtomicReference
  */
 data class ImageEntityModel(val entity: ImageEntity, val tile: Boolean = false)
 
-/** 直接传一个绝对路径（用于详情页的原图加载等场景） */
-data class FileAccessPath(val path: String)
+/**
+ * 直接传一个绝对路径（回收站里的文件等）。[demoSeed]、[width]、[height] 只给演示模式用：
+ * 示意图按 [ImageEntity.demoSeed] 画（和图库里同一张图一样）、按原图比例画。
+ */
+data class FileAccessPath(val path: String, val demoSeed: Long = 0, val width: Int = 0, val height: Int = 0)
 
-/** 视频封面：取一帧缩小后存进磁盘缓存，[size] 与 [mtime] 变了（文件被换掉）就重新取 */
-data class VideoFrameModel(val path: String, val size: Long, val mtime: Long)
+/** 视频封面：取一帧缩小后存进磁盘缓存，[size] 与 [mtime] 变了（文件被换掉）就重新取；[width]、[height] 只给演示模式用 */
+data class VideoFrameModel(val path: String, val size: Long, val mtime: Long, val width: Int = 0, val height: Int = 0)
+
+/** 演示模式的示意图按它画：同一张图的各个版本（原图、预览图、缩略图）画面一样 */
+internal val ImageEntity.demoSeed: Long get() = variantGroup ?: id
+
+internal val FileAccessPath.seed: Long get() = demoSeed.takeIf { it != 0L } ?: path.hashCode().toLong()
+
+/** 演示模式：不读文件，返回按 [seed] 画的示意图（不进磁盘缓存） */
+private fun demoResult(seed: Long, width: Int, height: Int, options: Options): FetchResult {
+    val (w, h) = DemoImages.pixelSize(width, height, options.size, options.scale)
+    return ImageFetchResult(image = DemoImages.render(seed, w, h).asImage(), isSampled = true, dataSource = DataSource.DISK)
+}
+
+/** 内存缓存 key 的后缀：演示模式的示意图和真图分开存 */
+private fun DemoMode.keySuffix(): String = if (isOn) "&demo" else ""
 
 /**
  * 特权 fd 快路径：进程级共享一份 [IFileOps] AIDL 绑定（引用计数由 [FileOpsClient] 管理，
@@ -212,10 +230,12 @@ private class ImageEntityFetcher(
     private val accessManager: AccessManager,
     private val fastPath: FdFastPath,
     private val diskCache: DiskCache?,
+    private val demo: DemoMode,
 ) : Fetcher {
 
     override suspend fun fetch(): FetchResult {
         val entity = data.entity
+        if (demo.current()) return demoResult(entity.demoSeed, entity.width, entity.height, options)
         if (data.tile) {
             for (path in smallerVersions(entity, options.size)) {
                 fetchSmallerVersion(path)?.let { return it }
@@ -347,19 +367,25 @@ private class ImageEntityFetcher(
     class Factory(
         private val accessManager: AccessManager,
         private val fastPath: FdFastPath,
+        private val demo: DemoMode,
     ) : Fetcher.Factory<ImageEntityModel> {
         override fun create(data: ImageEntityModel, options: Options, imageLoader: ImageLoader): Fetcher {
-            return ImageEntityFetcher(data, options, accessManager, fastPath, imageLoader.diskCache)
+            return ImageEntityFetcher(data, options, accessManager, fastPath, imageLoader.diskCache, demo)
         }
     }
 }
 
 private class FilePathFetcher(
     private val data: FileAccessPath,
+    private val options: Options,
     private val accessManager: AccessManager,
     private val fastPath: FdFastPath,
+    private val demo: DemoMode,
 ) : Fetcher {
     override suspend fun fetch(): FetchResult {
+        if (demo.current()) {
+            return demoResult(data.seed, data.width, data.height, options)
+        }
         // App 自己能读的文件（回收站里复制进来的图、缩略图等）直接读，不经特权进程
         val own = File(data.path)
         if (own.canRead()) {
@@ -387,9 +413,10 @@ private class FilePathFetcher(
     class Factory(
         private val accessManager: AccessManager,
         private val fastPath: FdFastPath,
+        private val demo: DemoMode,
     ) : Fetcher.Factory<FileAccessPath> {
         override fun create(data: FileAccessPath, options: Options, imageLoader: ImageLoader): Fetcher {
-            return FilePathFetcher(data, accessManager, fastPath)
+            return FilePathFetcher(data, options, accessManager, fastPath, demo)
         }
     }
 }
@@ -403,8 +430,13 @@ private class VideoFrameFetcher(
     private val options: Options,
     private val fastPath: FdFastPath,
     private val diskCache: DiskCache?,
+    private val demo: DemoMode,
 ) : Fetcher {
     override suspend fun fetch(): FetchResult {
+        if (demo.current()) {
+            val (w, h) = if (data.width > 0 && data.height > 0) data.width to data.height else 16 to 9
+            return demoResult(data.path.hashCode().toLong(), w, h, options)
+        }
         val key = "qalbum-video://${data.path}?size=${data.size}&mt=${data.mtime}"
         val cache = diskCache
         if (cache != null && options.diskCachePolicy.readEnabled) {
@@ -451,9 +483,9 @@ private class VideoFrameFetcher(
         return ImageFetchResult(image = frame.asImage(), isSampled = true, dataSource = DataSource.DISK)
     }
 
-    class Factory(private val fastPath: FdFastPath) : Fetcher.Factory<VideoFrameModel> {
+    class Factory(private val fastPath: FdFastPath, private val demo: DemoMode) : Fetcher.Factory<VideoFrameModel> {
         override fun create(data: VideoFrameModel, options: Options, imageLoader: ImageLoader): Fetcher =
-            VideoFrameFetcher(data, options, fastPath, imageLoader.diskCache)
+            VideoFrameFetcher(data, options, fastPath, imageLoader.diskCache, demo)
     }
 
     private companion object {
@@ -463,9 +495,9 @@ private class VideoFrameFetcher(
     }
 }
 
-private object VideoFrameKeyer : Keyer<VideoFrameModel> {
+private class VideoFrameKeyer(private val demo: DemoMode) : Keyer<VideoFrameModel> {
     override fun key(data: VideoFrameModel, options: Options): String =
-        "qalbum-video://${data.path}?size=${data.size}&mt=${data.mtime}&vp=${options.size}"
+        "qalbum-video://${data.path}?size=${data.size}&mt=${data.mtime}&vp=${options.size}" + demo.keySuffix()
 }
 
 /** 磁盘缓存 key：同一文件只存一份源字节，size+mtime 版本化（文件被替换后自动失效） */
@@ -493,21 +525,25 @@ internal fun smallerVersions(entity: ImageEntity, size: Size): List<String> {
 private const val SMALL_THUMB_PX = 220
 
 /** 内存缓存 key 在磁盘 key 之上追加请求尺寸：网格小图与详情页大图各自命中，互不顶替；格子读的是小版本，再加标记 */
-private object ImageEntityKeyer : Keyer<ImageEntityModel> {
+private class ImageEntityKeyer(private val demo: DemoMode) : Keyer<ImageEntityModel> {
     override fun key(data: ImageEntityModel, options: Options): String =
-        "${entityDiskKey(data.entity)}&vp=${options.size}" + if (data.tile) "&tile" else ""
+        "${entityDiskKey(data.entity)}&vp=${options.size}" + (if (data.tile) "&tile" else "") + demo.keySuffix()
 }
 
-private object FilePathKeyer : Keyer<FileAccessPath> {
+private class FilePathKeyer(private val demo: DemoMode) : Keyer<FileAccessPath> {
     override fun key(data: FileAccessPath, options: Options): String =
-        "qalbum-path://${data.path}?vp=${options.size}"
+        "qalbum-path://${data.path}?vp=${options.size}" + demo.keySuffix()
 }
 
-/** 构造 QAlbum 全局 ImageLoader，带磁盘缓存 + 自定义 Fetcher + 动画解码；[fastPath] 与看图分块解码（[ImageTileSources]）共用 */
+/**
+ * 构造 QAlbum 全局 ImageLoader，带磁盘缓存 + 自定义 Fetcher + 动画解码；[fastPath] 与看图分块解码（[ImageTileSources]）共用。
+ * 演示模式（[demo]）下各 fetcher 不读文件，返回示意图。
+ */
 internal fun buildImageLoader(
     context: Context,
     accessManager: AccessManager,
     fastPath: FdFastPath,
+    demo: DemoMode,
 ): ImageLoader {
     val platform: PlatformContext = context
     return ImageLoader.Builder(platform)
@@ -535,12 +571,12 @@ internal fun buildImageLoader(
                 add(GifDecoder.Factory())
             }
             // 自定义 fetcher + keyer
-            add(ImageEntityKeyer)
-            add(FilePathKeyer)
-            add(ImageEntityFetcher.Factory(accessManager, fastPath))
-            add(FilePathFetcher.Factory(accessManager, fastPath))
-            add(VideoFrameKeyer)
-            add(VideoFrameFetcher.Factory(fastPath))
+            add(ImageEntityKeyer(demo))
+            add(FilePathKeyer(demo))
+            add(ImageEntityFetcher.Factory(accessManager, fastPath, demo))
+            add(FilePathFetcher.Factory(accessManager, fastPath, demo))
+            add(VideoFrameKeyer(demo))
+            add(VideoFrameFetcher.Factory(fastPath, demo))
         }
         .build()
 }

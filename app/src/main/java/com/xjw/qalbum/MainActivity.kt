@@ -5,6 +5,7 @@ import android.app.UiModeManager
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
@@ -24,13 +25,16 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.domain.model.ThemeMode
+import com.xjw.qalbum.service.demo.DemoMode
 import com.xjw.qalbum.service.work.BackgroundTasks
+import com.xjw.qalbum.ui.common.LocalDemoMode
 import com.xjw.qalbum.ui.components.DatabaseUpgradeDialog
 import com.xjw.qalbum.ui.compress.CompressionHost
 import com.xjw.qalbum.ui.imageloading.ImageTileSources
 import com.xjw.qalbum.ui.imageloading.LocalImageTileSources
 import com.xjw.qalbum.ui.navigation.AppNavigation
 import com.xjw.qalbum.ui.theme.QAlbumTheme
+import com.xjw.qalbum.ui.update.UpdateDialogHost
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -43,6 +47,7 @@ class MainActivity : ComponentActivity() {
     private val settings: SettingsRepository by inject()
     private val tasks: BackgroundTasks by inject()
     private val tileSources: ImageTileSources by inject()
+    private val demo: DemoMode by inject()
 
     // 结果不用处理：拒绝时任务照常在后台跑，只是看不到进度通知
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
@@ -58,20 +63,27 @@ class MainActivity : ComponentActivity() {
         setContent {
             // 外观设置读到之前不画（一两帧，显示窗口背景），免得固定深色的用户先闪一下浅色
             val theme by settings.themeSettings.collectAsState(initial = null)
+            val demoOn by demo.enabled.collectAsState()
             QAlbumTheme(theme ?: return@setContent) {
-                // 看图放大后分块解码（看图页与各处的全屏预览共用）
-                CompositionLocalProvider(LocalImageTileSources provides tileSources) {
+                // 看图放大后分块解码（看图页与各处的全屏预览共用）；演示模式
+                CompositionLocalProvider(LocalImageTileSources provides tileSources, LocalDemoMode provides demoOn) {
                     Surface(modifier = Modifier.fillMaxSize()) {
                         AppNavigation()
                     }
-                    // 数据库升级进度；任何页面发起的压缩对比与清理结果提示
+                    // 数据库升级进度；任何页面发起的压缩对比与清理结果提示；有新版本时的弹窗
                     DatabaseUpgradeDialog()
                     CompressionHost()
+                    UpdateDialogHost()
                 }
             }
         }
         askNotificationPermissionOnFirstTask()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) followThemeMode()
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                demo.blocked.collect { Toast.makeText(this@MainActivity, "演示模式下不可用", Toast.LENGTH_SHORT).show() }
+            }
+        }
     }
 
     /**

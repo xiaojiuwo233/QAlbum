@@ -10,6 +10,7 @@ import com.xjw.qalbum.data.db.dao.RuleStats
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.data.db.StatsCache
 import com.xjw.qalbum.service.cleanup.ArchiveManager
+import com.xjw.qalbum.service.demo.DemoMode
 import com.xjw.qalbum.service.cleanup.rules.CleanupRule
 import com.xjw.qalbum.service.cleanup.rules.CleanupRunner
 import com.xjw.qalbum.service.cleanup.rules.RuleScope
@@ -212,9 +213,15 @@ data class PurgeProgress(val done: Int, val total: Int, val label: String = "正
 
 /**
  * 回收站等页面的文件操作：跑在 App 级作用域，离开页面也不中断；期间算 busy，磁盘将满时 Room 写入等异常
- * 兜住转成可见提示，而不是穿透 launch 杀进程。
+ * 兜住转成可见提示，而不是穿透 launch 杀进程。演示模式（[demo]）下不执行，返回 false。
  */
-internal fun CoroutineScope.launchCleanupOp(label: String, block: suspend CoroutineScope.() -> Unit) = launch {
+internal fun CoroutineScope.launchCleanupOp(label: String, demo: DemoMode, block: suspend CoroutineScope.() -> Unit): Boolean {
+    if (demo.blocks()) return false
+    launchCleanupOp(label, block)
+    return true
+}
+
+private fun CoroutineScope.launchCleanupOp(label: String, block: suspend CoroutineScope.() -> Unit) = launch {
     CleanupOpState.pushBusy()
     try {
         block()

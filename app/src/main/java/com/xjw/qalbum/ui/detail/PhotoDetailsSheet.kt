@@ -43,6 +43,9 @@ import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.db.entity.OriginalBackupEntity
 import com.xjw.qalbum.service.cleanup.CompressionCoordinator
 import com.xjw.qalbum.service.cleanup.OriginalCompressor
+import com.xjw.qalbum.service.demo.DemoMode
+import com.xjw.qalbum.service.demo.DemoNames
+import com.xjw.qalbum.ui.common.LocalDemoMode
 import com.xjw.qalbum.ui.common.formatBytes
 import com.xjw.qalbum.ui.common.formatDateTime
 import com.xjw.qalbum.ui.common.formatDateTimeSeconds
@@ -66,8 +69,11 @@ internal fun PhotoDetailsSheet(
     header: (@Composable () -> Unit)? = null,
 ) {
     val sources = koinInject<QqSourceDao>()
-    val sourceFlow = remember(image.id, sources) { sources.observeImageOrigins(image.id) }
+    // 演示模式下来源里的群、人换成虚构的
+    val demoMode = koinInject<DemoMode>()
+    val sourceFlow = remember(image.id, sources, demoMode) { demoMode.origins(sources.observeImageOrigins(image.id)) }
     val origins by sourceFlow.collectAsState(initial = emptyList())
+    val demo = LocalDemoMode.current
     val chatFeatures = koinInject<ChatFeatures>()
     val chatAvailable by chatFeatures.available.collectAsState(initial = false)
     val backups = koinInject<AppDatabase>().originalBackupDao()
@@ -109,7 +115,7 @@ internal fun PhotoDetailsSheet(
                     Column(Modifier.padding(horizontal = 8.dp).padding(bottom = 8.dp)) {
                         Text(formatTitleDate(image.mtime), style = MaterialTheme.typography.headlineSmallEmphasized)
                         Text(
-                            image.filename,
+                            if (demo) DemoNames.filename(image) else image.filename,
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
@@ -118,7 +124,7 @@ internal fun PhotoDetailsSheet(
                     }
                 }
                 if (header != null) item(key = "header") { header() }
-                item(key = "meta") { MetadataBlock(image) }
+                item(key = "meta") { MetadataBlock(image, demo) }
                 if (image.optimized == OriginalCompressor.COMPRESSED) {
                     item(key = "compress-header") { SectionHeader("原图压缩") }
                     // 在回收站里的图还原不了原图（压缩后的文件不在原位置）
@@ -152,14 +158,14 @@ internal fun PhotoDetailsSheet(
 }
 
 @Composable
-private fun MetadataBlock(image: ImageEntity) {
+private fun MetadataBlock(image: ImageEntity, demo: Boolean) {
     SegmentedCard(SegmentPosition.Single, verticalArrangement = Arrangement.spacedBy(2.dp)) {
         InfoRow("大小", formatBytes(image.size))
         InfoRow("尺寸", if (image.width > 0) "${image.width} × ${image.height}" else "未读取")
         InfoRow("类型", "${sourceLabel(image.sourceType)} · ${image.mime}")
         InfoRow("修改时间", formatDateTimeSeconds(image.mtime))
         InfoRow("首次扫描", formatDateTimeSeconds(image.firstSeen))
-        InfoRow("路径", image.path)
+        InfoRow("路径", if (demo) DemoNames.path(image) else image.path)
     }
 }
 

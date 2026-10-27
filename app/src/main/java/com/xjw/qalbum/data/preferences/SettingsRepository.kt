@@ -223,6 +223,13 @@ class SettingsRepository(
         ds.edit { it[Keys.GALLERY_SORT] = sort.name }
     }
 
+    /** 归档页排列顺序（归档页看图左右滑动也按它） */
+    val archiveSort: Flow<SourceSort> = prefsData.map { SourceSort.fromName(it[Keys.ARCHIVE_SORT]) }
+
+    suspend fun setArchiveSort(sort: SourceSort) {
+        ds.edit { it[Keys.ARCHIVE_SORT] = sort.name }
+    }
+
     /** QQ 来源图片的排列方式（日期 / 大小，升序 / 降序） */
     val qqSourceSort: Flow<SourceSort> = prefsData.map { SourceSort.fromName(it[Keys.QQ_SOURCE_SORT]) }
 
@@ -366,6 +373,14 @@ class SettingsRepository(
         ds.edit { it[Keys.DETAIL_SHARED_TRANSITION] = enabled }
     }
 
+    // ---- 演示模式（截图用，见 DemoMode）----
+
+    val demoMode: Flow<Boolean> = prefsData.map { it[Keys.DEMO_MODE] ?: false }
+
+    suspend fun setDemoMode(enabled: Boolean) {
+        ds.edit { it[Keys.DEMO_MODE] = enabled }
+    }
+
     // ---- 导出相册子目录（保存图片到 Pictures/QAlbum/<子目录>）----
 
     /** 用户创建的导出子目录名列表；缺省空（仅根目录） */
@@ -441,6 +456,7 @@ class SettingsRepository(
 
         val GALLERY_COLUMNS = intPreferencesKey("gallery_columns")
         val GALLERY_SORT = stringPreferencesKey("gallery_sort")
+        val ARCHIVE_SORT = stringPreferencesKey("archive_sort")
         val GALLERY_LARGE_BYTES = longPreferencesKey("gallery_large_bytes")
         val GALLERY_STACK_VARIANTS = booleanPreferencesKey("gallery_stack_variants")
         val FAST_SCROLL = booleanPreferencesKey("fast_scroll")
@@ -466,6 +482,7 @@ class SettingsRepository(
         val ONBOARDING_DONE = booleanPreferencesKey("onboarding_done")
         val NOTIFICATION_ASKED = booleanPreferencesKey("notification_permission_asked")
         val DETAIL_SHARED_TRANSITION = booleanPreferencesKey("detail_shared_transition")
+        val DEMO_MODE = booleanPreferencesKey("demo_mode")
         val EXPORT_SUBDIRS = stringPreferencesKey("export_subdirs")
     }
 }

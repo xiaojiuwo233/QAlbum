@@ -89,7 +89,9 @@ import com.xjw.qalbum.ui.components.SegmentPosition
 import com.xjw.qalbum.ui.components.SegmentedNavigationItem
 import com.xjw.qalbum.ui.components.ShapeIcon
 import com.xjw.qalbum.ui.components.WavyProgress
+import com.xjw.qalbum.service.update.AppUpdates
 import org.koin.androidx.compose.koinViewModel
+import org.koin.compose.koinInject
 
 @Composable
 fun DashboardScreen(
@@ -97,9 +99,13 @@ fun DashboardScreen(
     onOpenAccessSettings: () -> Unit = {},
     onOpenGuide: () -> Unit = {},
     onOpenSources: () -> Unit = {},
+    onOpenRecycleBin: () -> Unit = {},
     viewModel: DashboardViewModel = koinViewModel(),
 ) {
     val state by viewModel.uiState.collectAsState()
+    // 打开 App 进概览：检查一次更新（每次启动一次，有新版本时在界面根部弹窗）
+    val updates = koinInject<AppUpdates>()
+    LaunchedEffect(Unit) { updates.checkOnLaunch() }
     val chatAvailable by viewModel.chatAvailable.collectAsState()
     val running by viewModel.scanRunning.collectAsState()
     val progress by viewModel.scanProgress.collectAsState()
@@ -136,7 +142,7 @@ fun DashboardScreen(
             ) {
                 FirstRunGuideCard(onOpenGuide = onOpenGuide, onOpenAccess = onOpenAccessSettings)
             }
-            StaggeredEntrance(index++) { MetricsGrid(state) }
+            StaggeredEntrance(index++) { MetricsGrid(state, onOpenRecycleBin) }
             if (chatAvailable) {
                 StaggeredEntrance(index++) {
                     SegmentedNavigationItem(
@@ -272,7 +278,7 @@ internal fun cleanedCountText(row: CleanedStats, today: Boolean): String {
 // ── 关键指标 2×2 ────────────────────────────────────────────────────
 
 @Composable
-private fun MetricsGrid(state: DashboardUiState) {
+private fun MetricsGrid(state: DashboardUiState, onOpenRecycleBin: () -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             MetricCard(
@@ -313,7 +319,7 @@ private fun MetricsGrid(state: DashboardUiState) {
                 containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
                 contentColor = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.weight(1f),
-                expandedValue = formatCountExact(state.quarantineCount),
+                onClick = onOpenRecycleBin,
             )
         }
     }
@@ -330,11 +336,13 @@ private fun MetricCard(
     subtitle: String? = null,
     /** 精确值：非空时卡片可点击，在缩写与精确值间切换 */
     expandedValue: String? = null,
+    /** 点卡片打开对应的页面（有它时不再切换精确值） */
+    onClick: (() -> Unit)? = null,
 ) {
     var expanded by remember { mutableStateOf(false) }
     Card(
-        onClick = { if (expandedValue != null) expanded = !expanded },
-        enabled = expandedValue != null,
+        onClick = { if (onClick != null) onClick() else if (expandedValue != null) expanded = !expanded },
+        enabled = onClick != null || expandedValue != null,
         modifier = modifier,
         shape = MaterialTheme.shapes.extraLarge,
         colors = CardDefaults.cardColors(

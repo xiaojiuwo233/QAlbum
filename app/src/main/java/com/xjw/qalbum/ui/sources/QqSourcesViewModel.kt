@@ -11,6 +11,8 @@ import com.xjw.qalbum.data.db.entity.QqSourceAccountEntity
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.domain.model.SourceFacetOrder
 import com.xjw.qalbum.qq.QqSourceRepository
+import com.xjw.qalbum.service.demo.DemoMode
+import com.xjw.qalbum.service.demo.DemoNames
 import com.xjw.qalbum.data.paging.calmDuringBulkWrites
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -56,6 +58,7 @@ class QqSourcesViewModel(
     val repository: QqSourceRepository,
     private val settings: SettingsRepository,
     chatFeatures: ChatFeatures,
+    demo: DemoMode,
 ) : ViewModel() {
     init {
         repository.startFacetCache()
@@ -83,10 +86,20 @@ class QqSourcesViewModel(
         .map { rows -> SourceTab.entries.associateWith { tab -> rows.countFor(tab) } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
+    private data class FacetQuery(val tab: SourceTab, val search: String, val order: SourceFacetOrder, val demo: Boolean)
+
     val facets: StateFlow<List<QqSourceFacet>?> =
-        combine(tab, search.debounce { if (it.isBlank()) 0L else 180L }, order) { t, q, o -> Triple(t, q.trim(), o) }
+        combine(tab, search.debounce { if (it.isBlank()) 0L else 180L }, order, demo.known) { t, q, o, d -> FacetQuery(t, q.trim(), o, d) }
             .distinctUntilChanged()
-            .flatMapLatest { (t, q, o) -> repository.dao.observeFacets(t.kind, t.chatType, q, o.ordinal).calmDuringBulkWrites() }
+            .flatMapLatest { (t, q, o, d) ->
+                if (d) {
+                    // 演示模式：名称换成虚构的，搜索、按名称排序也按假名
+                    repository.dao.observeFacets(t.kind, t.chatType, "", o.ordinal)
+                        .map { DemoNames.facetList(it, q, byName = o == SourceFacetOrder.NAME) }
+                } else {
+                    repository.dao.observeFacets(t.kind, t.chatType, q, o.ordinal)
+                }.calmDuringBulkWrites()
+            }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     val progress = repository.progress
@@ -105,8 +118,9 @@ class QqSourcesViewModel(
     }
 
     /** 自动归档名单（以后的新图也自动归档的群 / 人） */
-    val autoArchive: StateFlow<List<QqAutoArchiveEntity>> = repository.dao.observeAutoArchive()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    val autoArchive: StateFlow<List<QqAutoArchiveEntity>> = combine(repository.dao.observeAutoArchive(), demo.known) { list, on ->
+        if (on) list.map { it.copy(label = DemoNames.autoArchiveLabel(it)) } else list
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     fun removeAutoArchive(entry: QqAutoArchiveEntity) {
         viewModelScope.launch { repository.dao.removeAutoArchive(entry.conversationKey, entry.senderKey) }

@@ -24,6 +24,9 @@ import com.xjw.qalbum.ui.dashboard.DashboardViewModel
 import com.xjw.qalbum.ui.gallery.GalleryViewModel
 import com.xjw.qalbum.qq.QqSourceRepository
 import com.xjw.qalbum.ui.sources.QqSourcesViewModel
+import com.xjw.qalbum.service.demo.DemoMode
+import com.xjw.qalbum.service.update.AppUpdates
+import com.xjw.qalbum.service.update.UpdateChecker
 import com.xjw.qalbum.ui.imageloading.FdFastPath
 import com.xjw.qalbum.ui.imageloading.ImageTileSources
 import com.xjw.qalbum.ui.imageloading.buildImageLoader
@@ -35,6 +38,8 @@ import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.launch
 import org.koin.androidx.workmanager.dsl.worker
 import org.koin.core.module.dsl.viewModel
 import org.koin.dsl.module
@@ -137,7 +142,7 @@ val appModule = module {
         )
     }
     // 压缩的统一入口（先对比再替换）与设置页的质量演示
-    single { CompressionCoordinator(db = get(), compressor = get(), runner = get(), settings = get(), tasks = get(), appScope = get()) }
+    single { CompressionCoordinator(db = get(), compressor = get(), runner = get(), settings = get(), tasks = get(), appScope = get(), demo = get()) }
     single { CompressDemo(context = get()) }
     // QQ 缓存页（复刻 QQ 的清理缓存）与视频页
     single { com.xjw.qalbum.service.cleanup.QqCacheCleaner(accessManager = get(), fileOpsClient = get(), settings = get()) }
@@ -163,9 +168,22 @@ val appModule = module {
     // ---- Coil ImageLoader（全局单例，通过 Koin 暴露，App.onCreate 安装为 SingletonImageLoader） ----
 
     single { FdFastPath(accessManager = get(), fileOpsClient = get()) }
-    single { buildImageLoader(context = get(), accessManager = get(), fastPath = get()) }
+    single {
+        val demo = get<DemoMode>()
+        buildImageLoader(context = get(), accessManager = get(), fastPath = get(), demo = demo).also { loader ->
+            // 开关演示模式后清掉内存里的图：看图页的占位图按格子的 key 取，别取到另一种
+            get<CoroutineScope>().launch { demo.enabled.drop(1).collect { loader.memoryCache?.clear() } }
+        }
+    }
     // 看图放大后分块解码（读磁盘缓存里的那份或特权进程的 fd）
-    single { ImageTileSources(imageLoader = get(), fastPath = get()) }
+    single { ImageTileSources(imageLoader = get(), fastPath = get(), demo = get()) }
+
+    // 演示模式（截图用）：图片换成示意图、聊天来源换成虚构的名称，不执行改动图片的操作
+    single { DemoMode(settings = get(), scope = get()) }
+
+    // 检查更新（GitHub Releases）：打开 App 进概览时自动查一次，「关于」里可以手动查
+    single { UpdateChecker() }
+    single { AppUpdates(checker = get(), scope = get()) }
 
     // ---- ViewModel ----
 
@@ -200,6 +218,7 @@ val appModule = module {
             appScope = get(),
             tasks = get(),
             chatFeatures = get(),
+            demo = get(),
         )
     }
     viewModel {
@@ -210,6 +229,7 @@ val appModule = module {
             archive = get(),
             settings = get(),
             compressor = get(),
+            demo = get(),
         )
     }
     viewModel {
@@ -232,6 +252,7 @@ val appModule = module {
             tasks = get(),
             appScope = get(),
             statsCache = get(),
+            demo = get(),
         )
     }
     viewModel { params ->
@@ -246,17 +267,18 @@ val appModule = module {
             settings = get(),
             appScope = get(),
             statsCache = get(),
+            demo = get(),
         )
     }
     viewModel {
-        com.xjw.qalbum.ui.cleanup.QqCacheViewModel(cleaner = get(), tasks = get(), appScope = get())
+        com.xjw.qalbum.ui.cleanup.QqCacheViewModel(cleaner = get(), tasks = get(), appScope = get(), demo = get())
     }
     viewModel {
-        com.xjw.qalbum.ui.video.VideoViewModel(db = get(), library = get(), settings = get(), tasks = get(), appScope = get())
+        com.xjw.qalbum.ui.video.VideoViewModel(db = get(), library = get(), settings = get(), tasks = get(), appScope = get(), demo = get())
     }
     viewModel { com.xjw.qalbum.ui.settings.StorageViewModel(maintenance = get()) }
     viewModel { LogViewModel() }
-    viewModel { QqSourcesViewModel(repository = get(), settings = get(), chatFeatures = get()) }
+    viewModel { QqSourcesViewModel(repository = get(), settings = get(), chatFeatures = get(), demo = get()) }
     viewModel { params ->
         com.xjw.qalbum.ui.sources.QqSourceBrowseViewModel(
             target = params.get(),
@@ -268,6 +290,7 @@ val appModule = module {
             archive = get(),
             appScope = get(),
             tasks = get(),
+            demo = get(),
         )
     }
 

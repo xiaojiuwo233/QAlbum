@@ -85,6 +85,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import coil3.compose.AsyncImage
 import com.xjw.qalbum.data.db.entity.VideoEntity
+import com.xjw.qalbum.service.demo.DemoNames
+import com.xjw.qalbum.ui.common.LocalDemoMode
 import com.xjw.qalbum.ui.common.formatBytes
 import com.xjw.qalbum.ui.common.formatDateTime
 import com.xjw.qalbum.ui.common.formatTitleDate
@@ -261,7 +263,9 @@ private fun VideoPage(
 ) {
     val context = LocalContext.current
     val state = remember(video.id) { PlayerState(context, video) }
-    if (active) {
+    // 演示模式只显示封面（示意图），不播放
+    val demo = LocalDemoMode.current
+    if (active && !demo) {
         DisposableEffect(state) {
             state.create()
             onDispose { state.release() }
@@ -303,7 +307,7 @@ private fun VideoPage(
     ) {
         val aspect = state.aspect
         Box(if (aspect > 0f) Modifier.aspectRatio(aspect) else Modifier.fillMaxSize()) {
-            if (active) {
+            if (active && !demo) {
                 AndroidView(
                     factory = { ctx -> TextureView(ctx).apply { surfaceTextureListener = state.surfaceListener } },
                     modifier = Modifier.fillMaxSize(),
@@ -315,7 +319,7 @@ private fun VideoPage(
             }
         }
 
-        val error = state.error
+        val error = if (demo) "演示模式不播放视频" else state.error
         when {
             error != null -> Surface(color = ViewerChromeColor, contentColor = Color.White, shape = MaterialTheme.shapes.large) {
                 Text(error, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp))
@@ -401,7 +405,9 @@ private fun VideoDetailsCard(video: VideoEntity) {
             .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { },
     ) {
         Column(Modifier.padding(horizontal = 20.dp, vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(video.filename, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            val demo = LocalDemoMode.current
+            val path = if (demo) DemoNames.videoPath(video) else video.path
+            Text(if (demo) DemoNames.videoFilename(video) else video.filename, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
             DetailRow("来源", if (video.source == VideoEntity.SOURCE_CHAT) "聊天视频" else "收到的文件")
             DetailRow("大小", formatBytes(video.size))
             formatDuration(video.durationMs)?.let { DetailRow("时长", it) }
@@ -409,12 +415,12 @@ private fun VideoDetailsCard(video: VideoEntity) {
             DetailRow("修改时间", formatDateTime(video.mtime))
             Row(verticalAlignment = Alignment.Top) {
                 Text(
-                    video.path,
+                    path,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.weight(1f).padding(top = 10.dp),
                 )
-                IconButton(onClick = { copyPath(context, video.path) }, shapes = IconButtonDefaults.shapes()) {
+                IconButton(onClick = { copyPath(context, path) }, shapes = IconButtonDefaults.shapes()) {
                     Icon(Icons.Outlined.ContentCopy, contentDescription = "复制路径")
                 }
             }

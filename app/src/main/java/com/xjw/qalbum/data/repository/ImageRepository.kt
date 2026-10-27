@@ -8,6 +8,7 @@ import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.paging.RefreshGate
 import com.xjw.qalbum.domain.model.GallerySort
+import com.xjw.qalbum.domain.model.SourceSort
 import com.xjw.qalbum.domain.model.TimelineWindow
 import com.xjw.qalbum.data.paging.BulkWrites
 import com.xjw.qalbum.data.paging.calmDuringBulkWrites
@@ -59,7 +60,7 @@ class ImageRepository(
     }
 
     /** 归档页：每张图一格；[statuses] 见 ArchiveManager.statusesOf */
-    fun archiveTimelinePager(statuses: List<String>, gate: RefreshGate? = null): Flow<PagingData<ImageEntity>> {
+    fun archiveTimelinePager(statuses: List<String>, sort: SourceSort, gate: RefreshGate? = null): Flow<PagingData<ImageEntity>> {
         return Pager(
             config = PagingConfig(
                 pageSize = 50,
@@ -69,7 +70,7 @@ class ImageRepository(
                 enablePlaceholders = true,
                 jumpThreshold = JUMP_THRESHOLD,
             ),
-            pagingSourceFactory = gated(gate) { imageDao.pagingArchiveTimeline(statuses) },
+            pagingSourceFactory = gated(gate) { imageDao.pagingArchiveTimeline(statuses, sort.ordinal) },
         ).flow
     }
 
@@ -99,8 +100,15 @@ class ImageRepository(
     fun observeArchiveDateBucketCounts(statuses: List<String>): Flow<Map<Long, Int>> =
         imageDao.observeArchiveDateBucketCounts(statuses).map { rows -> rows.toBucketCountMap() }.throttleLatest()
 
+    fun observeArchiveSizeBucketCounts(statuses: List<String>): Flow<Map<Long, Int>> =
+        imageDao.observeArchiveSizeBucketCounts(statuses).map { rows -> rows.toBucketCountMap() }.throttleLatest()
+
+    suspend fun archiveIdsBySize(statuses: List<String>, low: Long, high: Long): List<Long> =
+        imageDao.archiveIdsBySize(statuses, low, high)
+
     /** 归档页看图仍全量取 id：集合由用户手动归档产生，规模与主时间线不同量级 */
-    suspend fun archiveTimelineIds(statuses: List<String>): List<Long> = imageDao.archiveTimelineIds(statuses)
+    suspend fun archiveTimelineIds(statuses: List<String>, sort: SourceSort): List<Long> =
+        imageDao.archiveTimelineIds(statuses, sort.ordinal)
 
     // ---- 详情页时间线窗口（keyset 定位，替代全量 id 装载）----
 

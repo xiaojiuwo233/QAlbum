@@ -427,8 +427,8 @@ fun CleanupRecycleBinScreen(
                         onDismiss = { pendingRestore = null },
                         onConfirm = {
                             pendingRestore = null
-                            if (originals) viewModel.restoreOriginals(listOf(target.id)) else viewModel.restore(listOf(target.id), thenArchive = archive)
-                            preview = preview?.without(target.id)
+                            val started = if (originals) viewModel.restoreOriginals(listOf(target.id)) else viewModel.restore(listOf(target.id), thenArchive = archive)
+                            if (started) preview = preview?.without(target.id)
                         },
                     )
                 }
@@ -442,8 +442,8 @@ fun CleanupRecycleBinScreen(
                         onDismiss = { pendingPurge = null },
                         onConfirm = {
                             pendingPurge = null
-                            if (originals) viewModel.deleteOriginals(listOf(target.id)) else viewModel.purge(listOf(target.id))
-                            preview = preview?.without(target.id)
+                            val started = if (originals) viewModel.deleteOriginals(listOf(target.id)) else viewModel.purge(listOf(target.id))
+                            if (started) preview = preview?.without(target.id)
                         },
                     )
                 }

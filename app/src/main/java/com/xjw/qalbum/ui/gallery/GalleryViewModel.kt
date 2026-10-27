@@ -12,8 +12,10 @@ import com.xjw.qalbum.data.paging.RefreshGate
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.data.repository.ImageRepository
 import com.xjw.qalbum.domain.model.GallerySort
+import com.xjw.qalbum.domain.model.SourceSort
 import com.xjw.qalbum.domain.model.TimelineSection
 import com.xjw.qalbum.service.cleanup.ArchiveManager
+import com.xjw.qalbum.service.demo.DemoMode
 import com.xjw.qalbum.ui.components.ScrollDirectory
 import com.xjw.qalbum.service.cleanup.ImageFileManager
 import com.xjw.qalbum.service.cleanup.QuarantineManager
@@ -59,6 +61,7 @@ class GalleryViewModel(
     private val appScope: CoroutineScope,
     private val tasks: BackgroundTasks,
     chatFeatures: ChatFeatures,
+    private val demo: DemoMode,
 ) : ViewModel() {
 
     // ---- 图库偏好 ----
@@ -129,6 +132,20 @@ class GalleryViewModel(
         archiveStatuses.flatMapLatest { imageRepository.observeArchiveDateBucketCounts(it) }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
+    private val archiveSizeBucketCounts: StateFlow<Map<Long, Int>?> =
+        archiveStatuses.flatMapLatest { imageRepository.observeArchiveSizeBucketCounts(it) }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    /** 归档页排列顺序 */
+    val archiveSort: StateFlow<SourceSort> = settings.archiveSort
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SourceSort.DATE_DESC)
+
+    fun setArchiveSort(sort: SourceSort) {
+        viewModelScope.launch { settings.setArchiveSort(sort) }
+    }
+
+    private val archiveQuery = combine(archiveStatuses, settings.archiveSort) { statuses, sort -> statuses to sort }.distinctUntilChanged()
+
     val timeline: Flow<PagingData<GalleryTimelineItem>> =
         sortAndStack
             .flatMapLatest { (sort, stacked) ->
@@ -169,16 +186,24 @@ class GalleryViewModel(
 
     suspend fun archiveSectionIds(section: TimelineSection): List<Long> = when (section) {
         is TimelineSection.Day -> imageRepository.archiveIdsBetween(archive.pageStatuses.first(), section.from, section.until)
-        is TimelineSection.Size -> emptyList()
+        is TimelineSection.Size -> imageRepository.archiveIdsBySize(archive.pageStatuses.first(), section.low, section.high)
     }
 
-    val archiveDirectory: StateFlow<ScrollDirectory?> = archiveDateBucketCounts
-        .flowMap { counts -> counts?.let { dateDirectory(it, ascending = false) } }
+    val archiveDirectory: StateFlow<ScrollDirectory?> = settings.archiveSort
+        .distinctUntilChanged()
+        .flatMapLatest { sort ->
+            if (sort.byDate) archiveDateBucketCounts.flowMap { counts -> counts?.let { dateDirectory(it, ascending = !sort.descending) } }
+            else archiveSizeBucketCounts.flowMap { counts -> counts?.let { sizeDirectory(it, ascending = !sort.descending) } }
+        }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
+    /** 归档页：按日期排列时按天分组，按大小排列时按大小区间分组 */
     val archiveTimeline: Flow<PagingData<GalleryTimelineItem>> =
-        archiveStatuses
-            .flatMapLatest { statuses -> imageRepository.archiveTimelinePager(statuses, refreshGate).withDateHeaders(archiveDateBucketCounts) }
+        archiveQuery
+            .flatMapLatest { (statuses, sort) ->
+                val pager = imageRepository.archiveTimelinePager(statuses, sort, refreshGate)
+                if (sort.byDate) pager.withDateHeaders(archiveDateBucketCounts) else pager.withSizeHeaders(archiveSizeBucketCounts)
+            }
             .cachedIn(viewModelScope)
 
     /** 归档的图片也在图库中显示（关闭时只在归档页出现） */
@@ -201,6 +226,7 @@ class GalleryViewModel(
         ids: Set<Long>, subdir: String?, alsoTrash: Boolean, includeArchived: Boolean = false,
         onDone: (saved: Int, failed: Int) -> Unit = { _, _ -> },
     ) {
+        if (demo.blocks()) return
         appScope.launch {
             val savedIds = ids.filter { imageFileManager.exportToGallery(it, subdir) }
             if (alsoTrash && savedIds.isNotEmpty()) {
@@ -217,10 +243,12 @@ class GalleryViewModel(
 
     /** 归档（连同同一张图的其他版本）；回调处理的张数 */
     fun archiveImages(ids: Set<Long>, onDone: (Int) -> Unit = {}) {
+        if (demo.blocks()) return
         viewModelScope.launch { onDone(archive.archive(ids)) }
     }
 
     fun unarchiveImages(ids: Set<Long>, onDone: (Int) -> Unit = {}) {
+        if (demo.blocks()) return
         viewModelScope.launch { onDone(archive.unarchive(ids)) }
     }
 
@@ -233,6 +261,7 @@ class GalleryViewModel(
     val deleteProgress: StateFlow<PurgeProgress?> = _deleteProgress.asStateFlow()
 
     fun moveImagesToTrash(ids: Set<Long>, options: PictureDeleteOptions = PictureDeleteOptions(), onDone: (Int) -> Unit = {}) {
+        if (demo.blocks()) return
         appScope.launch {
             val count = withDeleteProgress("正在移入回收站…") { progress ->
                 quarantineManager.quarantinePictures(ids, options, "用户批量删除", onProgress = progress)
@@ -242,6 +271,7 @@ class GalleryViewModel(
     }
 
     fun deleteImagesPermanently(ids: Set<Long>, options: PictureDeleteOptions = PictureDeleteOptions(), onDone: (Int) -> Unit = {}) {
+        if (demo.blocks()) return
         appScope.launch {
             val count = withDeleteProgress("正在永久删除…") { progress ->
                 quarantineManager.deletePicturesPermanently(ids, options, onProgress = progress)

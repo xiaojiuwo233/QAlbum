@@ -4,6 +4,8 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -98,6 +100,13 @@ import com.xjw.qalbum.ui.video.VideoScreen
 import kotlinx.coroutines.delay
 import org.koin.androidx.compose.koinViewModel
 
+/** 下一次切子页不播动画（用一次就失效；不是快照状态，在转场规格里读写不触发重组） */
+private class OneShot {
+    var armed = false
+
+    fun take(): Boolean = armed.also { armed = false }
+}
+
 /** 清理页里的子页：主页、某条规则的预览、按时间清理、回收站、视频、QQ 缓存（[parent] 是返回时回到哪一页） */
 private data class CleanupPage(val kind: String, val ruleId: String? = null, val parent: String = MAIN) {
     val depth: Int get() = when {
@@ -133,6 +142,9 @@ fun CleanupScreen(
     contentPadding: PaddingValues,
     onOpenSources: () -> Unit,
     onSubPageChange: (Boolean) -> Unit,
+    /** 从概览点了「回收站」：直接打开回收站（打开后调 [onRecycleBinOpened]） */
+    openRecycleBin: Boolean = false,
+    onRecycleBinOpened: () -> Unit = {},
     viewModel: CleanupViewModel = koinViewModel(),
 ) {
     val context = LocalContext.current
@@ -154,6 +166,16 @@ fun CleanupScreen(
             }
         }
     }
+    // 从概览直接进回收站：不播子页切换动画（清理页本身正在淡入）
+    val skipTransition = remember { OneShot() }
+    LaunchedEffect(openRecycleBin) {
+        if (!openRecycleBin) return@LaunchedEffect
+        if (page.kind != CleanupPage.BIN) {
+            skipTransition.armed = true
+            page = CleanupPage(CleanupPage.BIN)
+        }
+        onRecycleBinOpened()
+    }
     LaunchedEffect(page.kind) { onSubPageChange(page.kind != CleanupPage.MAIN) }
     DisposableEffect(Unit) { onDispose { onSubPageChange(false) } }
     val back = {
@@ -168,7 +190,9 @@ fun CleanupScreen(
         targetState = page,
         modifier = Modifier.fillMaxSize(),
         transitionSpec = {
-            if (targetState.depth < initialState.depth) {
+            if (skipTransition.take()) {
+                EnterTransition.None togetherWith ExitTransition.None
+            } else if (targetState.depth < initialState.depth) {
                 sharedAxisXPopEnter(slideSpec, fadeSpec) togetherWith sharedAxisXPopExit(slideSpec, fadeSpec)
             } else {
                 sharedAxisXEnter(slideSpec, fadeSpec) togetherWith sharedAxisXExit(slideSpec, fadeSpec)

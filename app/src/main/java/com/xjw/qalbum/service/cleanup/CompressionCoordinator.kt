@@ -6,6 +6,7 @@ import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.service.cleanup.OriginalCompressor.Prepared
 import com.xjw.qalbum.service.cleanup.OriginalCompressor.Preview
 import com.xjw.qalbum.service.cleanup.rules.CleanupRunner
+import com.xjw.qalbum.service.demo.DemoMode
 import com.xjw.qalbum.service.work.BackgroundTasks
 import com.xjw.qalbum.ui.common.formatBytes
 import kotlinx.coroutines.CoroutineScope
@@ -34,6 +35,8 @@ class CompressionCoordinator(
     private val settings: SettingsRepository,
     private val tasks: BackgroundTasks,
     private val appScope: CoroutineScope,
+    /** 演示模式下不压缩、不还原 */
+    private val demo: DemoMode? = null,
 ) {
     /** 对比页上的一张：压缩结果（或不能压缩的原因）与是否要应用 */
     data class Entry(val preview: Preview, val checked: Boolean) {
@@ -93,7 +96,7 @@ class CompressionCoordinator(
 
     /** 压缩这些图（只处理其中能压缩的） */
     fun start(ids: Collection<Long>) {
-        if (ids.isEmpty()) return
+        if (ids.isEmpty() || demo?.blocks() == true) return
         appScope.launch {
             if (_session.value != null) {
                 _messages.tryEmit("先处理完上一组压缩")
@@ -161,6 +164,7 @@ class CompressionCoordinator(
 
     /** 应用：勾选的替换原图，样张之外的在后台压缩 */
     fun apply() {
+        if (demo?.blocks() == true) return
         val review = synchronized(lock) {
             val current = _session.value as? Session.Review ?: return
             generation++
@@ -196,6 +200,7 @@ class CompressionCoordinator(
 
     /** 详情里的「还原原图」 */
     fun restoreOriginal(imageId: Long) {
+        if (demo?.blocks() == true) return
         appScope.launch {
             _messages.tryEmit(if (compressor.restore(imageId)) "已还原原图" else "还原失败：文件已变化或无法访问")
         }

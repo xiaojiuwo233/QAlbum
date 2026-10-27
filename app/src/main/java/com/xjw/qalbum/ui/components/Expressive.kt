@@ -234,7 +234,7 @@ fun SegmentedNavigationItem(
     )
 }
 
-/** 开关分段项：整行可点，尾部 M3 开关（选中时拇指带对勾） */
+/** 开关分段项：整行可点，尾部 M3 开关（选中时拇指带对勾）；[leading] 不为空时代替 [icon] */
 @Composable
 fun SegmentedSwitchItem(
     position: SegmentPosition,
@@ -246,6 +246,7 @@ fun SegmentedSwitchItem(
     subtitleColor: Color? = null,
     icon: ImageVector? = null,
     enabled: Boolean = true,
+    leading: (@Composable () -> Unit)? = null,
 ) {
     SegmentedListItem(
         position = position,
@@ -256,7 +257,7 @@ fun SegmentedSwitchItem(
         supporting = subtitle?.let {
             { Text(it, color = subtitleColor ?: MaterialTheme.colorScheme.onSurfaceVariant) }
         },
-        leading = icon?.let { { Icon(it, contentDescription = null) } },
+        leading = leading ?: icon?.let { { Icon(it, contentDescription = null) } },
         trailing = {
             Switch(
                 checked = checked,

@@ -9,6 +9,7 @@ import com.xjw.qalbum.data.db.dao.QqContent
 import com.xjw.qalbum.data.db.dao.QqScopeIds
 import com.xjw.qalbum.data.db.dao.QqScopeSql
 import com.xjw.qalbum.data.db.entity.ImageEntity
+import com.xjw.qalbum.domain.model.SourceSort
 import com.xjw.qalbum.qq.QqCachePaths
 import com.xjw.qalbum.service.cleanup.ArchiveManager
 import kotlinx.coroutines.runBlocking
@@ -48,6 +49,8 @@ class ArchiveDaoTest {
         status = if (sourceType == "chatthumb") "thumbnail_trash" else "active",
     )
 
+    private val newest = SourceSort.DATE_DESC.ordinal
+
     private fun status(id: Long): String = db.query("SELECT status FROM images WHERE id = $id", null).use { it.moveToFirst(); it.getString(0) }
     private fun archived(id: Long): Boolean = db.query("SELECT is_protected FROM images WHERE id = $id", null).use { it.moveToFirst(); it.getInt(0) == 1 }
 
@@ -74,14 +77,14 @@ class ArchiveDaoTest {
         assertEquals(1, dao.countActiveTimeline(stacked = true))
         assertEquals(emptyList<ImageEntity>(), dao.getLinkedCleanupEligible(listOf(imgId, rawId, thumbId)))
         // 归档页每张图一格：有原图的取原图，只有缩略图的也能看到
-        assertEquals(listOf(onlyThumbId, rawId), dao.archiveTimelineIds(hidden))
+        assertEquals(listOf(onlyThumbId, rawId), dao.archiveTimelineIds(hidden, newest))
 
         // 照常显示：恢复原状态，仍是归档（受保护），归档页照样列出
         dao.syncArchive(hidden = false)
         assertEquals(listOf("active", "active", "thumbnail_trash"), listOf(imgId, rawId, thumbId).map(::status))
         assertTrue(archived(imgId))
         assertEquals(2, dao.countActiveTimeline(stacked = true))
-        assertEquals(listOf(onlyThumbId, rawId), dao.archiveTimelineIds(shown))
+        assertEquals(listOf(onlyThumbId, rawId), dao.archiveTimelineIds(shown, newest))
         assertEquals(emptyList<ImageEntity>(), dao.getLinkedCleanupEligible(listOf(imgId)))
 
         // 之后才入库的高清缩略图跟随家族归档；再改回不显示
@@ -94,7 +97,7 @@ class ArchiveDaoTest {
         // 文件被 QQ 清掉 → missing；同样的文件回来 → 复活后由同步重新隐藏
         dao.markMissingByIds(listOf(imgId), scanStart = 5_000)
         assertEquals("missing", status(imgId))
-        assertEquals(listOf(onlyThumbId, rawId), dao.archiveTimelineIds(hidden))
+        assertEquals(listOf(onlyThumbId, rawId), dao.archiveTimelineIds(hidden, newest))
         dao.reviveByIds(listOf(imgId))
         assertEquals("active", status(imgId))
         dao.syncArchive(hidden = true)
@@ -109,8 +112,27 @@ class ArchiveDaoTest {
         dao.unarchive(listOf(imgId))
         listOf(imgId, rawId, thumbId, hdId).forEach { assertEquals(false, archived(it)) }
         assertEquals(listOf("active", "active", "thumbnail_trash", "thumbnail_trash"), listOf(imgId, rawId, thumbId, hdId).map(::status))
-        assertEquals(listOf(onlyThumbId), dao.archiveTimelineIds(hidden))
+        assertEquals(listOf(onlyThumbId), dao.archiveTimelineIds(hidden, newest))
         assertEquals(2, dao.countActiveTimeline(stacked = true))
+    }
+
+    @Test
+    fun archivePageSortsByDateOrSizeEitherWay() = runBlocking {
+        val dao = db.imageDao()
+        // 三张图：大小 300 / 2000 / 50，时间 3000 / 1000 / 2000
+        val ids = listOf("d" to (300L to 3_000L), "e" to (2_000L to 1_000L), "f" to (50L to 2_000L)).map { (md5, sizeTime) ->
+            val (img) = QqCachePaths.relativePaths(md5.repeat(32)).map { "$root/$it" }
+            dao.insert(image(img, "chatimg", sizeTime.first, mtime = sizeTime.second))
+        }
+        dao.archive(ids, hidden = true)
+        val (d, e, f) = ids
+        assertEquals(listOf(d, f, e), dao.archiveTimelineIds(hidden, SourceSort.DATE_DESC.ordinal))
+        assertEquals(listOf(e, f, d), dao.archiveTimelineIds(hidden, SourceSort.DATE_ASC.ordinal))
+        assertEquals(listOf(e, d, f), dao.archiveTimelineIds(hidden, SourceSort.SIZE_DESC.ordinal))
+        assertEquals(listOf(f, d, e), dao.archiveTimelineIds(hidden, SourceSort.SIZE_ASC.ordinal))
+        // 大小分组：300 B 与 50 B 都在「10 KB 以下」，2000 B 也是；点标题按区间全选
+        assertEquals(setOf(d, e, f), dao.archiveIdsBySize(hidden, 0, 10_240).toSet())
+        assertEquals(emptyList<Long>(), dao.archiveIdsBySize(hidden, 10_240, Long.MAX_VALUE))
     }
 
     @Test

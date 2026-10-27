@@ -29,6 +29,7 @@ import com.xjw.qalbum.service.cleanup.ArchiveManager
 import com.xjw.qalbum.service.cleanup.ExternalViewTarget
 import com.xjw.qalbum.service.cleanup.ImageFileManager
 import com.xjw.qalbum.service.cleanup.QuarantineManager
+import com.xjw.qalbum.service.demo.DemoMode
 import com.xjw.qalbum.ui.cleanup.PurgeProgress
 import com.xjw.qalbum.ui.common.formatCountExact
 import com.xjw.qalbum.ui.components.ScrollDirectory
@@ -108,6 +109,7 @@ class QqSourceBrowseViewModel(
     private val archive: ArchiveManager,
     private val appScope: CoroutineScope,
     private val tasks: BackgroundTasks,
+    private val demo: DemoMode,
 ) : ViewModel() {
     private val dao = repository.dao
 
@@ -137,10 +139,10 @@ class QqSourceBrowseViewModel(
     val exportSubdirs: StateFlow<List<String>> = settings.exportSubdirs
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    /** 当前分类；「全部」用汇总合成一个 */
+    /** 当前分类；「全部」用汇总合成一个（演示模式下名称换成虚构的） */
     val lookup: StateFlow<FacetLookup?> = when (target.kind) {
-        SourceKind.CONVERSATION -> dao.observeFacet(0, target.key).calmDuringBulkWrites()
-        SourceKind.SENDER -> dao.observeFacet(1, target.key).calmDuringBulkWrites()
+        SourceKind.CONVERSATION -> demo.facet(dao.observeFacet(0, target.key)).calmDuringBulkWrites()
+        SourceKind.SENDER -> demo.facet(dao.observeFacet(1, target.key)).calmDuringBulkWrites()
         SourceKind.ALL -> dao.observeSummary().calmDuringBulkWrites().map { summary ->
             QqSourceFacet(
                 id = 0, key = "all", name = "全部来源图片", alias = "",
@@ -176,8 +178,8 @@ class QqSourceBrowseViewModel(
         when {
             target.kind == SourceKind.ALL -> flowOf(emptyList())
             id == null -> flowOf(null)
-            target.kind == SourceKind.CONVERSATION -> dao.observeConversationMembers(id).calmDuringBulkWrites()
-            else -> dao.observeSenderConversations(id).calmDuringBulkWrites()
+            target.kind == SourceKind.CONVERSATION -> demo.facets(dao.observeConversationMembers(id)).calmDuringBulkWrites()
+            else -> demo.facets(dao.observeSenderConversations(id)).calmDuringBulkWrites()
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
@@ -306,12 +308,13 @@ class QqSourceBrowseViewModel(
     }
 
     fun share(id: Long, onReady: (ExternalViewTarget) -> Unit) {
+        if (demo.blocks()) return
         viewModelScope.launch { imageFiles.prepareShare(id)?.let(onReady) }
     }
 
     /** 归档 / 取消归档（连同同一张图的其他版本）；[onDone] 回调归档后它们是否还在这里显示 */
     fun setArchived(ids: Collection<Long>, archived: Boolean, onDone: (visible: Boolean) -> Unit = {}) {
-        if (ids.isEmpty()) return
+        if (ids.isEmpty() || demo.blocks()) return
         viewModelScope.launch {
             if (archived) archive.archive(ids) else archive.unarchive(ids)
             onDone(!archived || settings.archiveVisible.first())
@@ -324,7 +327,7 @@ class QqSourceBrowseViewModel(
 
     /** [notify] = false 时不发页面消息（看图页自己用 Toast 反馈，避免被预览窗口挡住） */
     fun moveToTrash(ids: Collection<Long>, notify: Boolean = true, options: PictureDeleteOptions = PictureDeleteOptions(), onDone: (Int) -> Unit = {}) {
-        if (ids.isEmpty()) return
+        if (ids.isEmpty() || demo.blocks()) return
         appScope.launch {
             val result = withDeleteProgress("正在移入回收站…") { progress ->
                 quarantine.quarantinePictures(ids, options, "按 QQ 来源手动删除", scope.value, onProgress = progress)
@@ -335,7 +338,7 @@ class QqSourceBrowseViewModel(
     }
 
     fun deletePermanently(ids: Collection<Long>, notify: Boolean = true, options: PictureDeleteOptions = PictureDeleteOptions(), onDone: (Int) -> Unit = {}) {
-        if (ids.isEmpty()) return
+        if (ids.isEmpty() || demo.blocks()) return
         appScope.launch {
             val result = withDeleteProgress("正在永久删除…") { progress ->
                 quarantine.deletePicturesPermanently(ids, options, scope.value, onProgress = progress)
@@ -362,7 +365,7 @@ class QqSourceBrowseViewModel(
 
     /** 保存到 Pictures/QAlbum[/子目录]；[alsoTrash] 只对保存成功的原图移入回收站 */
     fun save(ids: Collection<Long>, subdir: String?, alsoTrash: Boolean, onDone: (saved: Int) -> Unit = {}) {
-        if (ids.isEmpty()) return
+        if (ids.isEmpty() || demo.blocks()) return
         appScope.launch {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q && !imageFiles.canExportPreQ()) {
                 _message.value = "保存失败：请在系统设置中授予存储权限"
@@ -427,7 +430,7 @@ class QqSourceBrowseViewModel(
 
     fun confirmScopeTrash() {
         val request = confirmation.value ?: return
-        if (request.counts == null) return
+        if (request.counts == null || demo.blocks()) return
         confirmation.value = null
         repository.trash(request.scope, request.includeShared, request.linkedVersions, request.contents, request.before)
     }
@@ -478,7 +481,7 @@ class QqSourceBrowseViewModel(
     /** [label] 为名单里显示的名称（如「群名 · 成员」） */
     fun confirmScopeArchive(label: String) {
         val request = archiveRequest.value ?: return
-        if (request.counts == null) return
+        if (request.counts == null || demo.blocks()) return
         archiveRequest.value = null
         val current = scope.value
         appScope.launch {

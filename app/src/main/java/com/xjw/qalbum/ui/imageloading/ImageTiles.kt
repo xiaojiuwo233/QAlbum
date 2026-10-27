@@ -14,6 +14,7 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import coil3.ImageLoader
+import com.xjw.qalbum.service.demo.DemoMode
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -22,25 +23,33 @@ import java.io.Closeable
 import java.io.File
 
 /**
- * 一张图的分块解码器：按需从原图解出一块（[decode]）。看图放大到整图看不清时用，见 ZoomableImage。
- * 解码串行进行（同一个解码器不能并发解）；用完 [close]。
+ * 一张图的分块来源：按需解出一块（[decode]）。看图放大到整图看不清时用，见 ZoomableImage。用完 [close]。
  */
-class ImageTileSource internal constructor(
-    private val decoder: BitmapRegionDecoder,
-    private val file: ParcelFileDescriptor,
+interface ImageTileSource : Closeable {
     /** 原始像素的宽高（没按方向转正） */
-    val rawSize: IntSize,
+    val rawSize: IntSize
+
     /** 文件里记的 EXIF 方向；整图解码套用了它时分块也要套用 */
-    val exifOrientation: Int,
-) : Closeable {
-    private val lock = Any()
-    private var closed = false
+    val exifOrientation: Int
 
     /**
      * 解出转正后图上的 [rect]（按 [orientation] 转正），每 [sample] 个原图像素取一个。
      * 已经关掉、或解码失败时返回 null。
      */
-    fun decode(rect: IntRect, sample: Int, orientation: Int): Bitmap? {
+    fun decode(rect: IntRect, sample: Int, orientation: Int): Bitmap?
+}
+
+/** 从文件分块解码（解码串行进行，同一个解码器不能并发解） */
+private class RegionTileSource(
+    private val decoder: BitmapRegionDecoder,
+    private val file: ParcelFileDescriptor,
+    override val rawSize: IntSize,
+    override val exifOrientation: Int,
+) : ImageTileSource {
+    private val lock = Any()
+    private var closed = false
+
+    override fun decode(rect: IntRect, sample: Int, orientation: Int): Bitmap? {
         val raw = TileMath.toRaw(rect, orientation, rawSize.width, rawSize.height)
         val options = BitmapFactory.Options().apply {
             inSampleSize = sample
@@ -85,8 +94,11 @@ class ImageTileSource internal constructor(
 class ImageTileSources internal constructor(
     private val imageLoader: ImageLoader,
     private val fastPath: FdFastPath,
+    private val demo: DemoMode,
 ) {
     suspend fun open(model: Any?): ImageTileSource? = withContext(Dispatchers.IO) {
+        // 演示模式：示意图按原图尺寸分块画出来，放大看也清楚
+        if (demo.current()) return@withContext demoSource(model)
         try {
             val file = when (model) {
                 is ImageEntityModel -> {
@@ -106,6 +118,14 @@ class ImageTileSources internal constructor(
             Timber.w(t, "分块解码打不开")
             null
         }
+    }
+
+    private fun demoSource(model: Any?): ImageTileSource? = when (model) {
+        is ImageEntityModel -> model.entity.takeIf { it.width > 0 && it.height > 0 }
+            ?.let { DemoTileSource(it.demoSeed, IntSize(it.width, it.height)) }
+        is FileAccessPath -> model.takeIf { it.width > 0 && it.height > 0 }
+            ?.let { DemoTileSource(it.seed, IntSize(it.width, it.height)) }
+        else -> null
     }
 
     /** 磁盘缓存里的那份：打开后就算缓存被清掉，已经打开的文件照样能读 */
@@ -138,7 +158,7 @@ class ImageTileSources internal constructor(
                 file.close()
                 return null
             }
-            return ImageTileSource(decoder, file, IntSize(decoder.width, decoder.height), orientation)
+            return RegionTileSource(decoder, file, IntSize(decoder.width, decoder.height), orientation)
         } catch (t: Throwable) {
             runCatching { file.close() }
             throw t
@@ -153,3 +173,13 @@ class ImageTileSources internal constructor(
 
 /** 看图页用来打开分块解码器（没有提供时只显示整图，如界面测试） */
 val LocalImageTileSources = staticCompositionLocalOf<ImageTileSources?> { null }
+
+/** 演示模式的示意图（[DemoImages]）按原图尺寸 [rawSize] 画出其中一块 */
+private class DemoTileSource(private val seed: Long, override val rawSize: IntSize) : ImageTileSource {
+    override val exifOrientation: Int = ExifInterface.ORIENTATION_NORMAL
+
+    override fun decode(rect: IntRect, sample: Int, orientation: Int): Bitmap =
+        DemoImages.renderRegion(seed, rawSize.width, rawSize.height, rect, sample)
+
+    override fun close() = Unit
+}

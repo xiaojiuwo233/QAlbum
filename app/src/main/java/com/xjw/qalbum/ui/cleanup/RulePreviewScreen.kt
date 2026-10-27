@@ -271,8 +271,7 @@ fun RulePreviewScreen(
             onDismiss = { confirmTrash = false },
             onConfirm = {
                 confirmTrash = false
-                viewModel.trash(selected)
-                clearSelection()
+                if (viewModel.trash(selected)) clearSelection()
             },
         )
     }
@@ -292,8 +291,7 @@ fun RulePreviewScreen(
                         icon = Icons.Outlined.Archive,
                         label = "归档",
                         onClick = {
-                            viewModel.archive(listOf(image.id))
-                            preview = preview?.without(image.id)
+                            if (viewModel.archive(listOf(image.id))) preview = preview?.without(image.id)
                         },
                     )
                     if (rule.compressible) {
@@ -308,8 +306,7 @@ fun RulePreviewScreen(
                         onDismiss = { pendingTrash = null },
                         onConfirm = {
                             pendingTrash = null
-                            viewModel.trash(listOf(target.id))
-                            preview = preview?.without(target.id)
+                            if (viewModel.trash(listOf(target.id))) preview = preview?.without(target.id)
                         },
                     )
                 }

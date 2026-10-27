@@ -108,6 +108,8 @@ fun AppNavigation() {
     val currentDestination = NavDestination.fromRoute(currentRoute)
     // 规则预览 / 按时间 / 回收站是清理页内部子页；图库多选时底部换成浮动操作栏 —— 两种情况都隐藏底栏
     var cleanupSubPage by remember { mutableStateOf(false) }
+    // 概览点「回收站」：切到清理页并直接打开回收站
+    var openRecycleBin by remember { mutableStateOf(false) }
     var gallerySelecting by remember { mutableStateOf(false) }
     val showBottomBar = currentRoute in bottomBarRoutes &&
         !(currentRoute == NavDestination.Cleanup.route && cleanupSubPage) &&
@@ -191,6 +193,14 @@ fun AppNavigation() {
                         onOpenAccessSettings = { navController.navigate(SettingsCategory.ACCESS.route) },
                         onOpenGuide = { navController.navigate(ONBOARDING_ROUTE) },
                         onOpenSources = { navController.navigate(QQ_SOURCES_ROUTE) },
+                        onOpenRecycleBin = {
+                            openRecycleBin = true
+                            navController.navigate(NavDestination.Cleanup.route) {
+                                popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+                                launchSingleTop = true
+                                restoreState = true
+                            }
+                        },
                     )
                 }
                 page(NavDestination.Gallery.route) {
@@ -245,6 +255,8 @@ fun AppNavigation() {
                         contentPadding = contentPadding,
                         onOpenSources = { navController.navigate(QQ_SOURCES_ROUTE) },
                         onSubPageChange = { cleanupSubPage = it },
+                        openRecycleBin = openRecycleBin,
+                        onRecycleBinOpened = { openRecycleBin = false },
                     )
                 }
                 page(NavDestination.Settings.route) {

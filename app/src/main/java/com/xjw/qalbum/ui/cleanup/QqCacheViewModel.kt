@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.xjw.qalbum.domain.model.AccessMode
 import com.xjw.qalbum.qq.QqCacheTargets
 import com.xjw.qalbum.service.cleanup.QqCacheCleaner
+import com.xjw.qalbum.service.demo.DemoMode
 import com.xjw.qalbum.service.work.BackgroundTasks
 import com.xjw.qalbum.ui.common.formatBytes
 import kotlinx.coroutines.CancellationException
@@ -28,6 +29,7 @@ class QqCacheViewModel(
     private val cleaner: QqCacheCleaner,
     private val tasks: BackgroundTasks,
     private val appScope: CoroutineScope,
+    private val demo: DemoMode,
 ) : ViewModel() {
 
     data class Ui(
@@ -129,7 +131,7 @@ class QqCacheViewModel(
     fun clear(paths: List<String>) {
         if (paths.isEmpty()) return
         val label = "清理 QQ 缓存"
-        appScope.launchCleanupOp(label) {
+        appScope.launchCleanupOp(label, demo) {
             CleanupOpState.purgeProgress.value = PurgeProgress(0, paths.size, "正在清理 QQ 缓存…")
             val report = try {
                 tasks.track(label, cancellable = false) { handle ->

@@ -773,9 +773,16 @@ interface ImageDao {
         WHERE i.is_protected = 1 AND i.status IN (:statuses)
           AND (i.variant_group IS NULL OR i.id = (SELECT f.id FROM images f WHERE f.variant_group = i.variant_group
               AND f.is_protected = 1 AND f.status IN (:statuses) ORDER BY f.source_type = 'chatthumb', f.size DESC, f.id LIMIT 1))
-        ORDER BY i.mtime DESC, i.id DESC
+        ORDER BY
+          CASE WHEN :sort = 0 THEN i.mtime END DESC,
+          CASE WHEN :sort = 1 THEN i.mtime END ASC,
+          CASE WHEN :sort = 2 THEN i.size END DESC,
+          CASE WHEN :sort = 3 THEN i.size END ASC,
+          CASE WHEN :sort IN (0, 2) THEN i.id END DESC,
+          CASE WHEN :sort IN (1, 3) THEN i.id END ASC
     """)
-    fun pagingArchiveTimeline(statuses: List<String>): PagingSource<Int, ImageEntity>
+    /** 归档页：每张图只取一个版本；[sort] 是 SourceSort 的序号（0 新到旧、1 旧到新、2 大到小、3 小到大） */
+    fun pagingArchiveTimeline(statuses: List<String>, sort: Int): PagingSource<Int, ImageEntity>
 
     @Query("""
         SELECT COUNT(*) FROM images i
@@ -812,15 +819,49 @@ interface ImageDao {
     """)
     suspend fun archiveIdsBetween(statuses: List<String>, from: Long, until: Long): List<Long>
 
-    /** 归档页看图的左右滑动顺序（归档的图规模小，全量取 id） */
+    /** 归档页看图的左右滑动顺序（归档的图规模小，全量取 id；[sort] 同 [pagingArchiveTimeline]） */
     @Query("""
         SELECT i.id FROM images i
         WHERE i.is_protected = 1 AND i.status IN (:statuses)
           AND (i.variant_group IS NULL OR i.id = (SELECT f.id FROM images f WHERE f.variant_group = i.variant_group
               AND f.is_protected = 1 AND f.status IN (:statuses) ORDER BY f.source_type = 'chatthumb', f.size DESC, f.id LIMIT 1))
-        ORDER BY i.mtime DESC, i.id DESC
+        ORDER BY
+          CASE WHEN :sort = 0 THEN i.mtime END DESC,
+          CASE WHEN :sort = 1 THEN i.mtime END ASC,
+          CASE WHEN :sort = 2 THEN i.size END DESC,
+          CASE WHEN :sort = 3 THEN i.size END ASC,
+          CASE WHEN :sort IN (0, 2) THEN i.id END DESC,
+          CASE WHEN :sort IN (1, 3) THEN i.id END ASC
     """)
-    suspend fun archiveTimelineIds(statuses: List<String>): List<Long>
+    suspend fun archiveTimelineIds(statuses: List<String>, sort: Int): List<Long>
+
+    /** 归档页按大小排列时的分组计数（分组同 [observeTimelineSizeBucketCounts]） */
+    @Query("""
+        SELECT
+            CASE
+                WHEN i.size >= 10485760 THEN 100000
+                WHEN i.size >= 1048576 THEN 10000 + (i.size / 1048576)
+                WHEN i.size >= 102400 THEN 1000 + (i.size / 102400)
+                WHEN i.size >= 10240 THEN 100 + (i.size / 10240)
+                ELSE 0
+            END AS bucketKey,
+            COUNT(*) AS count
+        FROM images i
+        WHERE i.is_protected = 1 AND i.status IN (:statuses)
+          AND (i.variant_group IS NULL OR i.id = (SELECT f.id FROM images f WHERE f.variant_group = i.variant_group
+              AND f.is_protected = 1 AND f.status IN (:statuses) ORDER BY f.source_type = 'chatthumb', f.size DESC, f.id LIMIT 1))
+        GROUP BY bucketKey
+    """)
+    fun observeArchiveSizeBucketCounts(statuses: List<String>): Flow<List<BucketCountRow>>
+
+    /** 归档页某个大小区间 [low, high) 的全部图片（点大小标题全选） */
+    @Query("""
+        SELECT i.id FROM images i
+        WHERE i.is_protected = 1 AND i.status IN (:statuses) AND i.size >= :low AND i.size < :high
+          AND (i.variant_group IS NULL OR i.id = (SELECT f.id FROM images f WHERE f.variant_group = i.variant_group
+              AND f.is_protected = 1 AND f.status IN (:statuses) ORDER BY f.source_type = 'chatthumb', f.size DESC, f.id LIMIT 1))
+    """)
+    suspend fun archiveIdsBySize(statuses: List<String>, low: Long, high: Long): List<Long>
 
     @Query("""
         SELECT * FROM images

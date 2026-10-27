@@ -21,6 +21,7 @@ import com.xjw.qalbum.data.repository.ImageRepository
 import com.xjw.qalbum.domain.model.SourceSort
 import com.xjw.qalbum.domain.model.TimelineSection
 import com.xjw.qalbum.service.cleanup.ArchiveManager
+import com.xjw.qalbum.service.demo.DemoMode
 import com.xjw.qalbum.service.cleanup.OriginalCompressor
 import com.xjw.qalbum.service.cleanup.QuarantineManager
 import com.xjw.qalbum.service.work.BackgroundTasks
@@ -32,6 +33,7 @@ import com.xjw.qalbum.ui.gallery.withDayHeaders
 import com.xjw.qalbum.ui.gallery.withSizeBuckets
 import com.xjw.qalbum.ui.imageloading.FileAccessPath
 import com.xjw.qalbum.ui.imageloading.ImageEntityModel
+import com.xjw.qalbum.ui.imageloading.demoSeed
 import com.xjw.qalbum.data.paging.calmDuringBulkWrites
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -51,7 +53,6 @@ import kotlinx.coroutines.flow.shareIn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.ceil
 
@@ -76,6 +77,7 @@ class RecycleBinViewModel(
     private val tasks: BackgroundTasks,
     private val appScope: CoroutineScope,
     private val statsCache: StatsCache,
+    private val demo: DemoMode,
 ) : ViewModel() {
     private val dao = db.cleanupDao()
 
@@ -195,12 +197,13 @@ class RecycleBinViewModel(
 
     /** 格子：回收站里的图显示移入时生成的缩略图（没有时读回收站里的文件），压缩前的原图显示压缩后的图片 */
     fun tileModel(photo: GalleryTimelineItem.Photo): Any = when (val tag = photo.tag) {
-        is TrashUnit -> tag.thumbnail?.let(::File) ?: FileAccessPath(tag.file)
+        is TrashUnit -> FileAccessPath(tag.thumbnail ?: tag.file, tag.image.demoSeed, tag.image.width, tag.image.height)
         else -> ImageEntityModel(photo.image, tile = true)
     }
 
     /** 看图读哪个文件：回收站里的图读回收站里的文件，其余（压缩前的原图）看图片本身 */
-    fun viewerModel(image: ImageEntity, unit: TrashUnit?): Any = unit?.let { FileAccessPath(it.file) } ?: ImageEntityModel(image)
+    fun viewerModel(image: ImageEntity, unit: TrashUnit?): Any =
+        unit?.let { FileAccessPath(it.file, image.demoSeed, image.width, image.height) } ?: ImageEntityModel(image)
 
     /** 看图时取到的某个版本的回收站记录 */
     fun member(imageId: Long): TrashUnit? = members[imageId]
@@ -226,10 +229,10 @@ class RecycleBinViewModel(
     }
 
     /** 恢复选中的图（整组恢复）；[thenArchive] 恢复后再归档，之后不会被清理 */
-    fun restore(imageIds: Collection<Long>, thenArchive: Boolean, onDone: () -> Unit = {}) {
-        if (imageIds.isEmpty()) return
+    fun restore(imageIds: Collection<Long>, thenArchive: Boolean, onDone: () -> Unit = {}): Boolean {
+        if (imageIds.isEmpty()) return false
         val label = if (thenArchive) "恢复并归档" else "恢复"
-        appScope.launchCleanupOp(label) {
+        return appScope.launchCleanupOp(label, demo) {
             quarantine.fileAccessError()?.let { error ->
                 CleanupOpState.message.value = error
                 return@launchCleanupOp
@@ -250,7 +253,7 @@ class RecycleBinViewModel(
     fun keepExisting(conflict: RestoreConflict) {
         _conflict.value = null
         val label = if (conflict.thenArchive) "恢复并归档" else "恢复"
-        appScope.launchCleanupOp(label) {
+        appScope.launchCleanupOp(label, demo) {
             val report = restoreGroups("正在$label…", conflict.quarantineIds, keepExisting = true, conflict.thenArchive)
             val failed = conflict.quarantineIds.size - report.groups.size
             CleanupOpState.message.value = listOfNotNull(
@@ -278,9 +281,9 @@ class RecycleBinViewModel(
     }
 
     /** 永久删除选中的图（整组） */
-    fun purge(imageIds: Collection<Long>, onDone: () -> Unit = {}) {
-        if (imageIds.isEmpty()) return
-        appScope.launchCleanupOp("永久删除") {
+    fun purge(imageIds: Collection<Long>, onDone: () -> Unit = {}): Boolean {
+        if (imageIds.isEmpty()) return false
+        return appScope.launchCleanupOp("永久删除", demo) {
             val records = records(imageIds)
             var purged = 0
             progress("正在永久删除…", records.size) { report ->
@@ -301,7 +304,7 @@ class RecycleBinViewModel(
 
     /** 清空回收站 */
     fun purgeAll() {
-        appScope.launchCleanupOp("清空回收站") {
+        appScope.launchCleanupOp("清空回收站", demo) {
             val total = dao.countQuarantine()
             var purged = 0
             progress("正在清空回收站…", total) { report ->
@@ -323,9 +326,9 @@ class RecycleBinViewModel(
     }
 
     /** 还原压缩前的原图（换回压缩前的文件） */
-    fun restoreOriginals(imageIds: Collection<Long>, onDone: () -> Unit = {}) {
-        if (imageIds.isEmpty()) return
-        appScope.launchCleanupOp("还原原图") {
+    fun restoreOriginals(imageIds: Collection<Long>, onDone: () -> Unit = {}): Boolean {
+        if (imageIds.isEmpty()) return false
+        return appScope.launchCleanupOp("还原原图", demo) {
             val ids = imageIds.toList()
             var restored = 0
             progress("正在还原原图…", ids.size) { report ->
@@ -343,9 +346,9 @@ class RecycleBinViewModel(
     }
 
     /** 删除压缩前的原图（压缩后的图片保留） */
-    fun deleteOriginals(imageIds: Collection<Long>, onDone: () -> Unit = {}) {
-        if (imageIds.isEmpty()) return
-        appScope.launchCleanupOp("删除原图") {
+    fun deleteOriginals(imageIds: Collection<Long>, onDone: () -> Unit = {}): Boolean {
+        if (imageIds.isEmpty()) return false
+        return appScope.launchCleanupOp("删除原图", demo) {
             val ids = imageIds.toList()
             var deleted = 0
             progress("正在删除原图…", ids.size) { report ->
@@ -364,7 +367,7 @@ class RecycleBinViewModel(
     }
 
     fun deleteAllOriginals() {
-        appScope.launchCleanupOp("删除全部原图") {
+        appScope.launchCleanupOp("删除全部原图", demo) {
             val total = originalStats.value.count
             val deleted = progress("正在删除原图…", total) { report ->
                 refreshGate.hold { compressor.purgeAll { done -> report(done.coerceAtMost(total), total) } }
