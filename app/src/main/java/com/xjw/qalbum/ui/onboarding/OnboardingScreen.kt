@@ -1,5 +1,8 @@
 package com.xjw.qalbum.ui.onboarding
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.LinearEasing
@@ -30,6 +33,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
@@ -37,6 +41,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CleaningServices
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.FolderOpen
+import androidx.compose.material.icons.outlined.Gavel
 import androidx.compose.material.icons.outlined.Key
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.RestoreFromTrash
@@ -58,17 +63,21 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.domain.model.AccessMode
+import com.xjw.qalbum.ui.common.openUrl
 import com.xjw.qalbum.ui.components.SegmentedGroup
 import com.xjw.qalbum.ui.components.SegmentedListItem
 import com.xjw.qalbum.ui.components.ShapeIcon
@@ -78,11 +87,13 @@ import com.xjw.qalbum.ui.settings.SHIZUKU_SITE
 import com.xjw.qalbum.ui.settings.SettingsViewModel
 import com.xjw.qalbum.ui.settings.accessStatusItems
 import com.xjw.qalbum.ui.settings.openShizuku
-import com.xjw.qalbum.ui.settings.openUrl
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import org.koin.androidx.compose.koinViewModel
 
 /**
- * 首次打开的引导：认识 QAlbum → 选访问方式并授权 → 确认图片目录、开始扫描。随时可以跳过，之后在「设置 → 关于」里能再看。
+ * 首次打开的引导：认识 QAlbum → 用户协议与免责声明（看满 10 秒才能同意）→ 选访问方式并授权 → 确认图片目录、开始扫描。
+ * 不能跳过；之后在「设置 → 关于」里能再看。
  */
 @Composable
 fun OnboardingScreen(
@@ -90,6 +101,9 @@ fun OnboardingScreen(
     viewModel: SettingsViewModel = koinViewModel(),
 ) {
     var page by rememberSaveable { mutableIntStateOf(0) }
+    // 协议页还要等几秒、有没有拉到底：放在这里，翻回上一页再回来不重新计时
+    var agreementWait by rememberSaveable { mutableIntStateOf(AGREEMENT_WAIT_SECONDS) }
+    var agreementRead by rememberSaveable { mutableStateOf(false) }
     val finish: (scan: Boolean) -> Unit = { scan ->
         if (scan) viewModel.startFullScan()
         viewModel.finishOnboarding()
@@ -104,15 +118,13 @@ fun OnboardingScreen(
                 .statusBarsPadding()
                 .navigationBarsPadding(),
         ) {
-            Row(
-                Modifier
+            PageDots(
+                count = PAGES,
+                current = page,
+                modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 24.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                PageDots(count = PAGES, current = page, modifier = Modifier.weight(1f))
-                TextButton(onClick = { finish(false) }) { Text("跳过") }
-            }
+                    .padding(horizontal = 24.dp, vertical = 24.dp),
+            )
             AnimatedContent(
                 targetState = page,
                 transitionSpec = {
@@ -125,15 +137,25 @@ fun OnboardingScreen(
             ) { current ->
                 when (current) {
                     0 -> WelcomePage(onNext = { page = 1 })
-                    1 -> AccessPage(viewModel, onBack = { page = 0 }, onNext = { page = 2 })
-                    else -> ScanPage(viewModel, onBack = { page = 1 }, onFinish = finish)
+                    1 -> AgreementPage(
+                        remaining = agreementWait,
+                        read = agreementRead,
+                        onTick = { agreementWait = (agreementWait - 1).coerceAtLeast(0) },
+                        onReadToEnd = { agreementRead = true },
+                        onAgree = { page = 2 },
+                    )
+                    2 -> AccessPage(viewModel, onBack = { page = 1 }, onNext = { page = 3 })
+                    else -> ScanPage(viewModel, onBack = { page = 2 }, onFinish = finish)
                 }
             }
         }
     }
 }
 
-private const val PAGES = 3
+private const val PAGES = 4
+
+/** 协议页至少要看这么久才能同意 */
+private const val AGREEMENT_WAIT_SECONDS = 10
 
 /** 页码：当前页是拉长的胶囊 */
 @Composable
@@ -156,13 +178,14 @@ private fun PageDots(count: Int, current: Int, modifier: Modifier = Modifier) {
 @Composable
 private fun PageFrame(
     buttons: @Composable () -> Unit,
+    scroll: ScrollState = rememberScrollState(),
     content: @Composable ColumnScope.() -> Unit,
 ) {
     Column(Modifier.fillMaxSize()) {
         Column(
             Modifier
                 .weight(1f)
-                .verticalScroll(rememberScrollState())
+                .verticalScroll(scroll)
                 .padding(horizontal = 24.dp),
             content = content,
         )
@@ -196,7 +219,7 @@ private fun WelcomePage(onNext: () -> Unit) {
         )
         Spacer(Modifier.height(8.dp))
         Text(
-            "整理和清理 QQ 聊天里的图片",
+            "像系统相册一样清理与查看 QQ 图片缓存",
             style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
@@ -238,6 +261,68 @@ private fun Feature(icon: ImageVector, title: String, text: String) {
             Text(text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
+}
+
+/** 用户协议与免责声明：倒数 [remaining] 秒、并且拉到底看完（[read]）才能同意；不同意就退出 */
+@Composable
+private fun AgreementPage(remaining: Int, read: Boolean, onTick: () -> Unit, onReadToEnd: () -> Unit, onAgree: () -> Unit) {
+    val context = LocalContext.current
+    val scroll = rememberScrollState()
+    LaunchedEffect(remaining) {
+        if (remaining > 0) {
+            delay(1_000)
+            onTick()
+        }
+    }
+    // 拉到离底部不到 24dp（或者一屏就放得下）算看完；量出高度之前 maxValue 是 Int.MAX_VALUE
+    val slop = with(LocalDensity.current) { 24.dp.toPx() }
+    LaunchedEffect(scroll, read) {
+        if (read) return@LaunchedEffect
+        snapshotFlow { scroll.maxValue != Int.MAX_VALUE && scroll.value >= scroll.maxValue - slop }.first { it }
+        onReadToEnd()
+    }
+    PageFrame(scroll = scroll, buttons = {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            TextButton(onClick = { context.findActivity()?.finishAffinity() }) { Text("不同意") }
+            Spacer(Modifier.weight(1f))
+            Button(onClick = onAgree, enabled = remaining == 0 && read, shapes = ButtonDefaults.shapes()) {
+                // 最长的两种文字垫在下面：换文字时按钮宽度不变
+                Box(contentAlignment = Alignment.Center) {
+                    Text("同意并继续（10 秒）", modifier = Modifier.alpha(0f))
+                    Text("请完整阅读后继续", modifier = Modifier.alpha(0f))
+                    Text(
+                        when {
+                            remaining > 0 -> "同意并继续（$remaining 秒）"
+                            !read -> "请完整阅读后继续"
+                            else -> "同意并继续"
+                        },
+                    )
+                }
+            }
+        }
+    }) {
+        Spacer(Modifier.height(8.dp))
+        ShapeIcon(
+            Icons.Outlined.Gavel,
+            containerColor = MaterialTheme.colorScheme.errorContainer,
+            contentColor = MaterialTheme.colorScheme.onErrorContainer,
+            shape = MaterialShapes.Cookie9Sided.toShape(),
+            size = 64.dp,
+            iconSize = 30.dp,
+        )
+        Spacer(Modifier.height(20.dp))
+        PageTitle("用户协议与免责声明", "使用前请仔细阅读。删除的文件无法恢复，请先备份重要数据。")
+        Surface(color = MaterialTheme.colorScheme.surfaceContainer, shape = MaterialTheme.shapes.large) {
+            AgreementText(Modifier.padding(20.dp))
+        }
+        Spacer(Modifier.height(8.dp))
+    }
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }
 
 @Composable
@@ -285,7 +370,7 @@ private fun AccessPage(viewModel: SettingsViewModel, onBack: () -> Unit, onNext:
                     position = position,
                     selected = mode == AccessMode.ROOT,
                     title = "Root",
-                    subtitle = "还能读取聊天记录，按群聊和发送人整理图片",
+                    subtitle = "之后可在设置里开启高级功能，按聊天整理图片",
                     onClick = { viewModel.setAccessMode(AccessMode.ROOT) },
                 )
             }

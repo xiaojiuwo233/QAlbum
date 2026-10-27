@@ -103,6 +103,7 @@ fun SettingsScreen(
 ) {
     val access by viewModel.access.collectAsState()
     val mode by viewModel.accessMode.collectAsState()
+    val advanced by viewModel.advancedFeatures.collectAsState()
     val path by viewModel.chatpicPath.collectAsState()
     val retention by viewModel.quarantineRetentionDays.collectAsState()
     val scheduled by viewModel.scheduledCleanup.collectAsState()
@@ -137,6 +138,7 @@ fun SettingsScreen(
             StaggeredEntrance(0) {
                 AccessStatusCard(
                     mode = mode,
+                    advanced = advanced,
                     access = access?.takeIf { it.mode == mode },
                     onClick = { onOpenCategory(SettingsCategory.ACCESS) },
                     sharedScope = sharedScope,
@@ -209,6 +211,7 @@ private fun SettingsEntryItem(
 @Composable
 private fun AccessStatusCard(
     mode: AccessMode,
+    advanced: Boolean,
     access: AccessState?,
     onClick: () -> Unit,
     sharedScope: SharedTransitionScope?,
@@ -246,7 +249,7 @@ private fun AccessStatusCard(
             Spacer(Modifier.width(16.dp))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(
-                    "文件访问 · " + if (mode == AccessMode.ROOT) "Root" else "Shizuku",
+                    "文件访问 · " + (if (mode == AccessMode.ROOT) "Root" else "Shizuku") + if (advanced) " · 高级功能" else "",
                     style = MaterialTheme.typography.labelLarge,
                     color = content.copy(alpha = 0.8f),
                 )

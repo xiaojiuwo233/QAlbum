@@ -105,6 +105,21 @@ class SettingsViewModel(
         checkAccess(mode)
     }
 
+    /** 高级功能（读取并解密 QQ 数据库），只能在这里的 Root 方式下开启 */
+    val advancedFeatures: StateFlow<Boolean> = settings.advancedFeatures.state(false)
+
+    /** 第一次开启时看过风险提示（null = 还没读出来） */
+    val advancedRiskAcknowledged: StateFlow<Boolean?> = settings.advancedRiskAcknowledged.state(null)
+
+    fun setAdvancedFeatures(enabled: Boolean) {
+        persist { settings.setAdvancedFeatures(enabled) }
+    }
+
+    /** 风险提示里点了开启 */
+    fun enableAdvancedFeatures() {
+        persist { settings.enableAdvancedFeatures() }
+    }
+
     fun requestShizuku() {
         requestShizukuPermission()
     }

@@ -373,6 +373,25 @@ class SettingsRepository(
         ds.edit { it[Keys.DETAIL_SHARED_TRANSITION] = enabled }
     }
 
+    // ---- 高级功能（读取并解密 QQ 数据库：聊天来源等，见 ChatFeatures）：只能在「设置 → 文件访问」的 Root 方式下开启 ----
+
+    val advancedFeatures: Flow<Boolean> = prefsData.map { it[Keys.ADVANCED_FEATURES] ?: false }
+
+    suspend fun setAdvancedFeatures(enabled: Boolean) {
+        ds.edit { it[Keys.ADVANCED_FEATURES] = enabled }
+    }
+
+    /** 第一次开启时看过风险提示（之后再开不再提示） */
+    val advancedRiskAcknowledged: Flow<Boolean> = prefsData.map { it[Keys.ADVANCED_RISK_ACK] ?: false }
+
+    /** 看完风险提示后开启 */
+    suspend fun enableAdvancedFeatures() {
+        ds.edit {
+            it[Keys.ADVANCED_RISK_ACK] = true
+            it[Keys.ADVANCED_FEATURES] = true
+        }
+    }
+
     // ---- 演示模式（截图用，见 DemoMode）----
 
     val demoMode: Flow<Boolean> = prefsData.map { it[Keys.DEMO_MODE] ?: false }
@@ -483,6 +502,8 @@ class SettingsRepository(
         val NOTIFICATION_ASKED = booleanPreferencesKey("notification_permission_asked")
         val DETAIL_SHARED_TRANSITION = booleanPreferencesKey("detail_shared_transition")
         val DEMO_MODE = booleanPreferencesKey("demo_mode")
+        val ADVANCED_FEATURES = booleanPreferencesKey("advanced_features")
+        val ADVANCED_RISK_ACK = booleanPreferencesKey("advanced_risk_ack")
         val EXPORT_SUBDIRS = stringPreferencesKey("export_subdirs")
     }
 }

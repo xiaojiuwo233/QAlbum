@@ -17,7 +17,7 @@ import timber.log.Timber
 import java.util.concurrent.TimeUnit
 
 /**
- * 每天在充电时读取聊天来源里的新消息（增量，超过一周的表会从头读一次）。只在 Root 模式、
+ * 每天在充电时读取聊天来源里的新消息（增量，超过一周的表会从头读一次）。只在开了高级功能的 Root 模式、
  * 且手动读取过一次之后进行；Root 没授权等失败只记日志，第二天再试。
  */
 class QqSourceRefreshWorker(
@@ -29,7 +29,9 @@ class QqSourceRefreshWorker(
     private val sources: QqSourceRepository by inject()
 
     override suspend fun doWork(): Result {
-        if (settings.accessMode.first() != AccessMode.ROOT || !settings.qqAutoRefresh.first()) return Result.success()
+        if (settings.accessMode.first() != AccessMode.ROOT || !settings.advancedFeatures.first() || !settings.qqAutoRefresh.first()) {
+            return Result.success()
+        }
         if (sources.dao.markedAccounts() == 0) return Result.success()
         return try {
             sources.refreshAndWait()

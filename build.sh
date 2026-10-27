@@ -119,4 +119,9 @@ fi
 
 if [[ " ${TASKS[*]} " == *" assembleRelease "* && -f "$RELEASE_APK" ]]; then
   echo "[build] Release APK: $RELEASE_APK"
+  commit_time="$(git -C "$PROJECT_DIR" log -1 --format=%ct 2>/dev/null || true)"
+  base_version="$(sed -n 's/^val baseVersionName = "\(.*\)".*/\1/p' "$PROJECT_DIR/app/build.gradle.kts" | tr -d '\r')"
+  if [[ -n "$commit_time" && -n "$base_version" ]]; then
+    echo "[build] Release tag: $((commit_time / 60))-$base_version"
+  fi
 fi

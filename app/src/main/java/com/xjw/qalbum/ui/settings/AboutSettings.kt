@@ -54,11 +54,12 @@ import com.xjw.qalbum.ui.components.SegmentedListItem
 import com.xjw.qalbum.ui.components.SegmentedSwitchItem
 import com.xjw.qalbum.ui.components.ShapeIcon
 
-/** 关于：版本、项目地址、作者、检查更新、演示模式、联网的说明、重新看新手引导、开源许可 */
+/** 关于：版本、项目地址、作者、检查更新、演示模式、用户协议与免责声明、重新看新手引导、开源许可 */
 @Composable
 fun AboutSettingsScreen(
     onBack: () -> Unit,
     onOpenGuide: () -> Unit,
+    onOpenAgreement: () -> Unit,
     sharedScope: SharedTransitionScope? = null,
     animatedScope: AnimatedVisibilityScope? = null,
 ) {
@@ -88,7 +89,7 @@ fun AboutSettingsScreen(
                 Spacer(Modifier.height(12.dp))
                 Text("QAlbum", style = MaterialTheme.typography.headlineMediumEmphasized)
                 Text(
-                    "QQ 聊天图片的浏览与清理",
+                    "像系统相册一样清理与查看 QQ 图片缓存",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center,
@@ -157,12 +158,14 @@ fun AboutSettingsScreen(
             }
         }
         SegmentedGroup(header = "说明") {
-            item("offline") { position ->
+            item("agreement") { position ->
                 SegmentedListItem(
                     position = position,
+                    onClick = onOpenAgreement,
                     leading = { ShapeIcon(Icons.Outlined.PrivacyTip) },
-                    headline = { Text("联网只为检查更新") },
-                    supporting = { Text("只读取 GitHub 上的版本信息，图片和记录都只在这台手机上") },
+                    headline = { Text("用户协议与免责声明") },
+                    supporting = { Text("数据安全、风险提示与隐私说明") },
+                    trailing = { Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, contentDescription = null) },
                 )
             }
             item("guide") { position ->

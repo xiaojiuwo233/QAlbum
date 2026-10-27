@@ -132,23 +132,25 @@ internal fun PhotoDetailsSheet(
                         CompressionBlock(record, onRestore = { compression.restoreOriginal(image.id) }, canRestore = image.status != "quarantined")
                     }
                 }
-                // Shizuku 模式下没读过来源时不显示这一节
-                if (origins.isNotEmpty() || chatAvailable) item(key = "source-header") { SectionHeader("QQ 来源") }
-                if (origins.isEmpty()) {
-                    if (chatAvailable) item(key = "source-none") {
-                        SegmentedCard(SegmentPosition.Single) {
-                            Text(
-                                "未关联聊天记录。读取聊天来源后可看到发送人和会话。",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
+                // 没开高级功能、或 Shizuku 模式下没读过来源时不显示这一节
+                if (chatAvailable) {
+                    item(key = "source-header") { SectionHeader("QQ 来源") }
+                    if (origins.isEmpty()) {
+                        item(key = "source-none") {
+                            SegmentedCard(SegmentPosition.Single) {
+                                Text(
+                                    "未关联聊天记录。读取聊天来源后可看到发送人和会话。",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                         }
-                    }
-                } else {
-                    val showAccount = origins.map { it.accountName }.distinct().size > 1
-                    origins.forEachIndexed { index, origin ->
-                        item(key = "origin-$index") {
-                            OriginCard(origin, SegmentPosition(index, origins.size), showAccount)
+                    } else {
+                        val showAccount = origins.map { it.accountName }.distinct().size > 1
+                        origins.forEachIndexed { index, origin ->
+                            item(key = "origin-$index") {
+                                OriginCard(origin, SegmentPosition(index, origins.size), showAccount)
+                            }
                         }
                     }
                 }

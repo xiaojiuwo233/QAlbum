@@ -9,7 +9,7 @@ import kotlinx.coroutines.flow.first
 
 /**
  * 定时清理：把设置里选中的规则（各用当前参数）命中的图依次移入回收站，返回汇总。
- * 没有文件访问（Shizuku 没在跑、Root 没授权）就整次跳过；按聊天的规则没读取过来源时命中为 0。
+ * 没有文件访问（Shizuku 没在跑、Root 没授权）就整次跳过；按聊天的规则没读取过来源时命中为 0，关了高级功能时不执行。
  *
  * [accessError] 为文件访问不可用的原因（可用为 null），[trash] 移入回收站并返回处理的张数
  * （实际由 QuarantineManager / CleanupRunner 提供，测试里可以换掉）。
@@ -32,7 +32,8 @@ class ScheduledCleanup(
 
     suspend fun run(now: Long = System.currentTimeMillis()): Summary {
         val enabled = settings.scheduledCleanupRules.first()
-        val rules = eligible.filter { it.id in enabled }
+        val chat = settings.advancedFeatures.first()
+        val rules = eligible.filter { it.id in enabled && (chat || it !in CleanupRule.chat) }
         if (rules.isEmpty()) return Summary(0, 0, emptyList())
         val summary = accessError()?.let { Summary(0, 0, emptyList(), skipped = it) } ?: trashAll(rules, now)
         settings.setScheduledCleanupLast("${formatDateTime(now)} · ${summary.text}")

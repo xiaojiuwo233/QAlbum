@@ -64,6 +64,7 @@ import com.xjw.qalbum.ui.gallery.ArchiveScreen
 import com.xjw.qalbum.ui.gallery.GalleryScreen
 import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.ui.logs.LogScreen
+import com.xjw.qalbum.ui.onboarding.AgreementScreen
 import com.xjw.qalbum.ui.onboarding.OnboardingScreen
 import com.xjw.qalbum.ui.onboarding.needsOnboarding
 import com.xjw.qalbum.ui.settings.AboutSettingsScreen
@@ -186,6 +187,9 @@ fun AppNavigation() {
                             }
                         },
                     )
+                }
+                page(AGREEMENT_ROUTE) {
+                    AgreementScreen(onBack = { navController.popBackStack() })
                 }
                 page(NavDestination.Dashboard.route) {
                     DashboardScreen(
@@ -327,6 +331,7 @@ fun AppNavigation() {
                     AboutSettingsScreen(
                         onBack = { navController.popBackStack() },
                         onOpenGuide = { navController.navigate(ONBOARDING_ROUTE) },
+                        onOpenAgreement = { navController.navigate(AGREEMENT_ROUTE) },
                         sharedScope = this@SharedTransitionLayout,
                         animatedScope = this,
                     )
@@ -429,6 +434,9 @@ private const val QQ_SOURCES_ROUTE = "qq-sources"
 
 /** 首次引导 */
 private const val ONBOARDING_ROUTE = "onboarding"
+
+/** 用户协议与免责声明（从「关于」打开） */
+private const val AGREEMENT_ROUTE = "agreement"
 
 private fun SourceBrowseTarget.route(): String = "$QQ_SOURCES_ROUTE/${kind.arg}/$key"
 
