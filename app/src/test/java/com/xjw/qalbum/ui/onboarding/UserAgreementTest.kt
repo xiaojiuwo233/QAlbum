@@ -6,7 +6,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** 用户协议的 Markdown 要按预期分节：六节，条款编号，加粗都闭合，发布地址是项目主页 */
+/** 用户协议的 Markdown 要按预期分节：六节，条款编号，加粗都闭合，链接只有 Google 隐私政策和项目主页 */
 class UserAgreementTest {
     private val blocks = Markdown.parse(USER_AGREEMENT)
 
@@ -20,9 +20,9 @@ class UserAgreementTest {
     }
 
     @Test
-    fun `发布渠道写的是项目主页，并且能点开`() {
+    fun `隐私政策与发布渠道的地址都能点开`() {
         val links = blocks.filterIsInstance<Markdown.Block.Item>().flatMap { Markdown.inline(it.text) }.filterIsInstance<Markdown.Span.Link>()
-        assertEquals(listOf(AppInfo.PROJECT_URL), links.map { it.url })
+        assertEquals(listOf("https://policies.google.com/privacy", AppInfo.PROJECT_URL), links.map { it.url })
     }
 
     @Test
@@ -38,6 +38,7 @@ class UserAgreementTest {
             }
         }
         assertTrue(texts.none { it is Markdown.Span.Text && "**" in it.text })
-        assertTrue(texts.any { it is Markdown.Span.Text && it.bold && it.text.contains("仅在检查更新时访问网络") })
+        assertTrue(texts.any { it is Markdown.Span.Text && it.bold && it.text.contains("不会收集或上传您的图片") })
+        assertTrue(texts.any { it is Markdown.Span.Text && it.bold && it.text.contains("全部关闭后，本应用仅记录统计活跃用户所必需的打开次数与使用时长") })
     }
 }

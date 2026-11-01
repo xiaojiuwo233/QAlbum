@@ -374,6 +374,13 @@ class SettingsRepository(
 
     suspend fun setDemoMode(enabled: Boolean) = setByUser(Keys.DEMO_MODE, enabled, onOff(enabled))
 
+    // ---- 日志 ----
+
+    /** 详细日志：日志里原样记录 uid、QQ 数据库路径等（排查问题用）；默认关闭，关着时这些内容去掉（见 LogRedactor） */
+    val detailedLog: Flow<Boolean> = prefsData.map { it[Keys.DETAILED_LOG] ?: false }
+
+    suspend fun setDetailedLog(enabled: Boolean) = setByUser(Keys.DETAILED_LOG, enabled, onOff(enabled))
+
     // ---- 用户协议与统计（见 Analytics）----
 
     /** 同意过的用户协议版本：0 是还没同意过；协议更新（版本变大）后要重新同意，之前不收集任何统计 */
@@ -504,6 +511,7 @@ class SettingsRepository(
         val AGREEMENT_VERSION = intPreferencesKey("agreement_version")
         val USAGE_ANALYTICS = booleanPreferencesKey("usage_analytics")
         val CRASH_REPORTS = booleanPreferencesKey("crash_reports")
+        val DETAILED_LOG = booleanPreferencesKey("detailed_log")
         val EXPORT_SUBDIRS = stringPreferencesKey("export_subdirs")
     }
 }

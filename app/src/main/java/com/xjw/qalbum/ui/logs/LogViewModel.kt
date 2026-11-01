@@ -3,9 +3,11 @@ package com.xjw.qalbum.ui.logs
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.log.AppLog
 import com.xjw.qalbum.log.LogEntry
 import com.xjw.qalbum.log.LogLevel
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -26,7 +28,15 @@ data class LogUiState(
     val diskSizeBytes: Long = 0L,
 )
 
-class LogViewModel : ViewModel() {
+class LogViewModel(private val settings: SettingsRepository, private val appScope: CoroutineScope) : ViewModel() {
+
+    /** 详细日志：开着时日志里原样记录 uid、QQ 数据库路径等（见 AppLog.detailed） */
+    val detailed: StateFlow<Boolean> = settings.detailedLog.stateIn(viewModelScope, SharingStarted.Eagerly, AppLog.detailed)
+
+    /** 落盘走 App 级作用域：改完立刻返回也不会丢 */
+    fun setDetailed(enabled: Boolean) {
+        appScope.launch { settings.setDetailedLog(enabled) }
+    }
 
     private val minLevel = MutableStateFlow(LogLevel.V)
     private val query = MutableStateFlow("")

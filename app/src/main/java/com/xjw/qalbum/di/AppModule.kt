@@ -288,7 +288,7 @@ val appModule = module {
         com.xjw.qalbum.ui.video.VideoViewModel(db = get(), library = get(), settings = get(), tasks = get(), appScope = get(), demo = get())
     }
     viewModel { com.xjw.qalbum.ui.settings.StorageViewModel(maintenance = get()) }
-    viewModel { LogViewModel() }
+    viewModel { LogViewModel(settings = get(), appScope = get()) }
     viewModel { QqSourcesViewModel(repository = get(), settings = get(), chatFeatures = get(), demo = get()) }
     viewModel { params ->
         com.xjw.qalbum.ui.sources.QqSourceBrowseViewModel(

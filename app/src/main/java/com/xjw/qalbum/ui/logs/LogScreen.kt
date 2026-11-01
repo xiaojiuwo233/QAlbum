@@ -39,6 +39,7 @@ import androidx.compose.material.icons.outlined.IosShare
 import androidx.compose.material.icons.outlined.KeyboardDoubleArrowDown
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.SearchOff
+import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -51,6 +52,7 @@ import androidx.compose.material3.SmallExtendedFloatingActionButton
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -93,7 +95,8 @@ import org.koin.androidx.compose.koinViewModel
 
 /**
  * 日志：按级别筛选、搜索，新日志自动跟到底部（往上翻看时不打扰，右下角「最新」回到底部并继续跟）。
- * 点一条展开全文，长按复制；右上角导出给别人看，菜单里清空。从设置首页的入口「长大」打开。
+ * 点一条展开全文，长按复制；右上角导出给别人看，菜单里开关详细日志、清空。从设置首页的入口「长大」打开。
+ * 没开详细日志时，uid、QQ 号等已经去掉（见 LogRedactor），导出的日志可以直接附在反馈里。
  */
 @Composable
 fun LogScreen(
@@ -103,11 +106,14 @@ fun LogScreen(
     animatedScope: AnimatedVisibilityScope? = null,
 ) {
     val ui by viewModel.uiState.collectAsState()
+    val detailed by viewModel.detailed.collectAsState()
     val context = LocalContext.current
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     var menuOpen by remember { mutableStateOf(false) }
     var confirmClear by remember { mutableStateOf(false) }
+    var confirmDetailed by remember { mutableStateOf(false) }
+    var confirmExport by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     // 列表从底部（最新）开始，「回到顶部才展开」等于永远展不开：往下拉就展开、往上推就收起
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
@@ -115,6 +121,12 @@ fun LogScreen(
         scope.launch {
             snackbar.currentSnackbarData?.dismiss()
             snackbar.showSnackbar(text)
+        }
+    }
+    fun export() {
+        viewModel.export { uri ->
+            if (uri == null) notify("导出失败")
+            else runCatching { context.startActivity(shareLogChooser(uri)) }.onFailure { notify("没有能接收日志的应用") }
         }
     }
 
@@ -143,19 +155,15 @@ fun LogScreen(
                     title = { Text("日志") },
                     subtitle = {
                         Text(
-                            if (ui.entries.size < ui.totalCount) "显示 ${formatCountExact(ui.entries.size)} / ${formatCountExact(ui.totalCount)} 条"
-                            else "${formatCountExact(ui.totalCount)} 条 · 文件 ${formatBytes(ui.diskSizeBytes)}",
+                            (if (detailed) "详细日志 · " else "") +
+                                if (ui.entries.size < ui.totalCount) "显示 ${formatCountExact(ui.entries.size)} / ${formatCountExact(ui.totalCount)} 条"
+                                else "${formatCountExact(ui.totalCount)} 条 · 文件 ${formatBytes(ui.diskSizeBytes)}",
                         )
                     },
                     navigationIcon = { BackButton(onBack) },
                     actions = {
                         IconButton(
-                            onClick = {
-                                viewModel.export { uri ->
-                                    if (uri == null) notify("导出失败")
-                                    else runCatching { context.startActivity(shareLogChooser(uri)) }.onFailure { notify("没有能接收日志的应用") }
-                                }
-                            },
+                            onClick = { if (detailed) confirmExport = true else export() },
                             shapes = IconButtonDefaults.shapes(),
                         ) { Icon(Icons.Outlined.IosShare, contentDescription = "导出") }
                         Box {
@@ -163,6 +171,15 @@ fun LogScreen(
                                 Icon(Icons.Outlined.MoreVert, contentDescription = "更多")
                             }
                             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("详细日志") },
+                                    leadingIcon = { Icon(Icons.Outlined.Visibility, contentDescription = null) },
+                                    trailingIcon = { Switch(checked = detailed, onCheckedChange = null) },
+                                    onClick = {
+                                        menuOpen = false
+                                        if (detailed) viewModel.setDetailed(false) else confirmDetailed = true
+                                    },
+                                )
                                 DropdownMenuItem(
                                     text = { Text("清空日志") },
                                     leadingIcon = { Icon(Icons.Outlined.DeleteSweep, contentDescription = null) },
@@ -231,6 +248,32 @@ fun LogScreen(
         }
     }
 
+    if (confirmDetailed) {
+        ConfirmDialog(
+            icon = Icons.Outlined.Visibility,
+            title = "开启详细日志？",
+            text = "日志会原样记录 uid、QQ 数据库路径等信息，仅限开发调试时开启！",
+            confirmLabel = "开启",
+            onDismiss = { confirmDetailed = false },
+            onConfirm = {
+                confirmDetailed = false
+                viewModel.setDetailed(true)
+            },
+        )
+    }
+    if (confirmExport) {
+        ConfirmDialog(
+            icon = Icons.Outlined.IosShare,
+            title = "导出详细日志？",
+            text = "详细日志导出的内容包含 uid、QQ 数据库路径等信息，请不要在公共场合发送！",
+            confirmLabel = "导出",
+            onDismiss = { confirmExport = false },
+            onConfirm = {
+                confirmExport = false
+                export()
+            },
+        )
+    }
     if (confirmClear) {
         ConfirmDialog(
             icon = Icons.Outlined.DeleteSweep,

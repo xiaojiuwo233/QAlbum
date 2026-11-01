@@ -288,6 +288,9 @@ class SettingsViewModel(
 
     data class Footprint(val databaseBytes: Long, val logBytes: Long)
 
+    /** 详细日志开着（首页「日志」的副标题提醒一下） */
+    val detailedLog: StateFlow<Boolean> = settings.detailedLog.state(false)
+
     /** 同意了用户协议（引导里或协议更新后） */
     fun acceptAgreement() = persist { settings.setAgreementVersion(AGREEMENT_VERSION) }
 

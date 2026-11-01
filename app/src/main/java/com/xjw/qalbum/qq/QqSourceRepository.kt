@@ -20,6 +20,7 @@ import com.xjw.qalbum.data.db.dao.QqScopeSql
 import com.xjw.qalbum.data.db.entity.QqReadMarkEntity
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.fileops.FileOpsClient
+import com.xjw.qalbum.log.AppLog
 import com.xjw.qalbum.service.cleanup.ArchiveManager
 import com.xjw.qalbum.service.cleanup.QuarantineManager
 import com.xjw.qalbum.service.cleanup.PictureDeleteOptions
@@ -194,6 +195,8 @@ class QqSourceRepository(
                 val accounts = reader.accounts(bound)
                 check(accounts.isNotEmpty()) { "QQ 未缓存可读取的账号数据库" }
                 accountCount = accounts.size
+                // 账号目录与 uid 只在详细日志里记（排查读不到某个账号时用）
+                if (AppLog.detailed) Timber.i("QQ accounts: %s", accounts.joinToString { "${it.key} uid=${it.uid}" })
                 settings.setQqSourcesComplete(false)
                 val root = settings.chatpicPath.first()
                 accounts.forEachIndexed { index, account ->
@@ -330,7 +333,11 @@ class QqSourceRepository(
     }
 
     private fun logFailure(error: Exception, stage: String) {
-        // 异常消息/栈可能带 QQ 账号路径或 SQL；仅记录阶段及类型。
+        // 异常消息/栈可能带 QQ 账号路径或 SQL：开了详细日志才记完整的，平时只记阶段、类型和出错的位置
+        if (AppLog.detailed) {
+            Timber.w(error, "QQ source failed: stage=%s", stage)
+            return
+        }
         Timber.w("QQ source failed: stage=%s type=%s", stage, error.javaClass.simpleName)
         error.stackTrace.firstOrNull { it.className.startsWith("com.xjw.qalbum.qq.") }?.let {
             Timber.w("QQ source failure location: class=%s method=%s line=%d", it.className.substringAfterLast('.'), it.methodName, it.lineNumber)

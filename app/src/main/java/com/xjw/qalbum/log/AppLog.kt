@@ -31,6 +31,8 @@ import java.util.concurrent.TimeUnit
  *   调用方只在自己线程上构造 [LogEntry]（保证时间戳/线程号准确）再 post 过来。
  * - **统一行格式**：`MM-dd HH:mm:ss.SSS PID TID L TAG: message`，与 logcat threadtime 一致，
  *   所以镜像来的行可原样落盘、也能被同一个解析器读回。
+ * - **脱敏**：没开 [detailed]（详细日志）时，写入、回填、导出前都经 [LogRedactor] 去掉 uid、QQ 号等，
+ *   反馈问题时附上的日志不会带出用户隐私。
  *
  * 这是基础设施（与 Timber 同级的全局单例），用 [init] 在 App.onCreate 最早期装好，不走 DI。
  */
@@ -94,6 +96,28 @@ object AppLog {
 
     val isReady: Boolean get() = initialized
 
+    /**
+     * 详细日志（日志页菜单里开）：开着时原样记录 uid、QQ 数据库路径等；关着（默认）时写入、查看、导出都先经
+     * [LogRedactor] 去掉。启动时设置还没读出来就按关着处理。
+     */
+    @Volatile
+    var detailed: Boolean = false
+        private set
+
+    fun setDetailed(enabled: Boolean) {
+        if (detailed == enabled) return
+        detailed = enabled
+        // 关掉时，内存里开着期间原样记下的也去掉（查看、复制用的是它）；磁盘上的在导出时去掉
+        if (!enabled) handler?.post {
+            synchronized(ring) {
+                val redacted = ring.map { it.copy(message = LogRedactor.redact(it.message)) }
+                ring.clear()
+                ring.addAll(redacted)
+            }
+            _version.value = _version.value + 1
+        }
+    }
+
     // ──────────────────────────────────────────────────────────────
     // 写入入口
     // ──────────────────────────────────────────────────────────────
@@ -109,18 +133,23 @@ object AppLog {
             tag = tag ?: "App",
             message = message,
         )
-        val line = format(entry)
-        handler?.post { append(entry, line) }
+        handler?.post {
+            val written = if (detailed) entry else entry.copy(message = LogRedactor.redact(entry.message))
+            append(written, format(written))
+        }
     }
 
     /** logcat 镜像来的整行（[LogcatCapture]）：已是 threadtime 格式，原样落盘、解析进缓冲。 */
     fun ingestLogcatLine(raw: String) {
         if (!initialized || raw.isEmpty()) return
-        val entry = parseLine(raw) ?: LogEntry(
-            timeMillis = System.currentTimeMillis(),
-            pid = 0, tid = 0, level = LogLevel.I, tag = "logcat", message = raw,
-        )
-        handler?.post { append(entry, raw) }
+        handler?.post {
+            val line = if (detailed) raw else LogRedactor.redact(raw)
+            val entry = parseLine(line) ?: LogEntry(
+                timeMillis = System.currentTimeMillis(),
+                pid = 0, tid = 0, level = LogLevel.I, tag = "logcat", message = line,
+            )
+            append(entry, line)
+        }
     }
 
     // handler 线程：进缓冲 + 落盘
@@ -155,11 +184,12 @@ object AppLog {
 
     /**
      * 把全部保留的日志（含历史轮转文件、本次与上次运行）合并导出到可分享的临时文件，
-     * 返回 content Uri。在 IO 线程调用。
+     * 返回 content Uri。没开详细日志时逐行脱敏（开着期间原样写下的也去掉）。在 IO 线程调用。
      */
     fun exportShareUri(): Uri? {
         if (!initialized) return null
         flushBlocking()
+        val redact = !detailed
         return runCatching {
             val shareDir = File(appContext.cacheDir, "share").apply { mkdirs() }
             val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
@@ -167,7 +197,7 @@ object AppLog {
             dest.bufferedWriter().use { out ->
                 out.write(exportHeader())
                 logFilesOldestFirst().forEach { f ->
-                    runCatching { f.forEachLine { out.appendLine(it) } }
+                    runCatching { f.forEachLine { out.appendLine(if (redact) LogRedactor.redact(it) else it) } }
                 }
             }
             FileProvider.getUriForFile(appContext, "${appContext.packageName}.fileprovider", dest)
@@ -256,8 +286,10 @@ object AppLog {
     }
 
     private fun seedRingFromDisk() {
-        val text = readTail(File(logDir, CURRENT_NAME), SEED_TAIL_BYTES)
-        if (text.isEmpty()) return
+        val tail = readTail(File(logDir, CURRENT_NAME), SEED_TAIL_BYTES)
+        if (tail.isEmpty()) return
+        // 上次运行开着详细日志时原样写下的：回填进查看页前也去掉
+        val text = if (detailed) tail else LogRedactor.redact(tail)
         val parsed = ArrayList<LogEntry>()
         for (line in text.split('\n')) {
             if (line.isEmpty()) continue

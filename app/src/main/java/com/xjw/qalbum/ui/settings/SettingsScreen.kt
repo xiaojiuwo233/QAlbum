@@ -113,6 +113,7 @@ fun SettingsScreen(
     val stack by viewModel.galleryStackVariants.collectAsState()
     val exportDirs by viewModel.exportSubdirs.collectAsState()
     val footprint by viewModel.footprint.collectAsState()
+    val detailedLog by viewModel.detailedLog.collectAsState()
     // 每次回到设置首页都重新检测（可能刚在文件访问页换了方式或授了权）
     LaunchedEffect(mode) { viewModel.checkAccess(mode) }
 
@@ -155,7 +156,10 @@ fun SettingsScreen(
                     exportDirs.size.takeIf { it > 0 }?.let { "$it 个保存目录" },
                 ).joinToString(" · "),
                 SettingsCategory.STORAGE to (footprint?.let { "数据库 ${formatBytes(it.databaseBytes)}" } ?: "数据库、图片缓存"),
-                SettingsCategory.LOGS to (footprint?.let { "运行日志 ${formatBytes(it.logBytes)}" } ?: "运行日志"),
+                SettingsCategory.LOGS to listOfNotNull(
+                    footprint?.let { "运行日志 ${formatBytes(it.logBytes)}" } ?: "运行日志",
+                    "详细日志".takeIf { detailedLog },
+                ).joinToString(" · "),
                 SettingsCategory.ABOUT to "版本 ${BuildConfig.VERSION_NAME.substringBeforeLast('.')}",
             )
             SettingsGroup.entries.forEachIndexed { groupIndex, group ->

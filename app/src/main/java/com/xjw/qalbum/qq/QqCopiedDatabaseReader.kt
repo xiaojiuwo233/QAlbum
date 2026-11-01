@@ -3,6 +3,7 @@ package com.xjw.qalbum.qq
 import android.database.Cursor
 import android.os.Process
 import android.system.Os
+import com.xjw.qalbum.log.AppLog
 import net.zetetic.database.sqlcipher.SQLiteConnection
 import net.zetetic.database.sqlcipher.SQLiteDatabase
 import net.zetetic.database.sqlcipher.SQLiteDatabaseHook
@@ -49,7 +50,9 @@ internal class QqCopiedDatabaseReader(snapshot: QqDatabaseSnapshot, account: QqA
             // 默认错误处理器会删除损坏库。副本仍可能含可读记录，交给批次读取器处理，
             // 所有副本统一在 snapshot.close() 清理；绝不触及 QQ 原库。
             val errorHandler = DatabaseErrorHandler { _, error ->
-                Timber.w("QQ copied database read error: database=%s type=%s", name, error.javaClass.simpleName)
+                // 异常消息可能带副本路径与 SQL：开了详细日志才记完整的
+                if (AppLog.detailed) Timber.w(error, "QQ copied database read error: database=%s", name)
+                else Timber.w("QQ copied database read error: database=%s type=%s", name, error.javaClass.simpleName)
             }
             SQLiteDatabase.openDatabase(copy.file.path, key, null,
                 SQLiteDatabase.OPEN_READONLY or SQLiteDatabase.NO_LOCALIZED_COLLATORS, errorHandler, hook)

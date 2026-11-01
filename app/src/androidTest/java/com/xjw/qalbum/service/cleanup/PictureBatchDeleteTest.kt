@@ -60,11 +60,12 @@ class PictureBatchDeleteTest {
         family.raw.copyTo(jpg)
         val expected = family.raw.readBytes()
         val files = family.files + jpg
+        val bytes = files.sumOf { it.length() }
         val ops = operations(manager())
         var result = PictureDeleteResult()
         val planner = PictureFamilyPlanner(db, root.path)
         planner.batches(ids, PictureDeleteOptions(), bound) { groups -> result += ops.quarantineAll(groups, "测试", Long.MAX_VALUE) }
-        assertEquals(PictureDeleteResult(pictures = 1, files = 5, selectedProcessed = 1), result)
+        assertEquals(PictureDeleteResult(pictures = 1, files = 5, selectedProcessed = 1, bytes = bytes), result)
         assertTrue(files.none { it.exists() })
         val head = db.cleanupDao().listQuarantinePaged(0, 10).single()
         val records = db.cleanupDao().getQuarantineGroup(head.groupId!!)
@@ -86,7 +87,7 @@ class PictureBatchDeleteTest {
         db.imageDao().unarchive(listOf(jpgId))
         // 从 .jpg 本身发起清理也包含原图、预览图和两份缩略图。
         planner.batches(listOf(jpgId), PictureDeleteOptions(), bound) { groups ->
-            assertEquals(PictureDeleteResult(pictures = 1, files = 5, selectedProcessed = 1), ops.permanentlyDeleteAll(groups))
+            assertEquals(PictureDeleteResult(pictures = 1, files = 5, selectedProcessed = 1, bytes = bytes), ops.permanentlyDeleteAll(groups))
         }
         assertTrue(files.none { it.exists() })
     }
@@ -199,11 +200,12 @@ class PictureBatchDeleteTest {
     @Test
     fun quarantineWholeBatchThenPurge() = runBlocking {
         val (families, ids) = seed(30)
+        val bytes = families.sumOf { family -> family.files.sumOf { it.length() } }
         val manager = manager()
         val ops = operations(manager)
         var result = PictureDeleteResult()
         PictureFamilyPlanner(db, root.path).batches(ids, PictureDeleteOptions(), bound) { groups -> result += ops.quarantineAll(groups, "测试", Long.MAX_VALUE) }
-        assertEquals(PictureDeleteResult(pictures = 30, files = 120, selectedProcessed = 30), result)
+        assertEquals(PictureDeleteResult(pictures = 30, files = 120, selectedProcessed = 30, bytes = bytes), result)
         assertEquals(0, families.sumOf { family -> family.files.count { it.exists() } })
         assertEquals(120, count("SELECT COUNT(*) FROM images WHERE status = 'quarantined'"))
         val records = records()
@@ -234,6 +236,7 @@ class PictureBatchDeleteTest {
     @Test
     fun archivedPicturesAreDeletedOnlyFromTheArchiveAndRestoreIntoIt() = runBlocking {
         val (families, ids) = seed(3)
+        val bytes = families.sumOf { family -> family.files.sumOf { it.length() } }
         db.imageDao().archive(ids, hidden = true)
         val ops = operations(manager())
         val planner = PictureFamilyPlanner(db, root.path)
@@ -246,7 +249,7 @@ class PictureBatchDeleteTest {
         planner.batches(ids, PictureDeleteOptions(includeArchived = true), bound) { groups ->
             result += ops.quarantineAll(groups, "测试", Long.MAX_VALUE, archived = true)
         }
-        assertEquals(PictureDeleteResult(pictures = 3, files = 12, selectedProcessed = 3), result)
+        assertEquals(PictureDeleteResult(pictures = 3, files = 12, selectedProcessed = 3, bytes = bytes), result)
         assertEquals(0, families.sumOf { family -> family.files.count { it.exists() } })
         assertEquals(9, count("SELECT COUNT(*) FROM images WHERE status = 'quarantined' AND is_protected = 1"))
         // 恢复后回到归档（整张图，包括后来登记的高清缩略图）
@@ -304,10 +307,11 @@ class PictureBatchDeleteTest {
     @Test
     fun permanentDeleteSkipsThumbnails() = runBlocking {
         val (families, ids) = seed(30)
+        val bytes = families.sumOf { family -> family.files.sumOf { it.length() } }
         val ops = operations(manager())
         var result = PictureDeleteResult()
         PictureFamilyPlanner(db, root.path).batches(ids, PictureDeleteOptions(), bound) { groups -> result += ops.permanentlyDeleteAll(groups) }
-        assertEquals(PictureDeleteResult(pictures = 30, files = 120, selectedProcessed = 30), result)
+        assertEquals(PictureDeleteResult(pictures = 30, files = 120, selectedProcessed = 30, bytes = bytes), result)
         assertEquals(0, families.sumOf { family -> family.files.count { it.exists() } })
         assertEquals(0, count("SELECT COUNT(*) FROM quarantine"))
         assertEquals(120, count("SELECT COUNT(*) FROM images WHERE status = 'deleted'"))
@@ -323,7 +327,7 @@ class PictureBatchDeleteTest {
         val mtimes = families.flatMap { it.files }.associate { it.path to it.lastModified() }
         var result = PictureDeleteResult()
         PictureFamilyPlanner(db, root.path).batches(ids, PictureDeleteOptions(), bound) { groups -> result += ops.quarantineAll(groups, "测试", Long.MAX_VALUE) }
-        assertEquals(PictureDeleteResult(pictures = 12, files = 48, selectedProcessed = 12), result)
+        assertEquals(PictureDeleteResult(pictures = 12, files = 48, selectedProcessed = 12, bytes = sizes.values.sum()), result)
         assertEquals(0, families.sumOf { family -> family.files.count { it.exists() } })
         val records = records()
         assertEquals(48, records.count { it[0] == "ready" })
@@ -349,13 +353,14 @@ class PictureBatchDeleteTest {
         val (families, ids) = seed(10)
         val ops = operations(manager())
         val changed = families[3]
+        val bytes = families.filter { it !== changed }.sumOf { family -> family.files.sumOf { it.length() } }
         var result = PictureDeleteResult()
         PictureFamilyPlanner(db, root.path).batches(ids, PictureDeleteOptions(), bound) { groups ->
             // 规划之后 QQ 改写了其中一张原图：这一组整组放回原处，其余照常移入
             changed.raw.appendBytes(byteArrayOf(1))
             result += ops.quarantineAll(groups, "测试", Long.MAX_VALUE)
         }
-        assertEquals(PictureDeleteResult(pictures = 9, files = 36, selectedProcessed = 9, skipped = 1), result)
+        assertEquals(PictureDeleteResult(pictures = 9, files = 36, selectedProcessed = 9, skipped = 1, bytes = bytes), result)
         assertTrue(changed.files.all { it.isFile })
         assertEquals(0, families.filter { it !== changed }.sumOf { family -> family.files.count { it.exists() } })
         assertEquals(36, count("SELECT COUNT(*) FROM quarantine WHERE state = 'ready'"))

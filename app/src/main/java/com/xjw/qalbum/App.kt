@@ -91,6 +91,8 @@ class App : Application(), Configuration.Provider {
         val analytics = get<Analytics>()
         analytics.start()
         Timber.plant(analytics.errorTree())
+        // 详细日志开着才原样记录 uid、QQ 数据库路径等（关着时见 LogRedactor）
+        get<CoroutineScope>().launch { get<SettingsRepository>().detailedLog.collect(AppLog::setDetailed) }
 
         // 需要升级数据库时立即打开（迁移期间界面显示进度弹窗），其余启动工作照常排队等它
         get<DatabaseOpener>().upgradeIfNeeded()
