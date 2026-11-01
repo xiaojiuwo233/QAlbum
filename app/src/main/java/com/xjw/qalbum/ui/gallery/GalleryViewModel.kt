@@ -228,7 +228,7 @@ class GalleryViewModel(
     ) {
         if (demo.blocks()) return
         appScope.launch {
-            val savedIds = ids.filter { imageFileManager.exportToGallery(it, subdir) }
+            val savedIds = imageFileManager.exportAll(ids, subdir, from = if (includeArchived) "archive" else "gallery", thenTrash = alsoTrash)
             if (alsoTrash && savedIds.isNotEmpty()) {
                 refreshGate.hold {
                     quarantineManager.quarantineBatch(
@@ -244,12 +244,12 @@ class GalleryViewModel(
     /** 归档（连同同一张图的其他版本）；回调处理的张数 */
     fun archiveImages(ids: Set<Long>, onDone: (Int) -> Unit = {}) {
         if (demo.blocks()) return
-        viewModelScope.launch { onDone(archive.archive(ids)) }
+        viewModelScope.launch { onDone(archive.archive(ids, from = "gallery")) }
     }
 
     fun unarchiveImages(ids: Set<Long>, onDone: (Int) -> Unit = {}) {
         if (demo.blocks()) return
-        viewModelScope.launch { onDone(archive.unarchive(ids)) }
+        viewModelScope.launch { onDone(archive.unarchive(ids, from = "archive")) }
     }
 
     // 批量「文件系统 + DB」不可逆操作跑在 App 级 appScope：分钟级批量若挂在 viewModelScope，
@@ -264,7 +264,7 @@ class GalleryViewModel(
         if (demo.blocks()) return
         appScope.launch {
             val count = withDeleteProgress("正在移入回收站…") { progress ->
-                quarantineManager.quarantinePictures(ids, options, "用户批量删除", onProgress = progress)
+                quarantineManager.quarantinePictures(ids, options, "用户批量删除", onProgress = progress, from = deleteSource(options))
             }.selectedProcessed
             withContext(Dispatchers.Main) { onDone(count) }
         }
@@ -274,11 +274,14 @@ class GalleryViewModel(
         if (demo.blocks()) return
         appScope.launch {
             val count = withDeleteProgress("正在永久删除…") { progress ->
-                quarantineManager.deletePicturesPermanently(ids, options, onProgress = progress)
+                quarantineManager.deletePicturesPermanently(ids, options, onProgress = progress, from = deleteSource(options))
             }.selectedProcessed
             withContext(Dispatchers.Main) { onDone(count) }
         }
     }
+
+    /** 统计用：图库还是归档页里删的（归档页删除才带 includeArchived） */
+    private fun deleteSource(options: PictureDeleteOptions) = if (options.includeArchived) "archive" else "gallery"
 
     /** 批量操作：页面上显示进度对话框，同时登记为后台任务（通知栏进度，切到后台不中断） */
     private suspend fun <T> withDeleteProgress(label: String, block: suspend (onProgress: (Int, Int) -> Unit) -> T): T =

@@ -11,7 +11,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
+import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.Code
+import androidx.compose.material.icons.outlined.Insights
 import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.PrivacyTip
 import androidx.compose.material.icons.outlined.SystemUpdate
@@ -35,6 +37,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import com.xjw.qalbum.AppInfo
+import com.xjw.qalbum.analytics.Analytics
 import com.xjw.qalbum.service.demo.DemoMode
 import com.xjw.qalbum.service.update.AppUpdates
 import com.xjw.qalbum.service.update.UpdateResult
@@ -54,7 +57,7 @@ import com.xjw.qalbum.ui.components.SegmentedListItem
 import com.xjw.qalbum.ui.components.SegmentedSwitchItem
 import com.xjw.qalbum.ui.components.ShapeIcon
 
-/** 关于：版本、项目地址、作者、检查更新、演示模式、用户协议与免责声明、重新看新手引导、开源许可 */
+/** 关于：版本、项目地址、作者、检查更新、演示模式、统计与崩溃日志开关、用户协议与免责声明、重新看新手引导、开源许可 */
 @Composable
 fun AboutSettingsScreen(
     onBack: () -> Unit,
@@ -67,6 +70,9 @@ fun AboutSettingsScreen(
     val updates = koinInject<AppUpdates>()
     val demo = koinInject<DemoMode>()
     val demoOn by demo.enabled.collectAsState()
+    val analytics = koinInject<Analytics>()
+    val usageOn by analytics.usageEnabled.collectAsState()
+    val crashOn by analytics.crashEnabled.collectAsState()
     val scope = rememberCoroutineScope()
     var checking by remember { mutableStateOf(false) }
     var checkResult by remember { mutableStateOf<String?>(null) }
@@ -154,6 +160,28 @@ fun AboutSettingsScreen(
                     subtitle = "截图用：显示示意图和虚构的名称，不能改动图片",
                     checked = demoOn,
                     onCheckedChange = { on -> scope.launch { demo.set(on) } },
+                )
+            }
+        }
+        SegmentedGroup(header = "应用优化") {
+            item("usage") { position ->
+                SegmentedSwitchItem(
+                    position = position,
+                    leading = { ShapeIcon(Icons.Outlined.Insights) },
+                    title = "匿名统计",
+                    subtitle = "我们使用Google Analytics来匿名的收集应用使用情况，帮助我们优化与改进应用。",
+                    checked = usageOn,
+                    onCheckedChange = analytics::setUsageEnabled,
+                )
+            }
+            item("crash") { position ->
+                SegmentedSwitchItem(
+                    position = position,
+                    leading = { ShapeIcon(Icons.Outlined.BugReport) },
+                    title = "自动上传崩溃日志",
+                    subtitle = "闪退或出错时上传错误信息，帮助我们快速定位问题并修复。",
+                    checked = crashOn,
+                    onCheckedChange = analytics::setCrashEnabled,
                 )
             }
         }

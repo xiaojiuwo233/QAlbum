@@ -7,6 +7,14 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.ksp)
     alias(libs.plugins.androidx.room)
+    alias(libs.plugins.google.services)
+    alias(libs.plugins.firebase.crashlytics)
+}
+
+val firebaseConfigured = providers.fileContents(layout.projectDirectory.file("src/release/google-services.json")).asText.isPresent
+
+googleServices {
+    missingGoogleServicesStrategy = com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy.IGNORE
 }
 
 // release 签名来源：本地优先 keystore.properties，CI 用环境变量；
@@ -46,7 +54,7 @@ if (providers.gradleProperty("requireReleaseSigning").getOrElse("false").toBoole
 // 并读取 .git/HEAD 与 reflog 作为配置输入，使每次提交后缓存失效、hash/时间戳重新计算
 // （否则命中旧缓存会导致 hash 不刷新）。git worktree/submodule 下 .git 为文件、
 // 此锚点会失效，属可接受退化；CI 全新 checkout 不受影响。
-val baseVersionName = "0.4.3"
+val baseVersionName = "0.4.4"
 
 @Suppress("UNUSED_VARIABLE")
 val gitStateKey = listOf(".git/HEAD", ".git/logs/HEAD").joinToString("|") {
@@ -121,6 +129,10 @@ android {
             // 并在 versionName 上标注，让产物自证签名来源
             signingConfig = signingConfigs.getByName(if (hasReleaseSigning) "release" else "debug")
             if (!hasReleaseSigning) versionNameSuffix = "-debugsigned"
+            // 混淆映射上传到 Crashlytics
+            configure<com.google.firebase.crashlytics.buildtools.gradle.CrashlyticsExtension> {
+                mappingFileUploadEnabled = firebaseConfigured
+            }
             // 仅 release 收窄到 arm64（面向 Shizuku/Root 真机 sideload，控制包体）；
             // debug 不过滤 ABI，保证 x86_64 模拟器可安装
             ndk { abiFilters += "arm64-v8a" }
@@ -242,6 +254,11 @@ dependencies {
 
     // --- 日志 ---
     implementation(libs.timber)
+
+    // --- 匿名统计与崩溃日志（只在 release，见 src/release/.../analytics） ---
+    releaseImplementation(platform(libs.firebase.bom))
+    releaseImplementation(libs.firebase.analytics)
+    releaseImplementation(libs.firebase.crashlytics)
 
     // --- 调试工具 ---
     debugImplementation(libs.androidx.compose.ui.tooling)

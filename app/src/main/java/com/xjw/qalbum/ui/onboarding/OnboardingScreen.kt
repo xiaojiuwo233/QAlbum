@@ -75,6 +75,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
+import com.xjw.qalbum.analytics.Analytics
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.domain.model.AccessMode
 import com.xjw.qalbum.ui.common.openUrl
@@ -90,6 +91,7 @@ import com.xjw.qalbum.ui.settings.openShizuku
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import org.koin.androidx.compose.koinViewModel
+import org.koin.compose.koinInject
 
 /**
  * 首次打开的引导：认识 QAlbum → 用户协议与免责声明（看满 10 秒才能同意）→ 选访问方式并授权 → 确认图片目录、开始扫描。
@@ -106,10 +108,12 @@ fun OnboardingScreen(
     var agreementRead by rememberSaveable { mutableStateOf(false) }
     val finish: (scan: Boolean) -> Unit = { scan ->
         if (scan) viewModel.startFullScan()
-        viewModel.finishOnboarding()
+        viewModel.finishOnboarding(scan)
         onDone()
     }
     BackHandler(enabled = page > 0) { page-- }
+    val analytics = koinInject<Analytics>()
+    LaunchedEffect(page) { analytics.screen("onboarding_" + ONBOARDING_PAGES[page]) }
 
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
         Column(
@@ -142,7 +146,10 @@ fun OnboardingScreen(
                         read = agreementRead,
                         onTick = { agreementWait = (agreementWait - 1).coerceAtLeast(0) },
                         onReadToEnd = { agreementRead = true },
-                        onAgree = { page = 2 },
+                        onAgree = {
+                            viewModel.acceptAgreement()
+                            page = 2
+                        },
                     )
                     2 -> AccessPage(viewModel, onBack = { page = 1 }, onNext = { page = 3 })
                     else -> ScanPage(viewModel, onBack = { page = 2 }, onFinish = finish)
@@ -153,6 +160,9 @@ fun OnboardingScreen(
 }
 
 private const val PAGES = 4
+
+/** 各页的名字（统计用） */
+private val ONBOARDING_PAGES = listOf("welcome", "agreement", "access", "scan")
 
 /** 协议页至少要看这么久才能同意 */
 private const val AGREEMENT_WAIT_SECONDS = 10
@@ -263,9 +273,48 @@ private fun Feature(icon: ImageVector, title: String, text: String) {
     }
 }
 
+/**
+ * 协议更新后（老用户）再同意一次：同样要看满 10 秒、拉到底，不同意就退出。同意之前不收集任何统计。
+ */
+@Composable
+fun AgreementUpdateScreen(onAgreed: () -> Unit, viewModel: SettingsViewModel = koinViewModel()) {
+    var wait by rememberSaveable { mutableIntStateOf(AGREEMENT_WAIT_SECONDS) }
+    var read by rememberSaveable { mutableStateOf(false) }
+    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding()
+                .padding(top = 24.dp),
+        ) {
+            AgreementPage(
+                remaining = wait,
+                read = read,
+                onTick = { wait = (wait - 1).coerceAtLeast(0) },
+                onReadToEnd = { read = true },
+                onAgree = {
+                    viewModel.acceptAgreement()
+                    onAgreed()
+                },
+                title = "用户协议已更新",
+                subtitle = "新增了匿名统计与崩溃日志的说明，可随时在「设置 → 关于」里关闭。",
+            )
+        }
+    }
+}
+
 /** 用户协议与免责声明：倒数 [remaining] 秒、并且拉到底看完（[read]）才能同意；不同意就退出 */
 @Composable
-private fun AgreementPage(remaining: Int, read: Boolean, onTick: () -> Unit, onReadToEnd: () -> Unit, onAgree: () -> Unit) {
+private fun AgreementPage(
+    remaining: Int,
+    read: Boolean,
+    onTick: () -> Unit,
+    onReadToEnd: () -> Unit,
+    onAgree: () -> Unit,
+    title: String = "用户协议与免责声明",
+    subtitle: String = "使用前请仔细阅读。删除的文件无法恢复，请先备份重要数据。",
+) {
     val context = LocalContext.current
     val scroll = rememberScrollState()
     LaunchedEffect(remaining) {
@@ -311,7 +360,7 @@ private fun AgreementPage(remaining: Int, read: Boolean, onTick: () -> Unit, onR
             iconSize = 30.dp,
         )
         Spacer(Modifier.height(20.dp))
-        PageTitle("用户协议与免责声明", "使用前请仔细阅读。删除的文件无法恢复，请先备份重要数据。")
+        PageTitle(title, subtitle)
         Surface(color = MaterialTheme.colorScheme.surfaceContainer, shape = MaterialTheme.shapes.large) {
             AgreementText(Modifier.padding(20.dp))
         }

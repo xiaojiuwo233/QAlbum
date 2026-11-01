@@ -7,6 +7,8 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import coil3.ImageLoader
 import coil3.SingletonImageLoader
+import com.xjw.qalbum.analytics.Analytics
+import com.xjw.qalbum.analytics.createAnalyticsBackend
 import com.xjw.qalbum.data.db.DatabaseOpener
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.di.appModule
@@ -36,6 +38,7 @@ import org.koin.android.ext.koin.androidLogger
 import org.koin.androidx.workmanager.koin.workManagerFactory
 import org.koin.core.context.startKoin
 import org.koin.core.logger.Level
+import org.koin.dsl.module
 import timber.log.Timber
 
 /**
@@ -61,7 +64,9 @@ class App : Application(), Configuration.Provider {
         // - DebugTree（仅 debug）：开发期回显到 Android Studio logcat
         // - LogcatCapture（仅 release）：镜像 logcat，补齐绕过 Timber 的第三方/原生日志，且与上面零重复
         AppLog.init(this)
-        CrashHandler.install()
+        // 统计与崩溃日志（release 为 Firebase，debug 只写日志）：崩溃交给 Crashlytics 之前先脱敏
+        val analyticsBackend = createAnalyticsBackend(this)
+        CrashHandler.install(forUpload = analyticsBackend::forCrashReport)
         Timber.plant(FileLoggingTree())
         if (BuildConfig.DEBUG) {
             Timber.plant(Timber.DebugTree())
@@ -79,8 +84,13 @@ class App : Application(), Configuration.Provider {
             androidLogger(if (BuildConfig.DEBUG) Level.INFO else Level.ERROR)
             androidContext(this@App)
             workManagerFactory()
-            modules(appModule)
+            modules(appModule, module { single { analyticsBackend } })
         }
+
+        // 按用户协议与「关于」里的两个开关收集统计；带异常的 error 日志作为非致命错误上传
+        val analytics = get<Analytics>()
+        analytics.start()
+        Timber.plant(analytics.errorTree())
 
         // 需要升级数据库时立即打开（迁移期间界面显示进度弹窗），其余启动工作照常排队等它
         get<DatabaseOpener>().upgradeIfNeeded()

@@ -1,5 +1,8 @@
 package com.xjw.qalbum.service.indexer
 
+import com.xjw.qalbum.analytics.Analytics
+import com.xjw.qalbum.analytics.elapsedMs
+import com.xjw.qalbum.analytics.scanFinished
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.domain.model.ScanProgress
 import com.xjw.qalbum.service.work.BackgroundTasks
@@ -37,6 +40,7 @@ class ScanController(
     private val pipeline: ScanPipeline,
     private val tasks: BackgroundTasks,
     private val sizeBackfill: ImageSizeBackfill,
+    private val analytics: Analytics? = null,
 ) {
     // SupervisorJob：单个扫描失败不影响 controller 后续工作
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -93,14 +97,20 @@ class ScanController(
             }
             val job = scope.launch(start = CoroutineStart.LAZY) {
                 val self = coroutineContext[Job]
+                val started = System.nanoTime()
+                var last: ScanProgress? = null
                 try {
                     val root = settings.chatpicPath.first()
                     if (automatic) {
-                        pipeline.scan(root, mode).collect { p -> setProgressIfCurrent(self, p) }
+                        pipeline.scan(root, mode).collect { p ->
+                            last = p
+                            setProgressIfCurrent(self, p)
+                        }
                     } else {
                         // 登记为后台任务：通知栏显示进度，切到后台也保持前台优先级
                         tasks.track(if (mode == ScanMode.INCREMENTAL) "扫描图片" else "全量扫描图片") { handle ->
                             pipeline.scan(root, mode).collect { p ->
+                                last = p
                                 setProgressIfCurrent(self, p)
                                 when (p) {
                                     is ScanProgress.Enumerating -> handle.update("正在比对目录… 已发现 ${p.total} 个")
@@ -114,11 +124,14 @@ class ScanController(
                     sizeBackfill.startIfNeeded()
                 } catch (ce: CancellationException) {
                     // 用户主动取消属正常流程：标记为「已取消」并交还协程框架，不展示为失败
+                    last = ScanProgress.Cancelled
                     setProgressIfCurrent(self, ScanProgress.Cancelled)
                     throw ce
                 } catch (t: Throwable) {
                     Timber.e(t, "Scan($mode) failed")
-                    setProgressIfCurrent(self, ScanProgress.Failed(t.message ?: "未知错误"))
+                    val failed = ScanProgress.Failed(t.message ?: "未知错误", t.javaClass.simpleName)
+                    last = failed
+                    setProgressIfCurrent(self, failed)
                 } finally {
                     synchronized(stateLock) {
                         if (currentJob === self) {
@@ -126,6 +139,8 @@ class ScanController(
                             _running.value = false
                         }
                     }
+                    analytics?.scanned(mode, automatic, last, elapsedMs(started))
+                    if (last is ScanProgress.Done) analytics?.refreshLibrarySize()
                 }
             }
             currentJob = job
@@ -144,6 +159,22 @@ class ScanController(
      */
     fun cancel() {
         synchronized(stateLock) { currentJob }?.cancel()
+    }
+
+    /** 统计：扫描的方式、结果（失败记原因代码）、耗时与新增或更新的张数 */
+    private fun Analytics.scanned(mode: ScanMode, automatic: Boolean, last: ScanProgress?, durationMs: Long) {
+        val (result, reason) = when (last) {
+            is ScanProgress.Done -> "ok" to null
+            is ScanProgress.Failed -> "failed" to last.code
+            ScanProgress.Cancelled -> "cancelled" to null
+            else -> "failed" to "unfinished"
+        }
+        val key = when (mode) {
+            ScanMode.INCREMENTAL -> "incremental"
+            ScanMode.FULL -> "full"
+            ScanMode.DEEP_VERIFY -> "verify"
+        }
+        scanFinished(key, automatic, result, durationMs, (last as? ScanProgress.Done)?.total, reason)
     }
 
     /** 仅当 [self] 仍是当前任务时写进度，旧 job 迟到的进度/终态不覆盖新扫描 */

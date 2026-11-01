@@ -118,7 +118,7 @@ internal class LinkedPictureOperations(
             for(item in complete) {
                 item.settled=true
                 item.records=item.records.map { it.copy(state="ready",thumbnailPath=item.thumbnail) }
-                item.result=PictureDeleteResult(pictures=1,files=item.records.size,selectedProcessed=item.group.selectedIds.size)
+                item.result=PictureDeleteResult(pictures=1,files=item.records.size,selectedProcessed=item.group.selectedIds.size,bytes=item.records.sumOf { it.size })
             }
             for(item in open)if(!item.settled) {
                 val outcome=withContext(NonCancellable) { settle(item) { reconcile(it,item.records.map { r->moved.getValue(r.id) }) } }
@@ -237,9 +237,11 @@ internal class LinkedPictureOperations(
             done.forEach { it.thumbnailPath?.let { p->runCatching { File(p).delete() } } }
             val deleted=done.mapTo(HashSet()) { it.id }
             for(item in ready) {
-                val count=item.records.count { it.id in deleted }
+                val removed=item.records.filter { it.id in deleted }
+                val count=removed.size
                 val complete=count==item.records.size
-                item.result=PictureDeleteResult(pictures=if(complete)1 else 0,files=count,selectedProcessed=item.group.selectedIds.size,partial=if(!complete)1 else 0)
+                item.result=PictureDeleteResult(pictures=if(complete)1 else 0,files=count,selectedProcessed=item.group.selectedIds.size,partial=if(!complete)1 else 0,
+                    bytes=removed.sumOf { it.size })
             }
         }
     }.sum()

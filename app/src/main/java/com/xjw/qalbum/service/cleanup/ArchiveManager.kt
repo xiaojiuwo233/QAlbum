@@ -1,5 +1,7 @@
 package com.xjw.qalbum.service.cleanup
 
+import com.xjw.qalbum.analytics.Analytics
+import com.xjw.qalbum.analytics.archived
 import com.xjw.qalbum.data.db.AppDatabase
 import com.xjw.qalbum.data.db.dao.QqArchiveCounts
 import com.xjw.qalbum.data.db.dao.QqScopeIds
@@ -27,6 +29,7 @@ class ArchiveManager(
     private val db: AppDatabase,
     private val settings: SettingsRepository,
     private val appScope: CoroutineScope,
+    private val analytics: Analytics? = null,
 ) {
     private val images = db.imageDao()
 
@@ -42,16 +45,18 @@ class ArchiveManager(
         }
     }
 
-    /** 归档这些图（连同同一张图的其他版本）；返回处理的张数 */
-    suspend fun archive(ids: Collection<Long>): Int = withContext(Dispatchers.IO) {
+    /** 归档这些图（连同同一张图的其他版本）；返回处理的张数。[from] 是用户从哪里归档的（统计用，自动的不传） */
+    suspend fun archive(ids: Collection<Long>, from: String? = null): Int = withContext(Dispatchers.IO) {
         if (ids.isEmpty()) return@withContext 0
         images.archive(ids.distinct(), hidden = !settings.archiveVisible.first())
+        from?.let { analytics?.archived(it, add = true, count = ids.size) }
         ids.size
     }
 
-    suspend fun unarchive(ids: Collection<Long>): Int = withContext(Dispatchers.IO) {
+    suspend fun unarchive(ids: Collection<Long>, from: String? = null): Int = withContext(Dispatchers.IO) {
         if (ids.isEmpty()) return@withContext 0
         images.unarchive(ids.distinct())
+        from?.let { analytics?.archived(it, add = false, count = ids.size) }
         ids.size
     }
 
@@ -87,6 +92,7 @@ class ArchiveManager(
                 afterId = page.last()
                 onProgress(done.coerceAtMost(total), total)
             }
+            if (done > 0) analytics?.archived("chat_scope", add = true, count = done)
             done
         }
 

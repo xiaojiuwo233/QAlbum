@@ -10,6 +10,9 @@ import android.provider.MediaStore
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import com.xjw.qalbum.access.AccessManager
+import com.xjw.qalbum.analytics.Analytics
+import com.xjw.qalbum.analytics.savedToAlbum
+import com.xjw.qalbum.analytics.shared
 import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import kotlinx.coroutines.Dispatchers
@@ -29,6 +32,7 @@ class ImageFileManager(
     private val context: Context,
     private val accessManager: AccessManager,
     private val imageDao: ImageDao,
+    private val analytics: Analytics? = null,
 ) {
 
     private val externalViewDir: File by lazy {
@@ -52,6 +56,12 @@ class ImageFileManager(
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q ||
             ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
             PackageManager.PERMISSION_GRANTED
+
+    /** 逐张导出到系统相册，返回成功的 id；[from] 与 [thenTrash]（保存后移入回收站）只用于统计 */
+    suspend fun exportAll(ids: Collection<Long>, subdir: String?, from: String, thenTrash: Boolean = false): List<Long> =
+        ids.filter { exportToGallery(it, subdir) }.also { saved ->
+            if (ids.isNotEmpty()) analytics?.savedToAlbum(from, "image", ids.size, saved.size, thenTrash)
+        }
 
     /** 将图片导出到系统相册 Pictures/QAlbum[/子目录]。[subdir] 为 null/空时存到 QAlbum 根目录。 */
     suspend fun exportToGallery(imageId: Long, subdir: String? = null): Boolean = withContext(Dispatchers.IO) {
@@ -126,7 +136,7 @@ class ImageFileManager(
             Timber.e(t, "ImageFileManager.prepareExternalView failed for $imageId")
             null
         }
-    }
+    }.also { analytics?.shared(openWith = true, ok = it != null) }
 
     /**
      * 准备一个可分享的临时文件（content Uri）。chatpic 原文件名是无后缀的 `Cache_xxx`，
@@ -151,7 +161,7 @@ class ImageFileManager(
             Timber.e(t, "ImageFileManager.prepareShare failed for $imageId")
             null
         }
-    }
+    }.also { analytics?.shared(openWith = false, ok = it != null) }
 
     /**
      * 清理临时目录中过期（> [TEMP_FILE_TTL_MS]）的旧文件。不立即清空整目录：上一个交给

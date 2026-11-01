@@ -1,6 +1,7 @@
 package com.xjw.qalbum.di
 
 import com.xjw.qalbum.access.AccessManager
+import com.xjw.qalbum.analytics.Analytics
 import com.xjw.qalbum.access.RootFileAccess
 import com.xjw.qalbum.access.ShizukuFileAccess
 import com.xjw.qalbum.data.db.AppDatabase
@@ -78,6 +79,9 @@ val appModule = module {
     // 后台长任务登记：有任务时以前台服务运行（通知栏显示进度），切到后台不降速
     single { BackgroundTasks(context = get()) }
 
+    // 匿名统计与崩溃日志（后端由 App 按构建类型提供：release 为 Firebase）
+    single { Analytics(backend = get(), settings = get(), scope = get(), images = get()) }
+
     // ---- 文件访问 ----
 
     single { ShizukuFileAccess() }
@@ -109,7 +113,7 @@ val appModule = module {
             openTransport = transports::create, tasks = get(), appScope = get(),
         )
     }
-    single { ScanController(settings = get(), pipeline = get(), tasks = get(), sizeBackfill = get()) }
+    single { ScanController(settings = get(), pipeline = get(), tasks = get(), sizeBackfill = get(), analytics = get()) }
 
     // ---- 清理 ----
 
@@ -124,44 +128,49 @@ val appModule = module {
             fileOpsClient = get(),
             archive = get(),
             statsCache = get(),
+            analytics = get(),
         )
     }
-    single { ArchiveManager(db = get(), settings = get(), appScope = get()) }
+    single { ArchiveManager(db = get(), settings = get(), appScope = get(), analytics = get()) }
     // 清理页、规则页的统计缓存（图片变了才重算，清理执行期间暂停）
     single { com.xjw.qalbum.data.db.StatsCache(db = get(), scope = get()) }
     single { com.xjw.qalbum.service.indexer.PictureVariantIndexer(db = get(), settings = get()) }
-    single { ImageFileManager(context = get(), accessManager = get(), imageDao = get()) }
+    single { ImageFileManager(context = get(), accessManager = get(), imageDao = get(), analytics = get()) }
     single { OriginalCompressor(context = get(), db = get(), accessManager = get(), fileOpsClient = get(), settings = get()) }
-    single { CleanupRunner(quarantine = get(), compressor = get(), tasks = get(), appScope = get(), statsCache = get()) }
+    single { CleanupRunner(quarantine = get(), compressor = get(), tasks = get(), appScope = get(), statsCache = get(), analytics = get()) }
     // 定时清理（每周，设置里选规则）
     single {
         val runner = get<CleanupRunner>()
         val quarantine = get<QuarantineManager>()
         com.xjw.qalbum.service.cleanup.rules.ScheduledCleanup(
-            settings = get(), db = get(), accessError = quarantine::fileAccessError, trash = runner::trashNow,
+            settings = get(), db = get(), accessError = quarantine::fileAccessError, trash = runner::trashNow, analytics = get(),
         )
     }
     // 压缩的统一入口（先对比再替换）与设置页的质量演示
-    single { CompressionCoordinator(db = get(), compressor = get(), runner = get(), settings = get(), tasks = get(), appScope = get(), demo = get()) }
+    single {
+        CompressionCoordinator(
+            db = get(), compressor = get(), runner = get(), settings = get(), tasks = get(), appScope = get(), demo = get(), analytics = get(),
+        )
+    }
     single { CompressDemo(context = get()) }
     // QQ 缓存页（复刻 QQ 的清理缓存）与视频页
-    single { com.xjw.qalbum.service.cleanup.QqCacheCleaner(accessManager = get(), fileOpsClient = get(), settings = get()) }
+    single { com.xjw.qalbum.service.cleanup.QqCacheCleaner(accessManager = get(), fileOpsClient = get(), settings = get(), analytics = get()) }
     single {
         com.xjw.qalbum.service.video.VideoLibrary(
-            context = get(), db = get(), accessManager = get(), fileOpsClient = get(), settings = get(),
+            context = get(), db = get(), accessManager = get(), fileOpsClient = get(), settings = get(), analytics = get(),
         )
     }
     single {
         QqSourceRepository(
             context = get(), db = get(), settings = get(), client = get(), quarantine = get(), appScope = get(), tasks = get(),
-            archive = get(), statsCache = get(),
+            archive = get(), statsCache = get(), analytics = get(),
         )
     }
 
     single { com.xjw.qalbum.data.db.DatabaseSlimmer(context = get(), db = get()) }
     single {
         com.xjw.qalbum.service.storage.StorageMaintenance(
-            slimmer = get(), sources = get(), statsCache = get(), tasks = get(), imageLoader = get(), appScope = get(),
+            slimmer = get(), sources = get(), statsCache = get(), tasks = get(), imageLoader = get(), appScope = get(), analytics = get(),
         )
     }
 
@@ -183,7 +192,7 @@ val appModule = module {
 
     // 检查更新（GitHub Releases）：打开 App 进概览时自动查一次，「关于」里可以手动查
     single { UpdateChecker() }
-    single { AppUpdates(checker = get(), scope = get()) }
+    single { AppUpdates(checker = get(), scope = get(), analytics = get()) }
 
     // ---- ViewModel ----
 
@@ -197,6 +206,7 @@ val appModule = module {
             compressDemo = get(),
             chatFeatures = get(),
             cleanupScheduler = get(),
+            analytics = get(),
         )
     }
     viewModel {
@@ -253,6 +263,7 @@ val appModule = module {
             appScope = get(),
             statsCache = get(),
             demo = get(),
+            analytics = get(),
         )
     }
     viewModel { params ->

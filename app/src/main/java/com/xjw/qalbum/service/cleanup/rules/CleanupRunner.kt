@@ -1,5 +1,9 @@
 package com.xjw.qalbum.service.cleanup.rules
 
+import com.xjw.qalbum.analytics.Analytics
+import com.xjw.qalbum.analytics.compressed
+import com.xjw.qalbum.analytics.deleted
+import com.xjw.qalbum.analytics.elapsedMs
 import com.xjw.qalbum.data.db.StatsCache
 import com.xjw.qalbum.data.db.StatsCache.Companion.holding
 import com.xjw.qalbum.service.cleanup.OriginalCompressor
@@ -34,6 +38,7 @@ class CleanupRunner(
     private val appScope: CoroutineScope,
     /** 执行期间暂停清理页的统计重算，数据库先给清理用 */
     private val statsCache: StatsCache? = null,
+    private val analytics: Analytics? = null,
 ) {
     /** 正在跑的任务；[ruleId] 是从哪条规则的预览页发起的（别处发起为 null） */
     data class Running(val ruleId: String?, val title: String, val action: RuleAction, val done: Int, val total: Int)
@@ -54,17 +59,24 @@ class CleanupRunner(
     /** 移入回收站；[linkedVersions] 为真时同一张图的其他版本一起（整张图），否则只处理选中的这个文件 */
     fun trash(ids: Collection<Long>, title: String, linkedVersions: Boolean, ruleId: String? = null) {
         val options = PictureDeleteOptions(linkedVersions = linkedVersions, includeShared = true)
-        enqueue(ruleId, "清理：$title", RuleAction.TRASH, ids.toList()) { page, _ ->
-            Step(done = quarantine.quarantinePictures(page, options, title).selectedProcessed)
+        enqueue(ruleId, "清理：$title", RuleAction.TRASH, ids.toList(), { totals, result, ms ->
+            analytics?.deleted("rule", false, ids.size, totals.done, totals.skipped, totals.failed, totals.bytes, ms, ruleId, result)
+        }) { page, _ -> trashStep(page, options, title) }
+    }
+
+    /** 直接压缩并替换（不对比）；[from] direct（关了压缩对比）/ rest（对比页应用后其余的），统计用 */
+    fun compress(ids: Collection<Long>, quality: Int, maxSide: Int, ruleId: String? = null, from: String = "direct") {
+        enqueue(ruleId, "压缩原图", RuleAction.COMPRESS, ids.toList(), { totals, result, ms ->
+            analytics?.compressed(from, ids.size, totals.done, totals.failed, totals.skipped, totals.saved, ms, quality, maxSide, null, result)
+        }) { page, progress ->
+            val outcome = compressor.compress(page, quality, maxSide, progress)
+            Step(done = outcome.compressed, saved = outcome.savedBytes, skipped = outcome.skipped, failed = outcome.failed)
         }
     }
 
-    /** 直接压缩并替换（不对比） */
-    fun compress(ids: Collection<Long>, quality: Int, maxSide: Int, ruleId: String? = null) {
-        enqueue(ruleId, "压缩原图", RuleAction.COMPRESS, ids.toList()) { page, progress ->
-            val outcome = compressor.compress(page, quality, maxSide, progress)
-            Step(done = outcome.compressed, saved = outcome.savedBytes)
-        }
+    private suspend fun trashStep(page: List<Long>, options: PictureDeleteOptions, title: String): Step {
+        val result = quarantine.quarantinePictures(page, options, title)
+        return Step(done = result.selectedProcessed, skipped = result.skipped, failed = result.partial, bytes = result.bytes)
     }
 
     /**
@@ -77,9 +89,7 @@ class CleanupRunner(
         return queue.withLock {
             current = currentCoroutineContext()[Job]
             try {
-                run(null, "定时清理：$title", RuleAction.TRASH, ids, announce = false) { page, _ ->
-                    Step(done = quarantine.quarantinePictures(page, options, title).selectedProcessed)
-                }
+                run(null, "定时清理：$title", RuleAction.TRASH, ids, announce = false) { page, _ -> trashStep(page, options, title) }
             } finally {
                 current = null
             }
@@ -91,13 +101,33 @@ class CleanupRunner(
         current?.cancel()
     }
 
-    private class Step(val done: Int, val saved: Long = 0)
+    /** 一批的结果：[done] 处理了的张数，[saved] 压缩省下的，[bytes] 移入回收站的文件大小 */
+    private class Step(val done: Int, val saved: Long = 0, val skipped: Int = 0, val failed: Int = 0, val bytes: Long = 0)
+
+    /** 整个任务累计（统计用） */
+    private class Totals {
+        var done = 0
+        var saved = 0L
+        var skipped = 0
+        var failed = 0
+        var bytes = 0L
+
+        fun add(step: Step) {
+            done += step.done
+            saved += step.saved
+            skipped += step.skipped
+            failed += step.failed
+            bytes += step.bytes
+        }
+    }
 
     private fun enqueue(
         ruleId: String?,
         title: String,
         action: RuleAction,
         ids: List<Long>,
+        /** 结束时（结果 ok / cancelled / no_access / failed 与耗时） */
+        finished: (Totals, String, Long) -> Unit,
         process: suspend (page: List<Long>, progress: (Int) -> Unit) -> Step,
     ) {
         if (ids.isEmpty()) return
@@ -108,7 +138,7 @@ class CleanupRunner(
                 if (waited > 1_000) Timber.i("CleanupRunner: %s waited %d ms for the previous task", title, waited)
                 current = currentCoroutineContext()[Job]
                 try {
-                    run(ruleId, title, action, ids, process = process)
+                    run(ruleId, title, action, ids, finished = finished, process = process)
                 } finally {
                     current = null
                 }
@@ -123,12 +153,16 @@ class CleanupRunner(
         action: RuleAction,
         ids: List<Long>,
         announce: Boolean = true,
+        finished: ((Totals, String, Long) -> Unit)? = null,
         process: suspend (page: List<Long>, progress: (Int) -> Unit) -> Step,
     ): Int = statsCache.holding { tasks.track(title) { handle ->
         val total = ids.size
         var processed = 0
         var done = 0
         var saved = 0L
+        val totals = Totals()
+        val started = System.nanoTime()
+        var result = "ok"
         fun report(position: Int) {
             _running.value = Running(ruleId, title, action, position, total)
             handle.update(detail = progressText(action, position, total), done = position.toLong(), total = total.toLong())
@@ -140,24 +174,29 @@ class CleanupRunner(
                 // 没有文件访问（未授权、Shizuku 中途断开）：停下说明原因，不把整批记成「未处理」
                 quarantine.fileAccessError()?.let { error ->
                     if (announce) _results.tryEmit(if (processed == 0) error else resultText(action, done, processed, saved, stopped = true) + "；$error")
+                    result = "no_access"
                     return@track done
                 }
                 val base = processed
                 val step = process(page) { n -> report(base + n) }
                 done += step.done
                 saved += step.saved
+                totals.add(step)
                 processed = base + page.size
                 report(processed)
             }
             if (announce) _results.tryEmit(resultText(action, done, processed, saved, stopped = false))
         } catch (e: CancellationException) {
+            result = "cancelled"
             if (announce) _results.tryEmit(resultText(action, done, processed, saved, stopped = true))
             throw e
         } catch (e: Exception) {
+            result = "failed"
             Timber.e(e, "CleanupRunner: $title failed")
             if (announce) _results.tryEmit("${title}未完成：${e.message ?: e.javaClass.simpleName}")
         } finally {
             _running.value = null
+            finished?.invoke(totals, result, elapsedMs(started))
         }
         done
     } }

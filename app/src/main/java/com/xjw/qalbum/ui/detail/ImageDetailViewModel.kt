@@ -189,7 +189,7 @@ class ImageDetailViewModel(
             try {
                 val pageId = currentPageId() ?: image.id
                 val next = !image.isArchived
-                if (next) archive.archive(listOf(image.id)) else archive.unarchive(listOf(image.id))
+                if (next) archive.archive(listOf(image.id), from = "detail") else archive.unarchive(listOf(image.id), from = "detail")
                 _toast.value = if (next) "已归档" else "已取消归档"
                 val leaves = if (archiveOnly) !next else next && !settings.archiveVisible.first()
                 if (leaves) {
@@ -231,7 +231,7 @@ class ImageDetailViewModel(
                     _toast.value = "保存失败：请在系统设置中授予存储权限"
                     return@launch
                 }
-                val ok = imageFileManager.exportToGallery(image.id, subdir)
+                val ok = imageFileManager.exportAll(listOf(image.id), subdir, from = "detail", thenTrash = alsoTrash).isNotEmpty()
                 if (!ok) {
                     _toast.value = "保存失败"
                     return@launch
@@ -273,7 +273,7 @@ class ImageDetailViewModel(
         viewModelScope.launch {
             try {
                 val pageId = currentPageId() ?: image.id
-                val result = quarantineManager.quarantinePictures(listOf(image.id),options.copy(includeArchived = archiveOnly),"用户手动删除")
+                val result = quarantineManager.quarantinePictures(listOf(image.id),options.copy(includeArchived = archiveOnly),"用户手动删除",from="detail")
                 val ok=result.selectedProcessed>0
                 if (ok) {
                     _toast.value = result.message()
@@ -294,7 +294,7 @@ class ImageDetailViewModel(
         viewModelScope.launch {
             try {
                 val pageId = currentPageId() ?: image.id
-                val result=quarantineManager.deletePicturesPermanently(listOf(image.id),options.copy(includeArchived = archiveOnly))
+                val result=quarantineManager.deletePicturesPermanently(listOf(image.id),options.copy(includeArchived = archiveOnly),from="detail")
                 val ok=result.selectedProcessed>0
                 if (ok) {
                     _toast.value = result.message(permanent=true)

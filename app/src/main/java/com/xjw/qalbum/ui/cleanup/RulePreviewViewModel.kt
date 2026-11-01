@@ -212,7 +212,7 @@ class RulePreviewViewModel(
     fun archive(ids: Collection<Long>, onDone: () -> Unit = {}): Boolean {
         if (demo.blocks()) return false
         appScope.launch {
-            val count = archive.archive(ids)
+            val count = archive.archive(ids, from = "rule")
             _message.value = "已归档 $count 张，不会被清理"
             withContext(Dispatchers.Main) { onDone() }
         }
@@ -237,7 +237,7 @@ class RulePreviewViewModel(
         if (demo.blocks()) return
         appScope.launch {
             val ok = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q || imageFiles.canExportPreQ()) &&
-                imageFiles.exportToGallery(id, subdir)
+                imageFiles.exportAll(listOf(id), subdir, from = "rule").isNotEmpty()
             _message.value = if (ok) "已保存到相册" else "保存失败"
         }
     }

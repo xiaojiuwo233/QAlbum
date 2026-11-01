@@ -44,9 +44,9 @@ fun UpdateDialogHost() {
     release?.let { found ->
         UpdateDialog(
             release = found,
-            onDismiss = updates::dismiss,
+            onDismiss = { updates.dismiss() },
             onDownload = {
-                updates.dismiss()
+                updates.dismiss(download = true)
                 openUrl(context, found.url)
             },
             onOpenUrl = { openUrl(context, it) },

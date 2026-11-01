@@ -22,6 +22,7 @@ import androidx.compose.material3.ShortNavigationBar
 import androidx.compose.material3.ShortNavigationBarItem
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -47,6 +48,8 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.xjw.qalbum.analytics.Analytics
+import com.xjw.qalbum.analytics.screenName
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.ui.anim.aboveSharedImages
 import com.xjw.qalbum.ui.anim.fadeThroughEnter
@@ -65,7 +68,9 @@ import com.xjw.qalbum.ui.gallery.GalleryScreen
 import com.xjw.qalbum.data.db.dao.ImageDao
 import com.xjw.qalbum.ui.logs.LogScreen
 import com.xjw.qalbum.ui.onboarding.AgreementScreen
+import com.xjw.qalbum.ui.onboarding.AgreementUpdateScreen
 import com.xjw.qalbum.ui.onboarding.OnboardingScreen
+import com.xjw.qalbum.ui.onboarding.needsAgreement
 import com.xjw.qalbum.ui.onboarding.needsOnboarding
 import com.xjw.qalbum.ui.settings.AboutSettingsScreen
 import com.xjw.qalbum.ui.settings.AccessSettingsScreen
@@ -98,14 +103,21 @@ import org.koin.compose.koinInject
 fun AppNavigation() {
     val settings = koinInject<SettingsRepository>()
     val imageDao = koinInject<ImageDao>()
-    // 第一次打开（库里还没有图）先走引导；判断完之前不画，免得先闪一下概览
+    // 第一次打开（库里还没有图）先走引导，用户协议更新了先看协议；判断完之前不画，免得先闪一下概览
     val startRoute by produceState<String?>(null) {
-        value = if (needsOnboarding(settings, imageDao)) ONBOARDING_ROUTE else NavDestination.Dashboard.route
+        value = when {
+            needsOnboarding(settings, imageDao) -> ONBOARDING_ROUTE
+            needsAgreement(settings) -> AGREEMENT_UPDATE_ROUTE
+            else -> NavDestination.Dashboard.route
+        }
     }
     val start = startRoute ?: return
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
+    // 统计：打开了哪一页（只用路由模板，不带图片 id 与聊天）
+    val analytics = koinInject<Analytics>()
+    LaunchedEffect(currentRoute) { currentRoute?.let(::screenName)?.let(analytics::screen) }
     val currentDestination = NavDestination.fromRoute(currentRoute)
     // 规则预览 / 按时间 / 回收站是清理页内部子页；图库多选时底部换成浮动操作栏 —— 两种情况都隐藏底栏
     var cleanupSubPage by remember { mutableStateOf(false) }
@@ -190,6 +202,15 @@ fun AppNavigation() {
                 }
                 page(AGREEMENT_ROUTE) {
                     AgreementScreen(onBack = { navController.popBackStack() })
+                }
+                page(AGREEMENT_UPDATE_ROUTE) {
+                    AgreementUpdateScreen(
+                        onAgreed = {
+                            navController.navigate(NavDestination.Dashboard.route) {
+                                popUpTo(AGREEMENT_UPDATE_ROUTE) { inclusive = true }
+                            }
+                        },
+                    )
                 }
                 page(NavDestination.Dashboard.route) {
                     DashboardScreen(
@@ -437,6 +458,9 @@ private const val ONBOARDING_ROUTE = "onboarding"
 
 /** 用户协议与免责声明（从「关于」打开） */
 private const val AGREEMENT_ROUTE = "agreement"
+
+/** 协议更新后启动时先看的协议页（同意才能进） */
+private const val AGREEMENT_UPDATE_ROUTE = "agreement-update"
 
 private fun SourceBrowseTarget.route(): String = "$QQ_SOURCES_ROUTE/${kind.arg}/$key"
 

@@ -316,7 +316,7 @@ class QqSourceBrowseViewModel(
     fun setArchived(ids: Collection<Long>, archived: Boolean, onDone: (visible: Boolean) -> Unit = {}) {
         if (ids.isEmpty() || demo.blocks()) return
         viewModelScope.launch {
-            if (archived) archive.archive(ids) else archive.unarchive(ids)
+            if (archived) archive.archive(ids, from = "chat") else archive.unarchive(ids, from = "chat")
             onDone(!archived || settings.archiveVisible.first())
         }
     }
@@ -330,7 +330,7 @@ class QqSourceBrowseViewModel(
         if (ids.isEmpty() || demo.blocks()) return
         appScope.launch {
             val result = withDeleteProgress("正在移入回收站…") { progress ->
-                quarantine.quarantinePictures(ids, options, "按 QQ 来源手动删除", scope.value, onProgress = progress)
+                quarantine.quarantinePictures(ids, options, "按 QQ 来源手动删除", scope.value, onProgress = progress, from = "chat")
             }
             if (notify) _message.value = result.message()
             withContext(Dispatchers.Main) { onDone(result.selectedProcessed) }
@@ -341,7 +341,7 @@ class QqSourceBrowseViewModel(
         if (ids.isEmpty() || demo.blocks()) return
         appScope.launch {
             val result = withDeleteProgress("正在永久删除…") { progress ->
-                quarantine.deletePicturesPermanently(ids, options, scope.value, onProgress = progress)
+                quarantine.deletePicturesPermanently(ids, options, scope.value, onProgress = progress, from = "chat")
             }
             if (notify) _message.value = result.message(permanent = true)
             withContext(Dispatchers.Main) { onDone(result.selectedProcessed) }
@@ -371,7 +371,7 @@ class QqSourceBrowseViewModel(
                 _message.value = "保存失败：请在系统设置中授予存储权限"
                 return@launch
             }
-            val saved = ids.filter { imageFiles.exportToGallery(it, subdir) }
+            val saved = imageFiles.exportAll(ids, subdir, from = "chat", thenTrash = alsoTrash)
             val trashed = if (alsoTrash && saved.isNotEmpty()) {
                 refreshGate.hold { quarantine.quarantineBatch(saved.map { it to "保存后移入回收站" }) }
             } else {

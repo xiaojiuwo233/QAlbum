@@ -1,6 +1,10 @@
 package com.xjw.qalbum.service.storage
 
 import coil3.ImageLoader
+import com.xjw.qalbum.analytics.Analytics
+import com.xjw.qalbum.analytics.cacheCleared
+import com.xjw.qalbum.analytics.databaseSlimmed
+import com.xjw.qalbum.analytics.elapsedMs
 import com.xjw.qalbum.data.db.DatabaseSlimmer
 import com.xjw.qalbum.data.db.StatsCache
 import com.xjw.qalbum.data.db.StatsCache.Companion.holding
@@ -26,6 +30,7 @@ class StorageMaintenance(
     private val tasks: BackgroundTasks,
     private val imageLoader: ImageLoader,
     private val appScope: CoroutineScope,
+    private val analytics: Analytics? = null,
 ) {
     data class Usage(val database: DatabaseSlimmer.Usage, val cacheBytes: Long, val logBytes: Long)
     data class Progress(val label: String, val done: Long = 0, val total: Long = 0)
@@ -49,6 +54,7 @@ class StorageMaintenance(
     fun slim() {
         if (!_progress.compareAndSet(null, Progress("准备精简"))) return
         appScope.launch(Dispatchers.IO) {
+            val started = System.nanoTime()
             try {
                 val saved = sources.exclusive("精简数据库") {
                     statsCache.holding {
@@ -65,10 +71,13 @@ class StorageMaintenance(
                     saved > 0 -> "数据库小了 ${formatBytes(saved)}"
                     else -> "已经很精简了"
                 }
+                analytics?.databaseSlimmed(if (saved == null) "busy" else "ok", saved ?: 0L, elapsedMs(started))
             } catch (e: CancellationException) {
+                analytics?.databaseSlimmed("cancelled", 0, elapsedMs(started))
                 _message.value = "已停止，空出来的空间下次接着释放"
             } catch (e: Exception) {
                 Timber.w(e, "Database slimming failed")
+                analytics?.databaseSlimmed("failed", 0, elapsedMs(started))
                 _message.value = "精简没有完成，请稍后重试"
             } finally {
                 _progress.value = null
@@ -79,6 +88,7 @@ class StorageMaintenance(
 
     fun clearCache() {
         appScope.launch(Dispatchers.IO) {
+            analytics?.cacheCleared("images", imageLoader.diskCache?.size ?: 0)
             imageLoader.memoryCache?.clear()
             imageLoader.diskCache?.clear()
             _message.value = "图片缓存已清除"
@@ -88,6 +98,7 @@ class StorageMaintenance(
 
     fun clearLogs() {
         appScope.launch(Dispatchers.IO) {
+            analytics?.cacheCleared("logs", AppLog.diskSizeBytes())
             AppLog.clear()
             _message.value = "日志已清除"
             refresh()

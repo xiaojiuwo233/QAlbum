@@ -16,3 +16,6 @@ suspend fun needsOnboarding(settings: SettingsRepository, images: ImageDao): Boo
     }
     return true
 }
+
+/** 同意过的用户协议是旧版本（协议更新了，或者是有了协议之前的老用户）：先看一遍新的再进 */
+suspend fun needsAgreement(settings: SettingsRepository): Boolean = settings.agreementVersion.first() < AGREEMENT_VERSION

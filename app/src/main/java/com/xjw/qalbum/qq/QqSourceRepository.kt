@@ -4,6 +4,11 @@ import android.content.Context
 import android.os.ParcelFileDescriptor
 import android.database.sqlite.SQLiteDatabaseCorruptException
 import androidx.room.withTransaction
+import com.xjw.qalbum.analytics.Analytics
+import com.xjw.qalbum.analytics.chatIndexCleared
+import com.xjw.qalbum.analytics.chatRead
+import com.xjw.qalbum.analytics.deleted
+import com.xjw.qalbum.analytics.elapsedMs
 import com.xjw.qalbum.data.db.AppDatabase
 import com.xjw.qalbum.data.db.QqSourceStatsSql
 import com.xjw.qalbum.data.db.StatsCache
@@ -48,6 +53,7 @@ class QqSourceRepository(
     private val archive: ArchiveManager,
     /** 读取期间暂停清理页的统计（几十万条来源写入时不来回重算） */
     private val statsCache: StatsCache? = null,
+    private val analytics: Analytics? = null,
 ) {
     val dao = db.qqSourceDao()
     val sourcesComplete = settings.qqSourcesComplete
@@ -138,16 +144,16 @@ class QqSourceRepository(
 
     /** 读取并等它结束（后台定时读取用）；已经在读时直接返回 */
     suspend fun refreshAndWait(full: Boolean = false) {
-        refresh(full)?.join()
+        refresh(full, automatic = true)?.join()
     }
 
     /**
      * 读取聊天来源。默认增量：一周内从头读过的消息表只解析之后的新消息；[full] 为真或超过一周的表从头读。
      * 所有账号、所有表都从头读完且没有读不了的记录，才算一次完整读取（记下 complete_read_at）。
      * 读完只给这次新登记的路径补关联、只把新增的来源与关联计入统计（见 QqSourceStatsSql.applyNew），
-     * 不必把几十万张图与来源整体对一遍。已经有来源任务在跑时返回 null。
+     * 不必把几十万张图与来源整体对一遍。已经有来源任务在跑时返回 null。[automatic] 是后台定时读取（统计用）。
      */
-    fun refresh(full: Boolean = false): Job? {
+    fun refresh(full: Boolean = false, automatic: Boolean = false): Job? {
         if (!_progress.compareAndSet(null, QqSourceProgress("获取 Root 权限"))) return null
         statsFailed = false
         startFacetCache()
@@ -167,7 +173,15 @@ class QqSourceRepository(
             var fullPass = true
             var copyMs = 0L
             var importMs = 0L
+            var linksMs = 0L
+            var previewsMs = 0L
+            var statsMs = 0L
             val renamed = mutableSetOf<Pair<Int, String>>()
+            // 统计：账号数、结果（ok / partial / failed / cancelled）、出错的那一步与异常类型
+            var accountCount = 0
+            var outcome = "failed"
+            var failedStage: String? = null
+            var failure: Exception? = null
             try {
                 // 解析规则更新过（比如新认出表情子类型）：这次从头读，旧来源才补得上
                 val reparse = settings.qqParseVersion.first() < QqPictureCodec.PARSE_VERSION
@@ -179,6 +193,7 @@ class QqSourceRepository(
                 _progress.value = QqSourceProgress("读取 QQ 账号目录")
                 val accounts = reader.accounts(bound)
                 check(accounts.isNotEmpty()) { "QQ 未缓存可读取的账号数据库" }
+                accountCount = accounts.size
                 settings.setQqSourcesComplete(false)
                 val root = settings.chatpicPath.first()
                 accounts.forEachIndexed { index, account ->
@@ -219,11 +234,10 @@ class QqSourceRepository(
                         failed++
                         failures += "账号 ${index + 1}：${failureReason(e, stage)}"
                         logFailure(e, stage)
+                        failedStage = stage
+                        failure = e
                     }
                 }
-                var linksMs = 0L
-                var previewsMs = 0L
-                var statsMs = 0L
                 if (successful > 0) {
                     // 新读到的消息按家族键关联已入库的图片（原图、预览图、缩略图、带后缀的别名、Temp 转码图都在同一家族）
                     stage = "links"
@@ -257,6 +271,11 @@ class QqSourceRepository(
                 // 个别解析不了的消息（多是没缓存内容的合并转发）和 QQ 库里本来就坏的几行每次都一样，不算没读完；
                 // 只有账号读取失败、消息表没读完才算
                 val complete = successful == accounts.size && incompleteTables == 0
+                outcome = when {
+                    successful == 0 -> "failed"
+                    !complete -> "partial"
+                    else -> "ok"
+                }
                 settings.setQqSourcesComplete(complete)
                 if (complete && fullPass) {
                     dao.setCompleteReadAt(readStart)
@@ -277,13 +296,21 @@ class QqSourceRepository(
                         (if (!complete) "；部分来源未能读取，共用统计可能有遗漏" else "") +
                         (if (failures.isNotEmpty()) "；" + failures.joinToString("；") else ""))
             } catch (_: CancellationException) {
+                outcome = "cancelled"
                 report("已停止读取；已完成的账号索引保留")
             } catch (e: Exception) {
+                outcome = "failed"
+                failedStage = stage
+                failure = e
                 logFailure(e, stage)
                 report(failureReason(e, stage))
             } finally {
                 bound?.close()
                 _progress.value = null
+                analytics?.chatRead(
+                    automatic, if (fullPass) "full" else "incremental", outcome, System.currentTimeMillis() - readStart,
+                    copyMs, importMs, linksMs + previewsMs + statsMs, accountCount, failed, pictures, failedStage, failure,
+                )
             }
         } } }
         job = started
@@ -347,6 +374,12 @@ class QqSourceRepository(
         if (!_progress.compareAndSet(null, QqSourceProgress("准备移入回收站", cancellable = false))) return
         job = appScope.launch(Dispatchers.IO) { mirrored("按来源移入回收站", cancellable = false) {
             var moved = 0
+            var total = 0
+            var skipped = 0
+            var partial = 0
+            var bytes = 0L
+            var outcome = "ok"
+            val started = System.nanoTime()
             try {
                 quarantine.fileAccessError()?.let { reason ->
                     _message.value = reason
@@ -361,21 +394,29 @@ class QqSourceRepository(
                 var afterId = 0L
                 var processed = 0L
                 _progress.value = QqSourceProgress("移入回收站", 0, counts.removable.toLong(), false)
+                total = counts.removable
                 while (true) {
                     val batch = dao.queryIds(QqScopeSql.removableIds(ids, contents, includeShared, afterId, maxId, 200, before))
                     if (batch.isEmpty()) break
-                    moved += quarantine.quarantinePictures(batch, PictureDeleteOptions(linkedVersions, includeShared), "按 QQ 图片来源清理", scope).selectedProcessed
+                    val result = quarantine.quarantinePictures(batch, PictureDeleteOptions(linkedVersions, includeShared), "按 QQ 图片来源清理", scope)
+                    moved += result.selectedProcessed
+                    skipped += result.skipped
+                    partial += result.partial
+                    bytes += result.bytes
                     processed += batch.size
                     _progress.value = QqSourceProgress("移入回收站", processed, counts.removable.toLong(), false)
                     afterId = batch.last()
                 }
                 _message.value = "已移入回收站 $moved 张" + if (moved < counts.removable) "；部分图片因共用、保护或文件变化未移动" else ""
             } catch (e: CancellationException) {
+                outcome = "cancelled"
                 throw e
             } catch (_: Exception) {
+                outcome = "failed"
                 _message.value = "已移入回收站 $moved 张，操作未全部完成"
             } finally {
                 _progress.value = null
+                if (total > 0) analytics?.deleted("chat_scope", false, total, moved, skipped, partial, bytes, elapsedMs(started), result = outcome)
             }
         } }
     }
@@ -401,6 +442,7 @@ class QqSourceRepository(
                 }
                 _report.value = null
                 _message.value = "已清除来源索引"
+                analytics?.chatIndexCleared()
             } catch (_: Exception) {
                 _message.value = "来源索引清除失败"
             } finally { _progress.value = null }

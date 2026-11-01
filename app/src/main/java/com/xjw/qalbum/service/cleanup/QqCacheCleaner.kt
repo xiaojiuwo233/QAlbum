@@ -2,6 +2,9 @@ package com.xjw.qalbum.service.cleanup
 
 import android.os.DeadObjectException
 import com.xjw.qalbum.access.AccessManager
+import com.xjw.qalbum.analytics.Analytics
+import com.xjw.qalbum.analytics.elapsedMs
+import com.xjw.qalbum.analytics.qqCacheCleared
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.domain.model.AccessMode
 import com.xjw.qalbum.fileops.BoundFileOps
@@ -22,6 +25,7 @@ class QqCacheCleaner(
     private val accessManager: AccessManager,
     private val fileOpsClient: FileOpsClient,
     private val settings: SettingsRepository,
+    private val analytics: Analytics? = null,
 ) {
     enum class State { PRESENT, MISSING, DENIED, ERROR }
 
@@ -54,6 +58,7 @@ class QqCacheCleaner(
 
     /** 逐个清空 [paths]，[onProgress]（已处理, 总数）每个目录回调一次；文件访问没就绪时为 null */
     suspend fun clear(paths: List<String>, onProgress: (done: Int, total: Int) -> Unit = { _, _ -> }): Report? = withBound { bound ->
+        val started = System.nanoTime()
         var files = 0L
         var bytes = 0L
         var failed = 0L
@@ -70,6 +75,7 @@ class QqCacheCleaner(
             onProgress(index + 1, paths.size)
         }
         Timber.i("QQ cache cleared: dirs=%d files=%d bytes=%d failed=%d refused=%d", paths.size, files, bytes, failed, refused)
+        analytics?.qqCacheCleared(paths.size, files, bytes, failed, refused, elapsedMs(started))
         Report(files, bytes, failed, refused)
     }
 

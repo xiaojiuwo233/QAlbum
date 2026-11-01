@@ -75,12 +75,12 @@ class ScanPipeline(
         // 200w 行会被判为新增全量重复插入且旧行永久脱离扫描范围
         val root = chatpicRoot.trim().trimEnd('/')
         if (root.isBlank()) {
-            send(ScanProgress.Failed("图片目录为空，先在「设置 → 扫描」里填写"))
+            send(ScanProgress.Failed("图片目录为空，先在「设置 → 扫描」里填写", "no_path"))
             return
         }
         val initialTransport = transportFactory.create()
         if (initialTransport == null) {
-            send(ScanProgress.Failed("文件访问未就绪，先在「设置 → 文件访问」里授权"))
+            send(ScanProgress.Failed("文件访问未就绪，先在「设置 → 文件访问」里授权", "no_access"))
             return
         }
         // var：传输瞬时故障时按批重建热切换（见 Step 4），finally 关闭的是最新通道
@@ -106,15 +106,15 @@ class ScanPipeline(
                 val rootChildren = transport.listSubdirs(root)
                 when {
                     rootChildren.isEmpty() -> {
-                        send(ScanProgress.Failed("图片目录读不到或为空：$root（索引未改动）"))
+                        send(ScanProgress.Failed("图片目录读不到或为空：$root（索引未改动）", "root_unreadable"))
                         return
                     }
                     rootChildren.none { it.path.substringAfterLast('/') in SOURCE_DIRS } -> {
-                        send(ScanProgress.Failed("这里没有 chatimg、chatraw 等子目录，检查一下图片目录"))
+                        send(ScanProgress.Failed("这里没有 chatimg、chatraw 等子目录，检查一下图片目录", "no_source_dirs"))
                         return
                     }
                     snapshots.isNotEmpty() -> {
-                        send(ScanProgress.Failed("这次没读到任何图片目录，已中止扫描（索引未改动）"))
+                        send(ScanProgress.Failed("这次没读到任何图片目录，已中止扫描（索引未改动）", "nothing_listed"))
                         return
                     }
                     // else：源目录存在但尚无内容且无历史快照 —— 正常空库，继续走完 Done(0)
@@ -133,6 +133,7 @@ class ScanPipeline(
                     send(
                         ScanProgress.Failed(
                             "$vanished/${snapshots.size} 个目录这次读不到，已中止扫描（索引未改动）",
+                            "vanished",
                         ),
                     )
                     return
@@ -188,7 +189,7 @@ class ScanPipeline(
             throw ce
         } catch (t: Throwable) {
             Timber.e(t, "ScanPipeline[$mode] failed")
-            send(ScanProgress.Failed(t.message ?: "未知错误"))
+            send(ScanProgress.Failed(t.message ?: "未知错误", t.javaClass.simpleName))
         } finally {
             transport.close()
         }

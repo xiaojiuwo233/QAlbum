@@ -5,6 +5,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.xjw.qalbum.access.AccessManager
 import com.xjw.qalbum.access.ChatFeatures
+import com.xjw.qalbum.analytics.Analytics
+import com.xjw.qalbum.analytics.advancedRisk
+import com.xjw.qalbum.analytics.onboardingDone
 import com.xjw.qalbum.data.db.AppDatabase
 import com.xjw.qalbum.data.db.dao.RuleStats
 import com.xjw.qalbum.data.preferences.SettingsRepository
@@ -18,6 +21,7 @@ import com.xjw.qalbum.service.cleanup.CompressDemo
 import com.xjw.qalbum.service.cleanup.rules.CleanupRule
 import com.xjw.qalbum.service.cleanup.rules.ScheduledCleanup
 import com.xjw.qalbum.service.indexer.ScanController
+import com.xjw.qalbum.ui.onboarding.AGREEMENT_VERSION
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -49,6 +53,7 @@ class SettingsViewModel(
     private val compressDemo: CompressDemo,
     chatFeatures: ChatFeatures,
     private val cleanupScheduler: ScheduledCleanup,
+    private val analytics: Analytics? = null,
 ) : ViewModel() {
 
     /**
@@ -85,8 +90,21 @@ class SettingsViewModel(
             if (showProgress || previous == null || previous.mode != target || previous.checking) {
                 _access.value = AccessState(target, checking = true, shizuku = previous?.shizuku?.takeIf { previous.mode == target })
             }
-            _access.value = withContext(Dispatchers.IO) { probeAccess(target, path ?: settings.chatpicPath.first()) }
+            val state = withContext(Dispatchers.IO) { probeAccess(target, path ?: settings.chatpicPath.first()) }
+            _access.value = state
+            // 页面刚打开时设置还没读出来，会先按默认的 Shizuku 检测一次：不是当前方式的结果不记
+            if (target == settings.accessMode.first()) analytics?.accessChecked(target.name.lowercase(), state.resultCode())
         }
+    }
+
+    /** 统计用的检测结果 */
+    private fun AccessState.resultCode(): String = when {
+        shizuku?.state == ShizukuState.NotInstalled -> "not_installed"
+        shizuku?.state == ShizukuState.NotRunning -> "not_running"
+        shizuku?.state == ShizukuState.PermissionDenied -> "denied"
+        granted == false -> if (mode == AccessMode.ROOT) "denied" else "unavailable"
+        folderFound == false -> "no_folder"
+        else -> "ok"
     }
 
     private suspend fun probeAccess(mode: AccessMode, path: String): AccessState {
@@ -117,7 +135,13 @@ class SettingsViewModel(
 
     /** 风险提示里点了开启 */
     fun enableAdvancedFeatures() {
+        analytics?.advancedRisk(confirmed = true)
         persist { settings.enableAdvancedFeatures() }
+    }
+
+    /** 风险提示里点了取消 */
+    fun cancelAdvancedFeatures() {
+        analytics?.advancedRisk(confirmed = false)
     }
 
     fun requestShizuku() {
@@ -264,8 +288,15 @@ class SettingsViewModel(
 
     data class Footprint(val databaseBytes: Long, val logBytes: Long)
 
-    /** 首次引导走完（或跳过） */
-    fun finishOnboarding() = persist { settings.setOnboardingDone(true) }
+    /** 同意了用户协议（引导里或协议更新后） */
+    fun acceptAgreement() = persist { settings.setAgreementVersion(AGREEMENT_VERSION) }
+
+    /** 首次引导走完；[scan] 是点了开始扫描 */
+    fun finishOnboarding(scan: Boolean) {
+        val access = _access.value
+        analytics?.onboardingDone(scan, (access?.mode ?: AccessMode.SHIZUKU).name.lowercase(), access?.ready == true)
+        persist { settings.setOnboardingDone(true) }
+    }
 
     companion object {
         /** 设置写串行锁（公平）：见 [persist]；跨页面 ViewModel 实例共用，防先后两页的写乱序覆盖 */

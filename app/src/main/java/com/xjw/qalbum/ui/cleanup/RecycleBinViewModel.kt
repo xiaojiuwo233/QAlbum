@@ -7,6 +7,12 @@ import androidx.paging.PagingConfig
 import androidx.paging.PagingData
 import androidx.paging.cachedIn
 import androidx.paging.map as pagingMap
+import com.xjw.qalbum.analytics.Analytics
+import com.xjw.qalbum.analytics.elapsedMs
+import com.xjw.qalbum.analytics.originalsDeleted
+import com.xjw.qalbum.analytics.originalsRestored
+import com.xjw.qalbum.analytics.trashPurged
+import com.xjw.qalbum.analytics.trashRestored
 import com.xjw.qalbum.data.db.AppDatabase
 import com.xjw.qalbum.data.db.RecycleBinSql
 import com.xjw.qalbum.data.db.StatsCache
@@ -78,6 +84,7 @@ class RecycleBinViewModel(
     private val appScope: CoroutineScope,
     private val statsCache: StatsCache,
     private val demo: DemoMode,
+    private val analytics: Analytics? = null,
 ) : ViewModel() {
     private val dao = db.cleanupDao()
 
@@ -238,7 +245,9 @@ class RecycleBinViewModel(
                 return@launchCleanupOp
             }
             val records = records(imageIds)
+            val started = System.nanoTime()
             val report = restoreGroups("正在$label…", records.map { it.id }, keepExisting = false, thenArchive)
+            analytics?.trashRestored(records.size, report.groups.size, report.occupied.size, thenArchive, keepExisting = false, elapsedMs(started))
             val failed = records.size - report.groups.size - report.occupied.size
             CleanupOpState.message.value = listOfNotNull(
                 restoredText(report.groups.size, thenArchive),
@@ -254,7 +263,11 @@ class RecycleBinViewModel(
         _conflict.value = null
         val label = if (conflict.thenArchive) "恢复并归档" else "恢复"
         appScope.launchCleanupOp(label, demo) {
+            val started = System.nanoTime()
             val report = restoreGroups("正在$label…", conflict.quarantineIds, keepExisting = true, conflict.thenArchive)
+            analytics?.trashRestored(
+                conflict.quarantineIds.size, report.groups.size, report.occupied.size, conflict.thenArchive, keepExisting = true, elapsedMs(started),
+            )
             val failed = conflict.quarantineIds.size - report.groups.size
             CleanupOpState.message.value = listOfNotNull(
                 restoredText(report.groups.size, conflict.thenArchive),
@@ -286,6 +299,7 @@ class RecycleBinViewModel(
         return appScope.launchCleanupOp("永久删除", demo) {
             val records = records(imageIds)
             var purged = 0
+            val started = System.nanoTime()
             progress("正在永久删除…", records.size) { report ->
                 refreshGate.hold {
                     var done = 0
@@ -296,6 +310,7 @@ class RecycleBinViewModel(
                     }
                 }
             }
+            analytics?.trashPurged("selected", records.size, purged, records.sumOf { it.size }, elapsedMs(started))
             CleanupOpState.message.value =
                 if (purged == records.size) "已永久删除 $purged 张" else "已永久删除 $purged 张，${records.size - purged} 张没删掉，可稍后重试"
             onMain(onDone)
@@ -307,6 +322,8 @@ class RecycleBinViewModel(
         appScope.launchCleanupOp("清空回收站", demo) {
             val total = dao.countQuarantine()
             var purged = 0
+            var bytes = 0L
+            val started = System.nanoTime()
             progress("正在清空回收站…", total) { report ->
                 refreshGate.hold {
                     var processed = 0
@@ -316,11 +333,13 @@ class RecycleBinViewModel(
                         if (page.isEmpty()) break
                         afterId = page.last().id
                         purged += quarantine.purgeByRecords(page)
+                        bytes += page.sumOf { it.size }
                         processed += page.size
                         report(processed.coerceAtMost(total), total)
                     }
                 }
             }
+            analytics?.trashPurged("all", total, purged, bytes, elapsedMs(started))
             CleanupOpState.message.value = "已永久删除 $purged 张"
         }
     }
@@ -339,6 +358,7 @@ class RecycleBinViewModel(
                     }
                 }
             }
+            analytics?.originalsRestored("recycle_bin", ids.size, restored)
             CleanupOpState.message.value =
                 if (restored == ids.size) "已还原 $restored 张原图" else "已还原 $restored 张，${ids.size - restored} 张没能还原：文件已变化或无法访问"
             onMain(onDone)
@@ -361,6 +381,7 @@ class RecycleBinViewModel(
                     }
                 }
             }
+            analytics?.originalsDeleted("selected", deleted)
             CleanupOpState.message.value = "已删除 $deleted 张原图"
             onMain(onDone)
         }
@@ -372,6 +393,7 @@ class RecycleBinViewModel(
             val deleted = progress("正在删除原图…", total) { report ->
                 refreshGate.hold { compressor.purgeAll { done -> report(done.coerceAtMost(total), total) } }
             }
+            analytics?.originalsDeleted("all", deleted)
             CleanupOpState.message.value = "已删除 $deleted 张原图"
         }
     }

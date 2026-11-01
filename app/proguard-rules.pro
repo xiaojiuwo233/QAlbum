@@ -39,5 +39,9 @@
 # --- Coil ---
 -dontwarn coil3.**
 
+# --- 统计 ---
+# 统计事件里的 error 参数是异常类名：自己的异常类保留名字（崩溃报告由 Crashlytics 按映射文件还原，不受影响）
+-keepnames class com.xjw.qalbum.** extends java.lang.Throwable
+
 # Compose 不需要任何手写 keep（各库自带 consumer 规则、无反射依赖）；
 # 全量 keep 会让 material-icons-extended 的数千个未用图标类无法被 R8 裁剪，dex 膨胀数 MB。

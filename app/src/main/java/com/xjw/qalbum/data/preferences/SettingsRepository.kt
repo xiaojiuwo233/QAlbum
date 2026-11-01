@@ -12,6 +12,8 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.xjw.qalbum.analytics.onOff
+import com.xjw.qalbum.analytics.ruleKey
 import com.xjw.qalbum.domain.model.AccessMode
 import com.xjw.qalbum.domain.model.GallerySort
 import com.xjw.qalbum.domain.model.PaletteStyle
@@ -20,7 +22,11 @@ import com.xjw.qalbum.domain.model.SourceSort
 import com.xjw.qalbum.domain.model.ThemeMode
 import com.xjw.qalbum.domain.model.ThemeSettings
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -63,6 +69,23 @@ class SettingsRepository(
 
     private val cleanupJson = Json { ignoreUnknownKeys = true }
 
+    private val _userChanges = MutableSharedFlow<SettingChange>(extraBufferCapacity = 32, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+
+    /**
+     * 用户在界面上改了的设置（统计哪些设置最常改，见 Analytics）：键名与新值，开关记 on / off，
+     * 目录、子目录名这类只记改了、不记内容。后台自己记的状态（读取进度、上次结果等）不在这里。
+     */
+    val userChanges: SharedFlow<SettingChange> = _userChanges.asSharedFlow()
+
+    private suspend fun <T> setByUser(key: Preferences.Key<T>, value: T, reported: String? = value.toString(), name: String = key.name) {
+        var changed = false
+        ds.edit { prefs ->
+            changed = prefs[key] != value
+            prefs[key] = value
+        }
+        if (changed) _userChanges.tryEmit(SettingChange(name, reported))
+    }
+
     // ---- 权限模式 ----
 
     val accessMode: Flow<AccessMode> = prefsData.map { prefs ->
@@ -70,9 +93,7 @@ class SettingsRepository(
         runCatching { AccessMode.valueOf(raw) }.getOrDefault(AccessMode.SHIZUKU)
     }
 
-    suspend fun setAccessMode(mode: AccessMode) {
-        ds.edit { it[Keys.ACCESS_MODE] = mode.name }
-    }
+    suspend fun setAccessMode(mode: AccessMode) = setByUser(Keys.ACCESS_MODE, mode.name, mode.name.lowercase())
 
     // ---- 扫描路径 ----
 
@@ -105,34 +126,29 @@ class SettingsRepository(
     /** 每天在充电时自动读取聊天来源里的新消息（Root），默认关闭 */
     val qqAutoRefresh: Flow<Boolean> = prefsData.map { it[Keys.QQ_AUTO_REFRESH] ?: false }
 
-    suspend fun setQqAutoRefresh(enabled: Boolean) {
-        ds.edit { it[Keys.QQ_AUTO_REFRESH] = enabled }
-    }
+    suspend fun setQqAutoRefresh(enabled: Boolean) = setByUser(Keys.QQ_AUTO_REFRESH, enabled, onOff(enabled))
 
     suspend fun setChatpicPath(path: String) {
         // 规范化 + 拒绝空值：root="" 会让扫描把根前缀算成 "/"，全部目录快照被判「消失」，
         // 后台增量扫描随即把 200 万行批量标记 missing（图库瞬间清空），因此空串绝不落盘
         val normalized = path.trim().trimEnd('/')
         if (normalized.isBlank()) return
-        ds.edit { it[Keys.CHATPIC_PATH] = normalized }
+        setByUser(Keys.CHATPIC_PATH, normalized, if (normalized == DEFAULT_CHATPIC_PATH) "default" else "custom")
     }
 
     // ---- 回收站保留时长 ----
 
     val quarantineRetentionDays: Flow<Int> = prefsData.map { it[Keys.QUARANTINE_DAYS] ?: 30 }
 
-    suspend fun setQuarantineRetentionDays(days: Int) {
-        ds.edit { it[Keys.QUARANTINE_DAYS] = days }
-    }
+    suspend fun setQuarantineRetentionDays(days: Int) = setByUser(Keys.QUARANTINE_DAYS, days)
 
     // ---- 清理规则与原图压缩 ----
 
     /** 某条清理规则上次选的参数（天数 / 年数 / 大小档位）；没选过为 null，用规则自己的默认值 */
     fun cleanupRuleParam(ruleId: String): Flow<Int?> = prefsData.map { it[ruleParamKey(ruleId)] }
 
-    suspend fun setCleanupRuleParam(ruleId: String, value: Int) {
-        ds.edit { it[ruleParamKey(ruleId)] = value }
-    }
+    suspend fun setCleanupRuleParam(ruleId: String, value: Int) =
+        setByUser(ruleParamKey(ruleId), value, name = "cleanup_rule_${ruleKey(ruleId)}")
 
     private fun ruleParamKey(ruleId: String) = intPreferencesKey("cleanup_rule_$ruleId")
 
@@ -140,18 +156,19 @@ class SettingsRepository(
     val scheduledCleanupRules: Flow<Set<String>> = prefsData.map { it[Keys.SCHEDULED_CLEANUP] ?: emptySet() }
 
     suspend fun setScheduledCleanupRule(ruleId: String, enabled: Boolean) {
+        var changed = false
         ds.edit { prefs ->
             val current = prefs[Keys.SCHEDULED_CLEANUP] ?: emptySet()
+            changed = (ruleId in current) != enabled
             prefs[Keys.SCHEDULED_CLEANUP] = if (enabled) current + ruleId else current - ruleId
         }
+        if (changed) _userChanges.tryEmit(SettingChange(Keys.SCHEDULED_CLEANUP.name, "${ruleKey(ruleId)}:${onOff(enabled)}"))
     }
 
     /** 后台自动扫描新图片（每 6 小时一次，增量） */
     val autoScan: Flow<Boolean> = prefsData.map { it[Keys.AUTO_SCAN] ?: true }
 
-    suspend fun setAutoScan(enabled: Boolean) {
-        ds.edit { it[Keys.AUTO_SCAN] = enabled }
-    }
+    suspend fun setAutoScan(enabled: Boolean) = setByUser(Keys.AUTO_SCAN, enabled, onOff(enabled))
 
     /** 上次自动扫描的结果（扫描页显示），没跑过为 null */
     val autoScanLast: Flow<String?> = prefsData.map { it[Keys.AUTO_SCAN_LAST] }
@@ -170,25 +187,20 @@ class SettingsRepository(
     /** 原图压缩后的长边上限（像素）；0 = 不缩小分辨率，只重新编码 */
     val compressMaxSide: Flow<Int> = prefsData.map { it[Keys.COMPRESS_MAX_SIDE] ?: DEFAULT_COMPRESS_MAX_SIDE }
 
-    suspend fun setCompressMaxSide(side: Int) {
-        ds.edit { it[Keys.COMPRESS_MAX_SIDE] = side.coerceAtLeast(0) }
-    }
+    suspend fun setCompressMaxSide(side: Int) = setByUser(Keys.COMPRESS_MAX_SIDE, side.coerceAtLeast(0))
 
     /** 压缩时把原图留在回收站（到期自动删除）；关闭则压缩后立即释放空间 */
     val compressKeepOriginal: Flow<Boolean> = prefsData.map { it[Keys.COMPRESS_KEEP_ORIGINAL] ?: true }
 
-    suspend fun setCompressKeepOriginal(keep: Boolean) {
-        ds.edit { it[Keys.COMPRESS_KEEP_ORIGINAL] = keep }
-    }
+    suspend fun setCompressKeepOriginal(keep: Boolean) = setByUser(Keys.COMPRESS_KEEP_ORIGINAL, keep, onOff(keep))
 
     /** 压缩质量（JPEG 质量，百分比）：越小越模糊、省得越多 */
     val compressQuality: Flow<Int> = prefsData.map { prefs ->
         prefs[Keys.COMPRESS_QUALITY]?.takeIf { it in MIN_COMPRESS_QUALITY..MAX_COMPRESS_QUALITY } ?: DEFAULT_COMPRESS_QUALITY
     }
 
-    suspend fun setCompressQuality(quality: Int) {
-        ds.edit { it[Keys.COMPRESS_QUALITY] = quality.coerceIn(MIN_COMPRESS_QUALITY, MAX_COMPRESS_QUALITY) }
-    }
+    suspend fun setCompressQuality(quality: Int) =
+        setByUser(Keys.COMPRESS_QUALITY, quality.coerceIn(MIN_COMPRESS_QUALITY, MAX_COMPRESS_QUALITY))
 
     /** 0.2.1 压缩 / 还原留下的文件属主已修正（只需做一次） */
     val ownershipRepaired: Flow<Boolean> = prefsData.map { it[Keys.OWNERSHIP_REPAIRED] ?: false }
@@ -200,9 +212,7 @@ class SettingsRepository(
     /** 压缩后先对比：压缩结果先放在缓存里给用户对比，点「应用」才替换原图；关闭则直接替换 */
     val compressCompare: Flow<Boolean> = prefsData.map { it[Keys.COMPRESS_COMPARE] ?: true }
 
-    suspend fun setCompressCompare(enabled: Boolean) {
-        ds.edit { it[Keys.COMPRESS_COMPARE] = enabled }
-    }
+    suspend fun setCompressCompare(enabled: Boolean) = setByUser(Keys.COMPRESS_COMPARE, enabled, onOff(enabled))
 
     // ---- 图库页偏好（列数 / 排序 / 大图标记阈值） ----
 
@@ -212,95 +222,72 @@ class SettingsRepository(
             .coerceIn(MIN_GALLERY_COLUMNS, MAX_GALLERY_COLUMNS)
     }
 
-    suspend fun setGalleryColumns(columns: Int) {
-        ds.edit { it[Keys.GALLERY_COLUMNS] = columns.coerceIn(MIN_GALLERY_COLUMNS, MAX_GALLERY_COLUMNS) }
-    }
+    suspend fun setGalleryColumns(columns: Int) =
+        setByUser(Keys.GALLERY_COLUMNS, columns.coerceIn(MIN_GALLERY_COLUMNS, MAX_GALLERY_COLUMNS))
 
     /** 图库排列顺序（详情页左右滑动共用此排序） */
     val gallerySort: Flow<GallerySort> = prefsData.map { GallerySort.fromName(it[Keys.GALLERY_SORT]) }
 
-    suspend fun setGallerySort(sort: GallerySort) {
-        ds.edit { it[Keys.GALLERY_SORT] = sort.name }
-    }
+    suspend fun setGallerySort(sort: GallerySort) = setByUser(Keys.GALLERY_SORT, sort.name, sort.name.lowercase())
 
     /** 归档页排列顺序（归档页看图左右滑动也按它） */
     val archiveSort: Flow<SourceSort> = prefsData.map { SourceSort.fromName(it[Keys.ARCHIVE_SORT]) }
 
-    suspend fun setArchiveSort(sort: SourceSort) {
-        ds.edit { it[Keys.ARCHIVE_SORT] = sort.name }
-    }
+    suspend fun setArchiveSort(sort: SourceSort) = setByUser(Keys.ARCHIVE_SORT, sort.name, sort.name.lowercase())
 
     /** QQ 来源图片的排列方式（日期 / 大小，升序 / 降序） */
     val qqSourceSort: Flow<SourceSort> = prefsData.map { SourceSort.fromName(it[Keys.QQ_SOURCE_SORT]) }
 
-    suspend fun setQqSourceSort(sort: SourceSort) {
-        ds.edit { it[Keys.QQ_SOURCE_SORT] = sort.name }
-    }
+    suspend fun setQqSourceSort(sort: SourceSort) = setByUser(Keys.QQ_SOURCE_SORT, sort.name, sort.name.lowercase())
 
     /** 清理规则预览页的排序（各规则共用） */
     val cleanupRuleSort: Flow<SourceSort> = prefsData.map { SourceSort.fromName(it[Keys.CLEANUP_RULE_SORT]) }
 
-    suspend fun setCleanupRuleSort(sort: SourceSort) {
-        ds.edit { it[Keys.CLEANUP_RULE_SORT] = sort.name }
-    }
+    suspend fun setCleanupRuleSort(sort: SourceSort) = setByUser(Keys.CLEANUP_RULE_SORT, sort.name, sort.name.lowercase())
 
     /** 回收站的排序（日期按移入回收站的时间） */
     val recycleBinSort: Flow<SourceSort> = prefsData.map { SourceSort.fromName(it[Keys.RECYCLE_BIN_SORT]) }
 
-    suspend fun setRecycleBinSort(sort: SourceSort) {
-        ds.edit { it[Keys.RECYCLE_BIN_SORT] = sort.name }
-    }
+    suspend fun setRecycleBinSort(sort: SourceSort) = setByUser(Keys.RECYCLE_BIN_SORT, sort.name, sort.name.lowercase())
 
     /** 视频页的排序 */
     val videoSort: Flow<SourceSort> = prefsData.map { SourceSort.fromName(it[Keys.VIDEO_SORT]) }
 
-    suspend fun setVideoSort(sort: SourceSort) {
-        ds.edit { it[Keys.VIDEO_SORT] = sort.name }
-    }
+    suspend fun setVideoSort(sort: SourceSort) = setByUser(Keys.VIDEO_SORT, sort.name, sort.name.lowercase())
 
     /** 视频页包含收到的文件（QQfile_recv，多是手动下载的群文件）；默认只看聊天视频 */
     val videoIncludeFiles: Flow<Boolean> = prefsData.map { it[Keys.VIDEO_INCLUDE_FILES] ?: false }
 
-    suspend fun setVideoIncludeFiles(include: Boolean) {
-        ds.edit { it[Keys.VIDEO_INCLUDE_FILES] = include }
-    }
+    suspend fun setVideoIncludeFiles(include: Boolean) = setByUser(Keys.VIDEO_INCLUDE_FILES, include, onOff(include))
 
     /** QQ 来源分类列表的排序 */
     val qqSourceFacetOrder: Flow<SourceFacetOrder> = prefsData.map { SourceFacetOrder.fromName(it[Keys.QQ_SOURCE_FACET_ORDER]) }
 
-    suspend fun setQqSourceFacetOrder(order: SourceFacetOrder) {
-        ds.edit { it[Keys.QQ_SOURCE_FACET_ORDER] = order.name }
-    }
+    suspend fun setQqSourceFacetOrder(order: SourceFacetOrder) =
+        setByUser(Keys.QQ_SOURCE_FACET_ORDER, order.name, order.name.lowercase())
 
     /** 超过该字节数的图片，在缩略图右上角显示「MB+」大图标记 */
     val galleryLargeThresholdBytes: Flow<Long> = prefsData.map {
         it[Keys.GALLERY_LARGE_BYTES] ?: DEFAULT_LARGE_THRESHOLD_BYTES
     }
 
-    suspend fun setGalleryLargeThresholdBytes(bytes: Long) {
-        ds.edit { it[Keys.GALLERY_LARGE_BYTES] = bytes.coerceAtLeast(MIN_LARGE_THRESHOLD_BYTES) }
-    }
+    suspend fun setGalleryLargeThresholdBytes(bytes: Long) =
+        setByUser(Keys.GALLERY_LARGE_BYTES, bytes.coerceAtLeast(MIN_LARGE_THRESHOLD_BYTES))
 
     /** 图库合并同一张 QQ 图片的原图 / 预览图 / 缩略图（只显示最大的那张，左下角显示版本数），默认开启 */
     val galleryStackVariants: Flow<Boolean> = prefsData.map { it[Keys.GALLERY_STACK_VARIANTS] ?: true }
 
-    suspend fun setGalleryStackVariants(enabled: Boolean) {
-        ds.edit { it[Keys.GALLERY_STACK_VARIANTS] = enabled }
-    }
+    suspend fun setGalleryStackVariants(enabled: Boolean) = setByUser(Keys.GALLERY_STACK_VARIANTS, enabled, onOff(enabled))
 
     /** 图片网格右侧的快速滚动条（滚动时出现，按住拖动快速定位），默认开启 */
     val fastScrollEnabled: Flow<Boolean> = prefsData.map { it[Keys.FAST_SCROLL] ?: true }
 
-    suspend fun setFastScrollEnabled(enabled: Boolean) {
-        ds.edit { it[Keys.FAST_SCROLL] = enabled }
-    }
+    suspend fun setFastScrollEnabled(enabled: Boolean) = setByUser(Keys.FAST_SCROLL, enabled, onOff(enabled))
 
     /** 归档的图片也在图库、来源等处照常显示（像收藏一样）；默认关闭，只在归档页出现 */
     val archiveVisible: Flow<Boolean> = prefsData.map { it[Keys.ARCHIVE_VISIBLE] ?: false }.distinctUntilChanged()
 
-    suspend fun setArchiveVisible(visible: Boolean) {
-        ds.edit { it[Keys.ARCHIVE_VISIBLE] = visible }
-    }
+    suspend fun setArchiveVisible(visible: Boolean) = setByUser(Keys.ARCHIVE_VISIBLE, visible, onOff(visible))
 
     /** 已完成的图片家族回填版本（见 PictureVariantIndexer） */
     val variantIndexVersion: Flow<Int> = prefsData.map { it[Keys.VARIANT_INDEX_VERSION] ?: 0 }
@@ -328,25 +315,15 @@ class SettingsRepository(
         )
     }.distinctUntilChanged()
 
-    suspend fun setThemeMode(mode: ThemeMode) {
-        ds.edit { it[Keys.THEME_MODE] = mode.name }
-    }
+    suspend fun setThemeMode(mode: ThemeMode) = setByUser(Keys.THEME_MODE, mode.name, mode.name.lowercase())
 
-    suspend fun setDynamicColorEnabled(enabled: Boolean) {
-        ds.edit { it[Keys.DYNAMIC_COLOR] = enabled }
-    }
+    suspend fun setDynamicColorEnabled(enabled: Boolean) = setByUser(Keys.DYNAMIC_COLOR, enabled, onOff(enabled))
 
-    suspend fun setSeedColor(color: Int) {
-        ds.edit { it[Keys.SEED_COLOR] = color }
-    }
+    suspend fun setSeedColor(color: Int) = setByUser(Keys.SEED_COLOR, color, "#%06X".format(color and 0xFFFFFF))
 
-    suspend fun setPaletteStyle(style: PaletteStyle) {
-        ds.edit { it[Keys.PALETTE_STYLE] = style.name }
-    }
+    suspend fun setPaletteStyle(style: PaletteStyle) = setByUser(Keys.PALETTE_STYLE, style.name, style.name.lowercase())
 
-    suspend fun setPureBlack(enabled: Boolean) {
-        ds.edit { it[Keys.PURE_BLACK] = enabled }
-    }
+    suspend fun setPureBlack(enabled: Boolean) = setByUser(Keys.PURE_BLACK, enabled, onOff(enabled))
 
     // ---- 首次引导 ----
 
@@ -369,36 +346,54 @@ class SettingsRepository(
 
     val detailSharedTransition: Flow<Boolean> = prefsData.map { it[Keys.DETAIL_SHARED_TRANSITION] ?: true }
 
-    suspend fun setDetailSharedTransition(enabled: Boolean) {
-        ds.edit { it[Keys.DETAIL_SHARED_TRANSITION] = enabled }
-    }
+    suspend fun setDetailSharedTransition(enabled: Boolean) = setByUser(Keys.DETAIL_SHARED_TRANSITION, enabled, onOff(enabled))
 
     // ---- 高级功能（读取并解密 QQ 数据库：聊天来源等，见 ChatFeatures）：只能在「设置 → 文件访问」的 Root 方式下开启 ----
 
     val advancedFeatures: Flow<Boolean> = prefsData.map { it[Keys.ADVANCED_FEATURES] ?: false }
 
-    suspend fun setAdvancedFeatures(enabled: Boolean) {
-        ds.edit { it[Keys.ADVANCED_FEATURES] = enabled }
-    }
+    suspend fun setAdvancedFeatures(enabled: Boolean) = setByUser(Keys.ADVANCED_FEATURES, enabled, onOff(enabled))
 
     /** 第一次开启时看过风险提示（之后再开不再提示） */
     val advancedRiskAcknowledged: Flow<Boolean> = prefsData.map { it[Keys.ADVANCED_RISK_ACK] ?: false }
 
     /** 看完风险提示后开启 */
     suspend fun enableAdvancedFeatures() {
+        var changed = false
         ds.edit {
+            changed = it[Keys.ADVANCED_FEATURES] != true
             it[Keys.ADVANCED_RISK_ACK] = true
             it[Keys.ADVANCED_FEATURES] = true
         }
+        if (changed) _userChanges.tryEmit(SettingChange(Keys.ADVANCED_FEATURES.name, onOff(true)))
     }
 
     // ---- 演示模式（截图用，见 DemoMode）----
 
     val demoMode: Flow<Boolean> = prefsData.map { it[Keys.DEMO_MODE] ?: false }
 
-    suspend fun setDemoMode(enabled: Boolean) {
-        ds.edit { it[Keys.DEMO_MODE] = enabled }
+    suspend fun setDemoMode(enabled: Boolean) = setByUser(Keys.DEMO_MODE, enabled, onOff(enabled))
+
+    // ---- 用户协议与统计（见 Analytics）----
+
+    /** 同意过的用户协议版本：0 是还没同意过；协议更新（版本变大）后要重新同意，之前不收集任何统计 */
+    val agreementVersion: Flow<Int> = prefsData.map { it[Keys.AGREEMENT_VERSION] ?: 0 }
+
+    suspend fun setAgreementVersion(version: Int) {
+        ds.edit { it[Keys.AGREEMENT_VERSION] = version }
     }
+
+    /** 匿名统计，默认开启；关掉后只统计活跃用户（关掉这件事本身不记） */
+    val usageAnalytics: Flow<Boolean> = prefsData.map { it[Keys.USAGE_ANALYTICS] ?: true }
+
+    suspend fun setUsageAnalytics(enabled: Boolean) {
+        ds.edit { it[Keys.USAGE_ANALYTICS] = enabled }
+    }
+
+    /** 自动上传崩溃日志，默认开启 */
+    val crashReports: Flow<Boolean> = prefsData.map { it[Keys.CRASH_REPORTS] ?: true }
+
+    suspend fun setCrashReports(enabled: Boolean) = setByUser(Keys.CRASH_REPORTS, enabled, onOff(enabled))
 
     // ---- 导出相册子目录（保存图片到 Pictures/QAlbum/<子目录>）----
 
@@ -415,6 +410,7 @@ class SettingsRepository(
                     prefs[Keys.EXPORT_SUBDIRS] = cleanupJson.encodeToString(current + clean)
                 }
             }
+            _userChanges.tryEmit(SettingChange(Keys.EXPORT_SUBDIRS.name, "add"))
         }
     }
 
@@ -425,6 +421,7 @@ class SettingsRepository(
                 val current = decodeSubdirs(prefs[Keys.EXPORT_SUBDIRS])
                 prefs[Keys.EXPORT_SUBDIRS] = cleanupJson.encodeToString(current.filterNot { it == name })
             }
+            _userChanges.tryEmit(SettingChange(Keys.EXPORT_SUBDIRS.name, "remove"))
         }
     }
 
@@ -504,6 +501,12 @@ class SettingsRepository(
         val DEMO_MODE = booleanPreferencesKey("demo_mode")
         val ADVANCED_FEATURES = booleanPreferencesKey("advanced_features")
         val ADVANCED_RISK_ACK = booleanPreferencesKey("advanced_risk_ack")
+        val AGREEMENT_VERSION = intPreferencesKey("agreement_version")
+        val USAGE_ANALYTICS = booleanPreferencesKey("usage_analytics")
+        val CRASH_REPORTS = booleanPreferencesKey("crash_reports")
         val EXPORT_SUBDIRS = stringPreferencesKey("export_subdirs")
     }
 }
+
+/** 界面上改的一项设置：[key] 键名，[value] 新值（开关为 on / off；图片目录只记 default / custom，导出子目录只记 add / remove） */
+data class SettingChange(val key: String, val value: String?)

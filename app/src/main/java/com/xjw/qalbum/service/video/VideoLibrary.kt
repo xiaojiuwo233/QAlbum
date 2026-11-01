@@ -9,6 +9,11 @@ import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
 import androidx.room.withTransaction
 import com.xjw.qalbum.access.AccessManager
+import com.xjw.qalbum.analytics.Analytics
+import com.xjw.qalbum.analytics.elapsedMs
+import com.xjw.qalbum.analytics.savedToAlbum
+import com.xjw.qalbum.analytics.videoScanned
+import com.xjw.qalbum.analytics.videosDeleted
 import com.xjw.qalbum.data.db.AppDatabase
 import com.xjw.qalbum.data.db.entity.VideoEntity
 import com.xjw.qalbum.data.preferences.SettingsRepository
@@ -38,6 +43,7 @@ class VideoLibrary(
     private val accessManager: AccessManager,
     private val fileOpsClient: FileOpsClient,
     private val settings: SettingsRepository,
+    private val analytics: Analytics? = null,
 ) {
     private val dao = db.videoDao()
 
@@ -54,13 +60,18 @@ class VideoLibrary(
      * [includeFiles] 为假时不扫收到的文件（QQfile_recv），已有的记录留着，页面上不显示。
      */
     suspend fun refresh(includeFiles: Boolean, onScanned: (ScanReport) -> Unit) = withContext(Dispatchers.IO) {
+        val started = System.nanoTime()
         val done = withOps { bound ->
             val report = ScanReport(scan(bound, QqStorageRoots.fromChatpic(settings.chatpicPath.first()), includeFiles))
+            analytics?.videoScanned(report.found, includeFiles, elapsedMs(started), ok = true)
             onScanned(report)
             val filled = fillMetadata(bound, sourcesOf(includeFiles))
             if (filled > 0) Timber.i("Video metadata read: %d", filled)
         }
-        if (done == null) onScanned(ScanReport(0, noAccess = true))
+        if (done == null) {
+            analytics?.videoScanned(0, includeFiles, elapsedMs(started), ok = false)
+            onScanned(ScanReport(0, noAccess = true))
+        }
     }
 
     /** 扫描 [roots] 下的聊天视频（[includeFiles] 时还有收到的视频文件）并入库，返回找到的个数 */
@@ -183,7 +194,10 @@ class VideoLibrary(
     /** 永久删除：核对文件还是扫描时那个（大小、修改时间没变）再删；文件已经不在的只从列表去掉 */
     suspend fun delete(ids: Collection<Long>, onProgress: (done: Int, total: Int) -> Unit = { _, _ -> }): DeleteReport =
         withContext(Dispatchers.IO) {
-            withOps { bound -> delete(ids, bound, onProgress) } ?: DeleteReport(0, 0, 0, ids.size, noAccess = true)
+            val started = System.nanoTime()
+            (withOps { bound -> delete(ids, bound, onProgress) } ?: DeleteReport(0, 0, 0, ids.size, noAccess = true)).also { report ->
+                analytics?.videosDeleted(ids.size, report.deleted + report.gone, report.failed, report.bytes, elapsedMs(started))
+            }
         }
 
     internal suspend fun delete(ids: Collection<Long>, bound: BoundFileOps, onProgress: (done: Int, total: Int) -> Unit = { _, _ -> }): DeleteReport {
@@ -272,7 +286,7 @@ class VideoLibrary(
             Timber.e(t, "保存视频失败")
             false
         }
-    }
+    }.also { ok -> analytics?.savedToAlbum("video", "video", 1, if (ok) 1 else 0) }
 
     /**
      * 连上特权进程执行 [block]；连接中途断了（Shizuku 服务进程被回收、App 更新后旧进程退出）就重连再做一遍——

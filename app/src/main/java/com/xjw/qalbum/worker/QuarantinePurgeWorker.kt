@@ -3,6 +3,10 @@ package com.xjw.qalbum.worker
 import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
+import com.xjw.qalbum.analytics.Analytics
+import com.xjw.qalbum.analytics.elapsedMs
+import com.xjw.qalbum.analytics.originalsDeleted
+import com.xjw.qalbum.analytics.trashPurged
 import com.xjw.qalbum.service.cleanup.OriginalCompressor
 import com.xjw.qalbum.service.cleanup.QuarantineManager
 import org.koin.core.component.KoinComponent
@@ -23,12 +27,16 @@ class QuarantinePurgeWorker(
 
     private val quarantineManager: QuarantineManager by inject()
     private val compressor: OriginalCompressor by inject()
+    private val analytics: Analytics by inject()
 
     override suspend fun doWork(): Result {
         return try {
             val reconciled = quarantineManager.reconcilePending()
+            val started = System.nanoTime()
             val purged = quarantineManager.purgeExpired()
+            if (purged > 0) analytics.trashPurged("expired", purged, purged, null, elapsedMs(started))
             val originals = compressor.purgeExpired()
+            if (originals > 0) analytics.originalsDeleted("expired", originals)
             Timber.i("QuarantinePurgeWorker finished, reconciled=$reconciled, purged=$purged, originals=$originals")
             Result.success()
         } catch (t: Throwable) {

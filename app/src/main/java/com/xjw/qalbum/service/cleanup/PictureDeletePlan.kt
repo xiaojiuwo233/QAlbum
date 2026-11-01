@@ -54,11 +54,13 @@ internal data class PictureFileGroup(
     val key: String, val selectedIds: Set<Long>, val assets: List<PictureAsset>, val linked: Boolean, val blocked: Block? = null,
 ) { enum class Block { PROTECTED, SHARED, UNAVAILABLE } }
 
+/** [bytes] 处理掉的文件大小（统计用） */
 data class PictureDeleteResult(
-    val pictures: Int = 0, val files: Int = 0, val selectedProcessed: Int = 0, val skipped: Int = 0, val partial: Int = 0,
+    val pictures: Int = 0, val files: Int = 0, val selectedProcessed: Int = 0, val skipped: Int = 0, val partial: Int = 0, val bytes: Long = 0,
 ) {
     operator fun plus(other: PictureDeleteResult) = PictureDeleteResult(
         pictures + other.pictures, files + other.files, selectedProcessed + other.selectedProcessed, skipped + other.skipped, partial + other.partial,
+        bytes + other.bytes,
     )
 
     fun message(permanent: Boolean = false): String = buildString {

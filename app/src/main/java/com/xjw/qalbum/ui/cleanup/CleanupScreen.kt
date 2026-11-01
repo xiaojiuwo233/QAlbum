@@ -81,6 +81,8 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import com.xjw.qalbum.analytics.Analytics
+import com.xjw.qalbum.analytics.ruleKey
 import com.xjw.qalbum.service.cleanup.rules.CleanupRule
 import com.xjw.qalbum.service.cleanup.rules.CleanupRunner
 import com.xjw.qalbum.service.cleanup.rules.RuleAction
@@ -99,6 +101,7 @@ import com.xjw.qalbum.ui.components.WavyProgress
 import com.xjw.qalbum.ui.video.VideoScreen
 import kotlinx.coroutines.delay
 import org.koin.androidx.compose.koinViewModel
+import org.koin.compose.koinInject
 
 /** 下一次切子页不播动画（用一次就失效；不是快照状态，在转场规格里读写不触发重组） */
 private class OneShot {
@@ -177,6 +180,20 @@ fun CleanupScreen(
         onRecycleBinOpened()
     }
     LaunchedEffect(page.kind) { onSubPageChange(page.kind != CleanupPage.MAIN) }
+    // 统计：清理页和它的各个子页（规则只记规则 id，按时间清理的时间段记为 range）
+    val analytics = koinInject<Analytics>()
+    LaunchedEffect(page.kind, page.ruleId) {
+        analytics.screen(
+            when (page.kind) {
+                CleanupPage.RULE -> "cleanup_rule_" + ruleKey(page.ruleId.orEmpty())
+                CleanupPage.TIME -> "cleanup_time"
+                CleanupPage.BIN -> "recycle_bin"
+                CleanupPage.VIDEO -> "videos"
+                CleanupPage.QQ_CACHE -> "qq_cache"
+                else -> "cleanup"
+            },
+        )
+    }
     DisposableEffect(Unit) { onDispose { onSubPageChange(false) } }
     val back = {
         page = when {

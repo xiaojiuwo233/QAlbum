@@ -11,8 +11,8 @@ sealed class ScanProgress {
     /** 扫描完成 */
     data class Done(val total: Int) : ScanProgress()
 
-    /** 扫描出错 */
-    data class Failed(val reason: String) : ScanProgress()
+    /** 扫描出错；[code] 是统计用的原因代码（不含路径），出异常时为异常类名 */
+    data class Failed(val reason: String, val code: String = "error") : ScanProgress()
 
     /** 用户主动取消（区别于 Failed，不作为错误展示） */
     object Cancelled : ScanProgress()

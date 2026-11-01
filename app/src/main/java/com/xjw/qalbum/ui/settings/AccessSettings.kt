@@ -135,7 +135,10 @@ fun AccessSettingsScreen(
                 confirmAdvanced = false
                 viewModel.enableAdvancedFeatures()
             },
-            onDismiss = { confirmAdvanced = false },
+            onDismiss = {
+                confirmAdvanced = false
+                viewModel.cancelAdvancedFeatures()
+            },
         )
     }
 }

@@ -1,5 +1,7 @@
 package com.xjw.qalbum.service.cleanup.rules
 
+import com.xjw.qalbum.analytics.Analytics
+import com.xjw.qalbum.analytics.scheduledCleanup
 import com.xjw.qalbum.data.db.AppDatabase
 import com.xjw.qalbum.data.db.dao.RuleStats
 import com.xjw.qalbum.data.preferences.SettingsRepository
@@ -19,6 +21,7 @@ class ScheduledCleanup(
     private val db: AppDatabase,
     private val accessError: suspend () -> String?,
     private val trash: suspend (ids: List<Long>, title: String, linkedVersions: Boolean) -> Int,
+    private val analytics: Analytics? = null,
 ) {
     /** [moved] 移入回收站的张数，[bytes] 约占用，[parts] 每条规则的结果；[skipped] 没执行的原因 */
     data class Summary(val moved: Int, val bytes: Long, val parts: List<String>, val skipped: String? = null) {
@@ -37,6 +40,14 @@ class ScheduledCleanup(
         if (rules.isEmpty()) return Summary(0, 0, emptyList())
         val summary = accessError()?.let { Summary(0, 0, emptyList(), skipped = it) } ?: trashAll(rules, now)
         settings.setScheduledCleanupLast("${formatDateTime(now)} · ${summary.text}")
+        analytics?.scheduledCleanup(
+            rules.size, summary.moved, summary.bytes,
+            when {
+                summary.skipped != null -> "skipped"
+                summary.moved == 0 -> "nothing"
+                else -> "ok"
+            },
+        )
         return summary
     }
 

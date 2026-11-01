@@ -1,5 +1,11 @@
 package com.xjw.qalbum.service.cleanup
 
+import com.xjw.qalbum.analytics.Analytics
+import com.xjw.qalbum.analytics.compressDiscarded
+import com.xjw.qalbum.analytics.compressPreview
+import com.xjw.qalbum.analytics.compressed
+import com.xjw.qalbum.analytics.elapsedMs
+import com.xjw.qalbum.analytics.originalsRestored
 import com.xjw.qalbum.data.db.AppDatabase
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.preferences.SettingsRepository
@@ -37,6 +43,7 @@ class CompressionCoordinator(
     private val appScope: CoroutineScope,
     /** 演示模式下不压缩、不还原 */
     private val demo: DemoMode? = null,
+    private val analytics: Analytics? = null,
 ) {
     /** 对比页上的一张：压缩结果（或不能压缩的原因）与是否要应用 */
     data class Entry(val preview: Preview, val checked: Boolean) {
@@ -115,7 +122,7 @@ class CompressionCoordinator(
             val quality = settings.compressQuality.first()
             val maxSide = settings.compressMaxSide.first()
             if (!settings.compressCompare.first()) {
-                runner.compress(eligible.map { it.id }, quality, maxSide)
+                runner.compress(eligible.map { it.id }, quality, maxSide, from = "direct")
                 _messages.tryEmit(if (eligible.size == 1) "正在压缩…" else "正在后台压缩 ${eligible.size} 张")
                 return@launch
             }
@@ -175,6 +182,7 @@ class CompressionCoordinator(
         val chosen = review.chosen
         compressor.discard(review.entries.mapNotNull { it.prepared }.filterNot { it in chosen })
         appScope.launch {
+            val started = System.nanoTime()
             val outcome = if (chosen.isEmpty()) {
                 OriginalCompressor.Outcome()
             } else {
@@ -182,7 +190,11 @@ class CompressionCoordinator(
                     compressor.apply(chosen) { n -> handle.update("已替换 $n / ${chosen.size} 张", n.toLong(), chosen.size.toLong()) }
                 }
             }
-            if (review.remaining.isNotEmpty()) runner.compress(review.remaining, review.quality, review.maxSide)
+            if (chosen.isNotEmpty()) analytics?.compressed(
+                "compare", chosen.size, outcome.compressed, outcome.failed, outcome.skipped, outcome.savedBytes, elapsedMs(started),
+                review.quality, review.maxSide, settings.compressKeepOriginal.first(),
+            )
+            if (review.remaining.isNotEmpty()) runner.compress(review.remaining, review.quality, review.maxSide, from = "rest")
             _messages.tryEmit(applyText(outcome, chosen.size, review.remaining.size))
         }
     }
@@ -196,13 +208,16 @@ class CompressionCoordinator(
         }
         job?.cancel()
         (old as? Session.Review)?.let { review -> compressor.discard(review.entries.mapNotNull { it.prepared }) }
+        old?.let { analytics?.compressDiscarded(it.eligible, it.quality) }
     }
 
     /** 详情里的「还原原图」 */
     fun restoreOriginal(imageId: Long) {
         if (demo?.blocks() == true) return
         appScope.launch {
-            _messages.tryEmit(if (compressor.restore(imageId)) "已还原原图" else "还原失败：文件已变化或无法访问")
+            val restored = compressor.restore(imageId)
+            analytics?.originalsRestored("detail", 1, if (restored) 1 else 0)
+            _messages.tryEmit(if (restored) "已还原原图" else "还原失败：文件已变化或无法访问")
         }
     }
 
@@ -215,6 +230,7 @@ class CompressionCoordinator(
         }
         job?.cancel()
         job = appScope.launch {
+            val started = System.nanoTime()
             val previews = tasks.track("压缩对比", cancellable = false) {
                 compressor.prepare(current.targets, quality, current.maxSide) { done ->
                     publish(gen, Session.Preparing(quality, current.eligible, current.eligibleBytes, current.skipped, done, current.targets.size))
@@ -223,7 +239,15 @@ class CompressionCoordinator(
             val entries = previews.map { Entry(it, checked = it is Preview.Ready) } + current.unavailable.map { Entry(it, checked = false) }
             val review = Session.Review(quality, current.eligible, current.eligibleBytes, current.skipped, entries, current.remaining, current.maxSide)
             // 期间换了质量或撤销：这批结果作废
-            if (!publish(gen, review)) compressor.discard(entries.mapNotNull { it.prepared })
+            if (!publish(gen, review)) {
+                compressor.discard(entries.mapNotNull { it.prepared })
+                return@launch
+            }
+            val ready = previews.mapNotNull { (it as? Preview.Ready)?.prepared }
+            analytics?.compressPreview(
+                current.targets.size, ready.size, current.eligible, quality, current.maxSide, elapsedMs(started),
+                ready.sumOf { it.image.size }, ready.sumOf { it.savedBytes },
+            )
         }
     }
 

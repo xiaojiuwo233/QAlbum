@@ -9,6 +9,9 @@ import android.os.ParcelFileDescriptor
 import androidx.room.withTransaction
 import com.xjw.qalbum.access.AccessManager
 import com.xjw.qalbum.access.FileAccessProvider
+import com.xjw.qalbum.analytics.Analytics
+import com.xjw.qalbum.analytics.deleted
+import com.xjw.qalbum.analytics.elapsedMs
 import com.xjw.qalbum.data.db.AppDatabase
 import com.xjw.qalbum.data.db.StatsCache
 import com.xjw.qalbum.data.db.StatsCache.Companion.holding
@@ -69,6 +72,7 @@ class QuarantineManager(
     private val archive: ArchiveManager,
     /** 删除期间暂停清理页的统计重算（见 StatsCache.hold），数据库先给删除用 */
     private val statsCache: StatsCache? = null,
+    private val analytics: Analytics? = null,
 ) {
 
     /** 回收站根目录（外部专属目录；存储不可用时回退 filesDir） */
@@ -123,16 +127,30 @@ class QuarantineManager(
         if (accessManager.current().isAvailable()) null else "文件访问未授权，先在「设置 → 文件访问」里授权"
     }
 
-    /** [onProgress]（已处理的所选张数, 总数）每批回调一次，供 UI 显示进度 */
+    /**
+     * [onProgress]（已处理的所选张数, 总数）每批回调一次，供 UI 显示进度。
+     * [from] 是从哪里删的（统计用，见 Analytics.deleted）；分批调用的（规则、按来源清理）自己汇总后再记，不传。
+     */
     suspend fun quarantinePictures(
         ids: Collection<Long>, options: PictureDeleteOptions, reason: String, scope: QqSourceScope? = null,
-        onProgress: (done: Int, total: Int) -> Unit = { _, _ -> },
-    ): PictureDeleteResult = performPictures(ids,options,reason,scope,permanent=false,onProgress)
+        onProgress: (done: Int, total: Int) -> Unit = { _, _ -> }, from: String? = null,
+    ): PictureDeleteResult {
+        val started = System.nanoTime()
+        return performPictures(ids,options,reason,scope,permanent=false,onProgress).also { track(from, false, ids.size, it, started) }
+    }
 
     suspend fun deletePicturesPermanently(
         ids: Collection<Long>, options: PictureDeleteOptions, scope: QqSourceScope? = null,
-        onProgress: (done: Int, total: Int) -> Unit = { _, _ -> },
-    ): PictureDeleteResult = performPictures(ids,options,"",scope,permanent=true,onProgress)
+        onProgress: (done: Int, total: Int) -> Unit = { _, _ -> }, from: String? = null,
+    ): PictureDeleteResult {
+        val started = System.nanoTime()
+        return performPictures(ids,options,"",scope,permanent=true,onProgress).also { track(from, true, ids.size, it, started) }
+    }
+
+    private fun track(from: String?, permanent: Boolean, count: Int, result: PictureDeleteResult, started: Long) {
+        if (from == null || count == 0) return
+        analytics?.deleted(from, permanent, count, result.selectedProcessed, result.skipped, result.partial, result.bytes, elapsedMs(started))
+    }
 
     /** 按规划器的分块（约 200 张一批）整批处理：每批只有几个事务和几次 binder 调用，不逐组提交 */
     private suspend fun performPictures(

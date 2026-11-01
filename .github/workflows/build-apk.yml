@@ -64,11 +64,23 @@ jobs:
             echo "未配置 KEYSTORE_BASE64 Secret，本次构建回退使用 debug 签名"
           fi
 
-      # 6. JVM 单测
+      # 6. Firebase 配置
+      - name: Write Firebase config
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          if [ -n "$GOOGLE_SERVICES_JSON" ]; then
+            printf '%s' "$GOOGLE_SERVICES_JSON" > app/src/release/google-services.json
+            echo "已写入 Firebase 配置"
+          else
+            echo "未配置 GOOGLE_SERVICES_JSON Secret，本次发布版不启用统计"
+          fi
+
+      # 7. JVM 单测
       - name: Run unit tests
         run: ./gradlew testDebugUnitTest --stacktrace
 
-      # 7. GitHub Linux runner 上启用 KVM，执行 app 模块的 Room 迁移/分页/清理等设备测试
+      # 8. GitHub Linux runner 上启用 KVM，执行 app 模块的 Room 迁移/分页/清理等设备测试
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -85,7 +97,7 @@ jobs:
           disable-animations: true
           script: ./gradlew :app:connectedDebugAndroidTest --stacktrace --no-parallel --max-workers=1
 
-      # 8. 构建 Release APK（配置了密钥则用正式 release 签名，多次构建签名一致、可覆盖升级）
+      # 9. 构建 Release APK（配置了密钥则用正式 release 签名，多次构建签名一致、可覆盖升级）
       - name: Build Release APK
         env:
           KEYSTORE_FILE: ${{ github.workspace }}/release.keystore
@@ -94,11 +106,11 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: ./gradlew assembleRelease --stacktrace $GRADLE_SIGNING_FLAG
 
-      # 9. 输出产物路径与体积，便于在构建日志中确认
+      # 10. 输出产物路径与体积，便于在构建日志中确认
       - name: List APK output
         run: ls -lh app/build/outputs/apk/release/
 
-      # 10. 上传 APK 为可下载产物（在本次 workflow run 的 Artifacts 区下载）
+      # 11. 上传 APK 为可下载产物（在本次 workflow run 的 Artifacts 区下载）
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:

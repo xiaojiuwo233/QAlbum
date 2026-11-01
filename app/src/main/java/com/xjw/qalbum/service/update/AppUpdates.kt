@@ -2,6 +2,9 @@ package com.xjw.qalbum.service.update
 
 import com.xjw.qalbum.AppInfo
 import com.xjw.qalbum.BuildConfig
+import com.xjw.qalbum.analytics.Analytics
+import com.xjw.qalbum.analytics.updateChecked
+import com.xjw.qalbum.analytics.updateDialog
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -99,19 +102,36 @@ class UpdateChecker(private val currentVersionCode: Long = BuildConfig.VERSION_C
  * 有新版本时要弹窗显示的那个（[pending]）：打开 App 进概览时自动查一次（每次启动只查一次，查不到不提示），
  * 「关于」里手动查的结果也走这里。
  */
-class AppUpdates(private val checker: UpdateChecker, private val scope: CoroutineScope) {
+class AppUpdates(
+    private val checker: UpdateChecker,
+    private val scope: CoroutineScope,
+    private val analytics: Analytics? = null,
+) {
     private val launched = AtomicBoolean(false)
     private val _pending = MutableStateFlow<AppRelease?>(null)
     val pending: StateFlow<AppRelease?> = _pending.asStateFlow()
 
     fun checkOnLaunch() {
         if (!launched.compareAndSet(false, true)) return
-        scope.launch { (checker.check() as? UpdateResult.Available)?.let { _pending.value = it.release } }
+        scope.launch { (check(automatic = true) as? UpdateResult.Available)?.let { _pending.value = it.release } }
     }
 
-    suspend fun checkNow(): UpdateResult = checker.check().also { if (it is UpdateResult.Available) _pending.value = it.release }
+    suspend fun checkNow(): UpdateResult = check(automatic = false).also { if (it is UpdateResult.Available) _pending.value = it.release }
 
-    fun dismiss() {
+    private suspend fun check(automatic: Boolean): UpdateResult = checker.check().also { result ->
+        analytics?.updateChecked(
+            automatic,
+            when (result) {
+                is UpdateResult.Available -> "available"
+                UpdateResult.UpToDate -> "latest"
+                is UpdateResult.Failed -> "failed"
+            },
+        )
+    }
+
+    /** 关掉新版本弹窗；[download] 是点了「去下载」 */
+    fun dismiss(download: Boolean = false) {
+        if (_pending.value != null) analytics?.updateDialog(if (download) "download" else "later")
         _pending.value = null
     }
 }
