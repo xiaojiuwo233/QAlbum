@@ -25,7 +25,3 @@ keystore.properties
 release.keystore
 debug.keystore
 google-services.json
-
-# --- 参考文档 ---
-QQDecrypt/
-*.md

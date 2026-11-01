@@ -211,7 +211,7 @@ fun AboutSettingsScreen(
                     position = position,
                     leading = { ShapeIcon(Icons.Outlined.Gavel) },
                     headline = { Text("开源许可") },
-                    supporting = { Text("GPLv3") },
+                    supporting = { Text("AGPLv3") },
                 )
             }
         }
