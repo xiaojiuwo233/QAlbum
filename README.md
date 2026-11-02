@@ -2,15 +2,21 @@
 
 像系统相册一样查看、管理与清理QQ的缓存图片
 
+![QAlbum 宣传图](docs/images/banner.png)
+
 QQ 聊天里的图片随着时间越积越多，体积占用越来越大，QQ内置清理又过于宽大，不想全部删除？想看看哪个人发送的图片最多？或是仅仅想看看某些群里的图片？来试试 QAlbum 吧！QAlbum 通过 Shizuku 或 Root 读取这些图片，让你像翻相册一样浏览，并支持按来源、规则与分类清理这些图片
 
 > [!WARNING] 
 >
 > 删除、压缩等操作会直接改动设备上的文件，部分操作不可撤销。使用前请务必备份重要数据！QQ版本更新可能会对部分逻辑进行修改，建议批量清理前请先少量测试，以免出现问题。
 
-## 演示
+### 如果这个项目对你有帮助，欢迎点个 Star ！你的支持是我最大的动力！
 
-图片待补充
+## 截图演示
+
+![QAlbum 演示](docs/images/showcase.png)
+
+*截图素材来自0.4.5版本，新版可能有差异
 
 ## 功能
 
@@ -48,6 +54,7 @@ QAlbum 永久开源免费，只在 [GitHub Releases](https://github.com/xiaojiuw
 本项目在开发过程中参考或使用了以下项目，向他们表示感谢！
 
 - [QQDecrypt](https://github.com/QQBackup/QQDecrypt)
+- [Immich](https://github.com/immich-app/immich)
 
 ## 许可证
 
