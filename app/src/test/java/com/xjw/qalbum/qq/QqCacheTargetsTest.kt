@@ -1,19 +1,23 @@
 package com.xjw.qalbum.qq
 
+import com.xjw.qalbum.service.cleanup.QqCacheCleaner
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** QQ 缓存页清空前的核对：只放行 QQ 清理缓存登记的目录，数据库、配置、聊天图片与视频碰不到 */
+/**
+ * QQ 缓存页：清空前的核对只放行 QQ 清理缓存登记的目录，数据库、配置、聊天图片与视频碰不到；
+ * 特权进程返回的目录内容与状态能正确解析。
+ */
 class QqCacheTargetsTest {
 
     private val internal = "/data/user/0/com.tencent.mobileqq"
     private val external = "/storage/emulated/0/Android/data/com.tencent.mobileqq"
 
     @Test
-    fun theThreeCacheDirectoriesAndEverythingInsideThemAreClearable() {
+    fun `三个系统缓存目录及其中的内容可以清空`() {
         listOf("$internal/cache", "$internal/code_cache", "$external/cache", "$internal/cache/compressor/a.jpg", "/data/data/com.tencent.mobileqq/cache")
             .forEach { assertTrue(it, QqCacheTargets.isTarget(it)) }
         // 第二个用户（应用双开等）
@@ -22,7 +26,7 @@ class QqCacheTargetsTest {
     }
 
     @Test
-    fun legacyDirectoriesAreClearableInTheirOwnArea() {
+    fun `旧版清理登记的目录只在登记的那一边可以清空`() {
         assertTrue(QqCacheTargets.isTarget("$internal/files/vas_material_folder"))
         assertTrue(QqCacheTargets.isTarget("$external/qzone/video_cache/1.mp4"))
         // files/head 登记在内部，外部同名目录不算
@@ -30,7 +34,7 @@ class QqCacheTargetsTest {
     }
 
     @Test
-    fun dataSettingsChatMediaAndRootsAreNeverClearable() {
+    fun `数据库、配置、聊天图片视频与根目录永远不能清空`() {
         listOf(
             internal,
             "$internal/",
@@ -53,14 +57,14 @@ class QqCacheTargetsTest {
     }
 
     @Test
-    fun relativeOrDottedPathsAreRefused() {
+    fun `相对路径与带点的路径一律拒绝`() {
         assertNull(QqCacheTargets.clearablePath("$internal/cache/../databases"))
         assertNull(QqCacheTargets.clearablePath("$internal/./cache"))
         assertNull(QqCacheTargets.clearablePath("cache"))
     }
 
     @Test
-    fun noTargetSitsInsideAnotherOne() {
+    fun `登记的目录互不包含`() {
         val all = QqCacheTargets.all
         all.forEach { outer ->
             all.filter { it !== outer && it.area == outer.area }.forEach { inner ->
@@ -71,7 +75,7 @@ class QqCacheTargetsTest {
     }
 
     @Test
-    fun storageRootsFollowTheChatPictureFolder() {
+    fun `内部与外部目录跟着图片目录所在的用户走`() {
         assertEquals(
             QqStorageRoots(0, internal, external),
             QqStorageRoots.fromChatpic("$external/Tencent/MobileQQ/chatpic"),
@@ -83,5 +87,21 @@ class QqCacheTargetsTest {
         // 别的写法当主用户
         assertEquals(external, QqStorageRoots.fromChatpic("/sdcard/Android/data/com.tencent.mobileqq/Tencent/MobileQQ/chatpic").external)
         assertEquals(external, QqStorageRoots.fromChatpic("/mnt/somewhere/chatpic").external)
+    }
+
+    @Test
+    fun `特权进程列出的子项名字里有分隔符也能解析`() {
+        assertEquals(QqCacheCleaner.Child("compressor", true, 12, 3456), QqCacheCleaner.parseChild("D|12|3456|compressor"))
+        assertEquals(QqCacheCleaner.Child("a|b.jpg", false, 1, 9), QqCacheCleaner.parseChild("F|1|9|a|b.jpg"))
+        assertNull(QqCacheCleaner.parseChild("D|x|1|name"))
+        assertNull(QqCacheCleaner.parseChild("garbage"))
+    }
+
+    @Test
+    fun `特权进程的状态码对应目录状态`() {
+        assertEquals(QqCacheCleaner.State.PRESENT, QqCacheCleaner.stateOf(1))
+        assertEquals(QqCacheCleaner.State.MISSING, QqCacheCleaner.stateOf(0))
+        assertEquals(QqCacheCleaner.State.DENIED, QqCacheCleaner.stateOf(-1))
+        assertEquals(QqCacheCleaner.State.ERROR, QqCacheCleaner.stateOf(-2))
     }
 }

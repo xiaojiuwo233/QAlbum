@@ -1,9 +1,8 @@
 package com.xjw.qalbum.qq
 
-import android.content.Context
-import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import com.google.protobuf.CodedOutputStream
+import com.xjw.qalbum.appContext
+import com.xjw.qalbum.protobuf
 import kotlinx.coroutines.runBlocking
 import net.zetetic.database.DatabaseErrorHandler
 import net.zetetic.database.sqlcipher.SQLiteDatabase
@@ -14,7 +13,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
-import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.RandomAccessFile
 import java.util.UUID
@@ -25,8 +23,7 @@ import java.util.UUID
  */
 @RunWith(AndroidJUnit4::class)
 class QqMessageReaderTest {
-    private val context = ApplicationProvider.getApplicationContext<Context>()
-    private val file = File(context.cacheDir, "reader-test-${UUID.randomUUID()}.db")
+    private val file = File(appContext.cacheDir, "reader-test-${UUID.randomUUID()}.db")
 
     @Before
     fun setUp() {
@@ -120,22 +117,14 @@ class QqMessageReaderTest {
         DatabaseErrorHandler { _, _ -> }, null,
     ).use(block)
 
-    private fun content(n: Int): ByteArray = encode { out ->
-        out.writeByteArray(40800, encode { element ->
+    private fun content(n: Int): ByteArray = protobuf { out ->
+        out.writeByteArray(40800, protobuf { element ->
             val md5 = ByteArray(16) { (n * 31 + it).toByte() }
             element.writeUInt64(45001, md5[0].toLong() and 0xff)
             element.writeInt32(45002, 2)
             element.writeByteArray(45406, md5)
             element.writeInt32(QqPictureCodec.PIC_TYPE_FIELD, 1000)
         })
-    }
-
-    private fun encode(block: (CodedOutputStream) -> Unit): ByteArray {
-        val bytes = ByteArrayOutputStream()
-        val out = CodedOutputStream.newInstance(bytes)
-        block(out)
-        out.flush()
-        return bytes.toByteArray()
     }
 
     private companion object {

@@ -6,6 +6,7 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 import java.io.ByteArrayOutputStream
 
+/** 读文件头取宽高：PNG、GIF、WebP、BMP、JPEG（含 EXIF 方向）、HEIF，读不出时返回 null */
 class ImageHeaderParserTest {
 
     @Test

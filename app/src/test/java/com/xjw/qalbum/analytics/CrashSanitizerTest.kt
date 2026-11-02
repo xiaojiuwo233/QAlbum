@@ -1,5 +1,6 @@
 package com.xjw.qalbum.analytics
 
+import com.xjw.qalbum.CHATPIC
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -12,7 +13,7 @@ import java.io.IOException
 /** 上传前脱敏：路径、uid、长数字、长十六进制都去掉，类型和栈帧保留；不用改的原样返回 */
 class CrashSanitizerTest {
 
-    private val qqPath = "/storage/emulated/0/Android/data/com.tencent.mobileqq/Tencent/MobileQQ/chatpic/chatimg/1a2/Cache_6d3f"
+    private val qqPath = "$CHATPIC/chatimg/1a2/Cache_6d3f"
 
     @Test
     fun `消息里的路径、QQ 号、uid、十六进制串都换成占位符`() {

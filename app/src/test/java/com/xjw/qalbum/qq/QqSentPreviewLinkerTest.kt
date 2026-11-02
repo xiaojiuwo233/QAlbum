@@ -16,7 +16,7 @@ class QqSentPreviewLinkerTest {
     private fun List<QqPreviewCandidate>.pairs() = QqSentPreviewLinker.pair(this).associate { it.previewId to it.rawPath }
 
     @Test
-    fun aBurstOfPicturesPairsEachPreviewWithTheOriginalWrittenJustBeforeIt() {
+    fun `连发几张时，每份预览配它之前刚写入的原图`() {
         // 连发两张：原图 1、预览 1、原图 2、预览 2 依次写入
         val pairs = listOf(
             candidate(1, 1_200, "raw1", 1_000),
@@ -28,7 +28,7 @@ class QqSentPreviewLinkerTest {
     }
 
     @Test
-    fun theSameShapeWinsOverAFewHundredMilliseconds() {
+    fun `宽高比一致比时间近几百毫秒更优先`() {
         val pairs = listOf(
             candidate(1, 2_000, "portrait", 1_900, rawShape = 3 to 4),
             candidate(1, 2_000, "landscape", 1_100),
@@ -37,7 +37,7 @@ class QqSentPreviewLinkerTest {
     }
 
     @Test
-    fun anOriginalWrittenBeforeThePreviewIsPreferred() {
+    fun `优先配预览之前写入的原图`() {
         val pairs = listOf(
             candidate(1, 1_000, "before", 800),
             candidate(1, 1_000, "after", 1_100),
@@ -46,7 +46,7 @@ class QqSentPreviewLinkerTest {
     }
 
     @Test
-    fun aPreviewLeftOverByTheOneToOnePairingStillGetsItsClosestOriginal() {
+    fun `一对一配剩的预览也归到最近的原图`() {
         // 同一次发送只写了一张原图却有两份预览：一对一只配上一份，另一份也归到这张原图
         val raws = QqSentPreviewLinker.rawsOf(
             listOf(
@@ -58,7 +58,7 @@ class QqSentPreviewLinkerTest {
     }
 
     @Test
-    fun unknownSizesStillPair() {
+    fun `不知道尺寸也能配上`() {
         val pairs = listOf(candidate(1, 1_000, "raw", 900).copy(previewWidth = 0, previewHeight = 0)).pairs()
         assertEquals(mapOf(1L to "raw"), pairs)
     }

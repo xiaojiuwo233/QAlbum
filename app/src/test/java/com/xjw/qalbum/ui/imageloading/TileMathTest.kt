@@ -5,9 +5,10 @@ import androidx.compose.ui.unit.IntSize
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
+/** 大图分块显示：采样倍数、EXIF 方向换算、可见图块的顺序与重叠 */
 class TileMathTest {
     @Test
-    fun sampleSizeIsThePowerOfTwoThatStaysAtLeastAsSharpAsTheScreen() {
+    fun `采样倍数取不比屏幕糊的 2 的幂`() {
         assertEquals(1, TileMath.sampleSize(2f))
         assertEquals(1, TileMath.sampleSize(1f))
         assertEquals(1, TileMath.sampleSize(0.6f))
@@ -18,7 +19,7 @@ class TileMathTest {
     }
 
     @Test
-    fun orientedRectsMapBackToRawPixels() {
+    fun `转正后的区域换回原图上的位置`() {
         // 原图 4×2（横），各方向转正后取一块，换回原图上的位置
         val raw = IntSize(4, 2)
         fun toRaw(rect: IntRect, orientation: Int) = TileMath.toRaw(rect, orientation, raw.width, raw.height)
@@ -38,7 +39,7 @@ class TileMathTest {
     }
 
     @Test
-    fun visibleTilesComeNearestToTheCenterFirst() {
+    fun `看得到的图块离中心近的在前`() {
         val image = IntSize(1080, 12960)
         val tiles = TileMath.tilesCovering(IntRect(0, 0, 1080, 2424), 1, image)
         assertEquals(15, tiles.size)
@@ -48,7 +49,7 @@ class TileMathTest {
     }
 
     @Test
-    fun overlapAddsOneSampledPixelInsideTheImage() {
+    fun `图块向外多取一个采样像素，不超出图片`() {
         val image = IntSize(2000, 2000)
         assertEquals(IntRect(510, 510, 1026, 1026), TileMath.withOverlap(IntRect(512, 512, 1024, 1024), 2, image))
         assertEquals(IntRect(0, 0, 1025, 1025), TileMath.withOverlap(IntRect(0, 0, 1024, 1024), 1, image))

@@ -101,7 +101,7 @@ class QqSnapshotCopierTest {
     }
 
     @Test
-    fun copiesTheDatabaseWithoutTheQqHeaderAndTheWholeWal() = runBlocking {
+    fun `主库去掉 QQ 文件头复制，WAL 整个复制`() = runBlocking {
         val source = FakeQq(pinResult = 7)
         seed(source)
         val copies = copier(source).copyAll(Long.MAX_VALUE)
@@ -114,7 +114,7 @@ class QqSnapshotCopierTest {
     }
 
     @Test
-    fun newMessagesAppendedToTheWalDuringTheCopyAreFine() = runBlocking {
+    fun `复制途中 WAL 追加新消息不影响`() = runBlocking {
         val source = FakeQq()
         seed(source)
         val frames = random.nextBytes(40 * 1024)
@@ -127,7 +127,7 @@ class QqSnapshotCopierTest {
     }
 
     @Test
-    fun aCheckpointDuringTheMainCopyIsFineWhileTheWalKeepsItsFrames() = runBlocking {
+    fun `复制主库途中 checkpoint、WAL 没重新开始时一致`() = runBlocking {
         val source = FakeQq()
         seed(source)
         // 复制主库时 QQ 做了 checkpoint（改写主库），WAL 没重新开始：改写的页都还在复制到的 WAL 里，一次就行
@@ -139,7 +139,7 @@ class QqSnapshotCopierTest {
     }
 
     @Test
-    fun aWalRestartWhileTheMainFileStaysTheSameIsAlsoConsistent() = runBlocking {
+    fun `主库没变时 WAL 重新开始也一致`() = runBlocking {
         val source = FakeQq()
         seed(source)
         // 复制 WAL 时它重新开始了（新的 salt，从头写），主库没变：复制到的帧要么已在主库里，要么是之后的新事务
@@ -151,7 +151,7 @@ class QqSnapshotCopierTest {
     }
 
     @Test
-    fun aCheckpointThatAlsoRestartsTheWalIsRetriedAndThePinIsTakenAgain() = runBlocking {
+    fun `主库与 WAL 都变了就重试，没拿到 pin 的再拿`() = runBlocking {
         val source = FakeQq(pinResult = 5)
         source.pinResults = ArrayDeque(listOf(-1))
         seed(source)
@@ -172,7 +172,7 @@ class QqSnapshotCopierTest {
     }
 
     @Test
-    fun whilePinnedQqCannotCheckpointSoOneAttemptIsEnough() = runBlocking {
+    fun `拿到 pin 时 QQ 不能 checkpoint，一次就够`() = runBlocking {
         val source = FakeQq(pinResult = 3)
         seed(source)
         var deferred = false
@@ -186,7 +186,7 @@ class QqSnapshotCopierTest {
     }
 
     @Test
-    fun givesUpWhenEveryAttemptSeesACheckpointAndAWalRestart() = runBlocking {
+    fun `每次都碰上 checkpoint 和 WAL 重新开始时放弃`() = runBlocking {
         val source = FakeQq()
         seed(source)
         var salt = 10
@@ -203,7 +203,7 @@ class QqSnapshotCopierTest {
     }
 
     @Test
-    fun aDatabaseWithoutWalCopiesOnlyTheMainFile() = runBlocking {
+    fun `没有 WAL 时只复制主库`() = runBlocking {
         val source = FakeQq()
         seed(source, withWal = false)
         copier(source).copyAll(Long.MAX_VALUE)
@@ -213,7 +213,7 @@ class QqSnapshotCopierTest {
     }
 
     @Test
-    fun notEnoughSpaceFailsBeforeCopying() = runBlocking {
+    fun `空间不足时复制之前就失败`() = runBlocking {
         val source = FakeQq()
         seed(source)
         val error = runCatching { copier(source).copyAll(freeSpace = 1024) }.exceptionOrNull()

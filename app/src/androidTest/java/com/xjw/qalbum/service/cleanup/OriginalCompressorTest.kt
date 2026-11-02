@@ -1,26 +1,26 @@
 package com.xjw.qalbum.service.cleanup
 
-import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.ExifInterface
-import androidx.datastore.preferences.core.PreferenceDataStoreFactory
-import androidx.room.Room
-import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import com.xjw.qalbum.data.db.AppDatabase
+import com.xjw.qalbum.TestDatabase
+import com.xjw.qalbum.TestSettings
+import com.xjw.qalbum.appContext
 import com.xjw.qalbum.data.db.dao.ImageDao
-import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.db.entity.OriginalBackupEntity
-import com.xjw.qalbum.data.preferences.SettingsRepository
-import com.xjw.qalbum.fileops.BoundFileOps
+import com.xjw.qalbum.exec
 import com.xjw.qalbum.fileops.FileOpsImpl
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
+import com.xjw.qalbum.fileops.inProcessFiles
+import com.xjw.qalbum.imageRow
+import com.xjw.qalbum.service.cleanup.CompressionCoordinator.Session
+import com.xjw.qalbum.service.cleanup.rules.CleanupRunner
+import com.xjw.qalbum.service.work.BackgroundTasks
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.yield
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -29,41 +29,43 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.koin.core.context.GlobalContext
 import java.io.ByteArrayOutputStream
 import java.io.File
-import java.util.UUID
 import kotlin.random.Random
 
-/** 原图压缩：先对比再替换、原地替换、备份与还原、压缩记录、跳过被改过 / 不划算的图、启动对账（文件操作在本进程内执行） */
+/**
+ * 原图压缩：原地替换、备份与还原、压缩记录、跳过被改过 / 不划算的图、启动对账；先对比再替换的流程
+ * （只应用勾选的、撤销、换质量重压、大批量取样张、不能压缩的说明原因）。文件操作在本进程内执行。
+ */
 @RunWith(AndroidJUnit4::class)
 class OriginalCompressorTest {
-    private val context = ApplicationProvider.getApplicationContext<Context>()
-    private val root = File(context.getExternalFilesDir(null), "compress-test/chatpic")
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val storeFile = File(context.cacheDir, "compress-test-${UUID.randomUUID()}.preferences_pb")
-    private val settings = SettingsRepository(context, scope, PreferenceDataStoreFactory.create(scope = scope) { storeFile })
+    @get:Rule val database = TestDatabase()
+    @get:Rule val testSettings = TestSettings()
+    private val db get() = database.db
+    private val settings get() = testSettings.repository
+    private val root = File(appContext.getExternalFilesDir(null), "compress-test/chatpic")
+    private val previewDir = File(appContext.externalCacheDir ?: appContext.cacheDir, "compress/preview")
     private val mtime = 1_700_000_000_000L
     private val backups = mutableListOf<File>()
     private var files = 0
-    private lateinit var db: AppDatabase
+    private var coordinator: CompressionCoordinator? = null
 
     @Before
     fun setUp() = runBlocking {
         root.deleteRecursively()
-        db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).addCallback(AppDatabase.creationCallback).build()
+        previewDir.deleteRecursively()
         settings.setCompressMaxSide(1024)
     }
 
     @After
     fun tearDown() {
-        db.close()
+        coordinator?.dismiss()
         root.deleteRecursively()
         backups.forEach { it.delete() }
-        scope.cancel()
-        storeFile.delete()
     }
 
     @Test
@@ -145,7 +147,7 @@ class OriginalCompressorTest {
     fun theRecordKeepsTheRealOriginalSizeWhenTheIndexHadAShrunkenOne() = runBlocking {
         val (_, id) = original(2048, 1536)
         // 旧版分析写入的缩小尺寸
-        db.openHelper.writableDatabase.execSQL("UPDATE images SET width = 512, height = 384 WHERE id = $id")
+        db.exec("UPDATE images SET width = 512, height = 384 WHERE id = $id")
         val compressor = compressor()
         val image = db.imageDao().getById(id)!!
         val prepared = (compressor.prepare(listOf(image), QUALITY, MAX_SIDE).single() as OriginalCompressor.Preview.Ready).prepared
@@ -211,7 +213,7 @@ class OriginalCompressorTest {
     @Test
     fun ownershipRepairLeavesCorrectFilesAloneAndRunsOnce() = runBlocking {
         val (file, id) = original(800, 600)
-        db.openHelper.writableDatabase.execSQL("UPDATE images SET optimized = 1 WHERE id = $id")
+        db.exec("UPDATE images SET optimized = 1 WHERE id = $id")
         val before = file.readBytes()
         val compressor = compressor()
         // 文件与目录同属主（本应用）：不用修
@@ -319,7 +321,7 @@ class OriginalCompressorTest {
         val (done, doneId) = original(800, 600)
         val doneBackup = File(root, "backup-done").apply { writeBytes(ByteArray(10)) }
         insertPending(doneId, done, doneBackup, originalSize = done.length() + 5_000, compressedSize = done.length())
-        db.openHelper.writableDatabase.execSQL("UPDATE images SET size = size + 5000 WHERE id = $doneId")
+        db.exec("UPDATE images SET size = size + 5000 WHERE id = $doneId")
         // 替换没发生（文件还是原图）：丢掉日志与备份
         val (untouched, untouchedId) = original(800, 600)
         val strayBackup = File(root, "backup-stray").apply { writeBytes(ByteArray(10)) }
@@ -334,17 +336,103 @@ class OriginalCompressorTest {
         assertEquals(0, db.imageDao().getById(untouchedId)!!.optimized)
     }
 
+    // ---- 先对比再替换（CompressionCoordinator）----
+
+    @Test
+    fun reviewThenApplyReplacesOnlyCheckedImages() = runBlocking {
+        val coordinator = coordinator()
+        val images = (1..3).map { original(2048, 1536) }
+        val originals = images.map { it.first.readBytes() }
+        coordinator.start(images.map { it.second })
+        val review = coordinator.awaitReview()
+        assertEquals(3, review.entries.count { it.prepared != null })
+        assertFalse(review.sampled)
+        // 对比期间原图不动
+        images.forEachIndexed { index, (file, _) -> assertArrayEquals(originals[index], file.readBytes()) }
+
+        val skipped = images[1].second
+        coordinator.toggle(skipped)
+        assertEquals(2, (coordinator.session.value as Session.Review).chosen.size)
+        val message = async { coordinator.messages.first() }
+        yield()
+        coordinator.apply()
+        assertTrue(withTimeout(30_000) { message.await() }.startsWith("已压缩 2 张"))
+        assertNull(coordinator.session.value)
+        assertArrayEquals(originals[1], images[1].first.readBytes())
+        assertEquals(listOf(1, 0, 1), images.map { db.imageDao().getById(it.second)!!.optimized })
+        assertEquals(80, db.originalBackupDao().getByImageId(images[0].second)!!.quality)
+        assertTrue(previewDir.listFiles().orEmpty().isEmpty())
+    }
+
+    @Test
+    fun undoLeavesOriginalsAndChangingQualityRecompresses() = runBlocking {
+        val coordinator = coordinator()
+        val (file, id) = original(2048, 1536)
+        val before = file.readBytes()
+        coordinator.start(listOf(id))
+        val first = coordinator.awaitReview().entries.single().prepared!!
+        assertEquals(80, first.quality)
+
+        coordinator.setQuality(50)
+        val second = coordinator.awaitReview { it.quality == 50 }.entries.single().prepared!!
+        assertTrue(second.size < first.size)
+        // 换质量后上一次的结果删掉
+        assertFalse(first.file.exists())
+
+        coordinator.dismiss()
+        assertNull(coordinator.session.value)
+        assertFalse(second.file.exists())
+        assertArrayEquals(before, file.readBytes())
+        assertEquals(0, db.imageDao().getById(id)!!.optimized)
+    }
+
+    @Test
+    fun largeSelectionsCompressSamplesAndListUnsupportedOnes() = runBlocking {
+        val coordinator = coordinator()
+        val many = (1..CompressionCoordinator.FULL_LIMIT + 5).map { original(320, 240).second }
+        coordinator.start(many)
+        val sampled = coordinator.awaitReview()
+        assertTrue(sampled.sampled)
+        assertEquals(CompressionCoordinator.SAMPLE_SIZE, sampled.entries.size)
+        assertEquals(many.size - CompressionCoordinator.SAMPLE_SIZE, sampled.remaining.size)
+        assertEquals(many.size, sampled.eligible)
+        coordinator.dismiss()
+
+        // 张数不多时，不能压缩的也列出来并说明原因
+        val gif = db.imageDao().insert(imageRow(File(root, "gif").path, "chatraw", 1_000, mtime, mime = "image/gif", animated = true))
+        val (_, jpeg) = original(800, 600)
+        coordinator.start(listOf(gif, jpeg))
+        val mixed = coordinator.awaitReview()
+        assertEquals(1, mixed.skipped)
+        val unavailable = mixed.entries.single { it.prepared == null }.preview as OriginalCompressor.Preview.Unavailable
+        assertEquals("动图不压缩", unavailable.reason)
+    }
+
     private companion object {
         const val QUALITY = 80
         const val MAX_SIDE = 1024
     }
 
     private fun compressor() = OriginalCompressor(
-        context, db, GlobalContext.get().get(), GlobalContext.get().get(), settings,
-        bindOverride = { BoundFileOps(InProcessFileOps) {} },
+        appContext, db, GlobalContext.get().get(), GlobalContext.get().get(), settings, bindOverride = { inProcessFiles() },
     )
 
-    /** 写一张噪点 JPEG 原图并入库（大小、修改时间与磁盘一致，宽高按显示方向） */
+    /** 先对比再替换的流程（不保留原图） */
+    private suspend fun coordinator(): CompressionCoordinator {
+        settings.setCompressKeepOriginal(false)
+        val koin = GlobalContext.get()
+        val scope = testSettings.scope
+        val compressor = compressor()
+        val tasks = BackgroundTasks(appContext)
+        val quarantine = QuarantineManager(appContext, koin.get(), db, db.imageDao(), db.cleanupDao(), settings, koin.get(), ArchiveManager(db, settings, scope))
+        return CompressionCoordinator(db, compressor, CleanupRunner(quarantine, compressor, tasks, scope), settings, tasks, scope)
+            .also { coordinator = it }
+    }
+
+    private suspend fun CompressionCoordinator.awaitReview(predicate: (Session.Review) -> Boolean = { true }): Session.Review =
+        withTimeout(60_000) { session.first { it is Session.Review && predicate(it) } as Session.Review }
+
+    /** 写一张噪点原图并入库（大小、修改时间与磁盘一致，宽高按显示方向） */
     private suspend fun original(
         width: Int, height: Int, quality: Int = 100,
         format: Bitmap.CompressFormat = Bitmap.CompressFormat.JPEG, alpha: Int = 0xFF,
@@ -361,10 +449,8 @@ class OriginalCompressorTest {
         file.setLastModified(mtime)
         val rotated = ExifInterface(file.path).getAttributeInt(ExifInterface.TAG_ORIENTATION, 1) in 5..8
         val id = db.imageDao().insert(
-            ImageEntity(
-                path = file.path, filename = file.name, parentDir = file.parent!!, sourceType = "chatraw",
-                cacheKey = "$n", size = file.length(), mtime = mtime, firstSeen = mtime, lastSeen = mtime,
-                mime = if (format == Bitmap.CompressFormat.PNG) "image/png" else "image/jpeg",
+            imageRow(
+                file.path, "chatraw", file.length(), mtime, mime = if (format == Bitmap.CompressFormat.PNG) "image/png" else "image/jpeg",
                 width = if (rotated) height else width, height = if (rotated) width else height,
             ),
         )

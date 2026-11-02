@@ -6,11 +6,13 @@ import androidx.compose.ui.graphics.toArgb
 import com.google.android.material.color.utilities.Hct
 import com.xjw.qalbum.domain.model.PaletteStyle
 import com.xjw.qalbum.domain.model.ThemeSettings
+import com.xjw.qalbum.ui.settings.hueSeed
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.math.abs
 
+/** 主题配色：默认配色、四种风格、深浅色、纯黑背景，以及外观设置里的色相滑条 */
 @SuppressLint("RestrictedApi")
 class SeedColorSchemeTest {
 
@@ -73,6 +75,15 @@ class SeedColorSchemeTest {
         assertEquals(dark.surfaceContainer, black.surfaceContainer)
         assertEquals(dark.surfaceContainerHigh, black.surfaceContainerHigh)
         assertEquals(dark.primary, black.primary)
+    }
+
+    @Test
+    fun `色相滑条的颜色色相跟着滑条走`() {
+        listOf(0f, 60f, 140f, 220f, 300f).forEach { hue ->
+            val actual = Hct.fromInt(hueSeed(hue)).hue
+            val diff = hueDistance(actual, hue.toDouble())
+            assertTrue("hue $hue → $actual", diff < 2.0)
+        }
     }
 
     private fun hueDistance(a: Double, b: Double): Double = abs(a - b).let { if (it > 180) 360 - it else it }

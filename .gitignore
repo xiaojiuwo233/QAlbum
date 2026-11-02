@@ -25,3 +25,4 @@ keystore.properties
 release.keystore
 debug.keystore
 google-services.json
+tools/

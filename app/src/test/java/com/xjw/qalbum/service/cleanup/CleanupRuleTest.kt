@@ -2,6 +2,7 @@ package com.xjw.qalbum.service.cleanup
 
 import com.xjw.qalbum.service.cleanup.rules.CleanupRule
 import com.xjw.qalbum.service.cleanup.rules.RuleScope
+import com.xjw.qalbum.ui.cleanup.trashReasonLabel
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
@@ -11,6 +12,7 @@ import java.time.Instant
 import java.time.LocalTime
 import java.time.ZoneId
 
+/** 清理规则：id 与参数、SQL 条件、截止时间，以及回收站按删除原因筛选时的分类 */
 class CleanupRuleTest {
 
     private val now = 1_760_000_000_000L
@@ -65,5 +67,18 @@ class CleanupRuleTest {
         val at = Instant.ofEpochMilli(cutoff).atZone(zone)
         assertEquals(LocalTime.MIDNIGHT, at.toLocalTime())
         assertEquals(Instant.ofEpochMilli(now).atZone(zone).toLocalDate().minusYears(2), at.toLocalDate())
+    }
+
+    @Test
+    fun `回收站按删除原因筛选：手动删除、聊天来源、按时间清理各合成一类，规则名照用`() {
+        assertEquals("手动删除", trashReasonLabel("用户批量删除"))
+        assertEquals("手动删除", trashReasonLabel("用户手动删除"))
+        assertEquals("保存后删除", trashReasonLabel("保存后移入回收站"))
+        assertEquals("聊天来源", trashReasonLabel("按 QQ 来源手动删除"))
+        assertEquals("聊天来源", trashReasonLabel("按 QQ 图片来源清理"))
+        assertEquals("按时间清理", trashReasonLabel("2024 年"))
+        assertEquals("按时间清理", trashReasonLabel("2024 年 3 月"))
+        assertEquals("QQ 缩略图", trashReasonLabel("QQ 缩略图"))
+        assertEquals("其他", trashReasonLabel(""))
     }
 }

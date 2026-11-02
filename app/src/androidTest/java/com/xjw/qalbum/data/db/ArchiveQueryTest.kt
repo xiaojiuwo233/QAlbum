@@ -1,22 +1,22 @@
 package com.xjw.qalbum.data.db
 
-import android.content.Context
-import androidx.room.Room
-import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.xjw.qalbum.TestDatabase
 import com.xjw.qalbum.data.db.dao.QqArchiveCounts
 import com.xjw.qalbum.data.db.dao.QqContent
 import com.xjw.qalbum.data.db.dao.QqScopeIds
 import com.xjw.qalbum.data.db.dao.QqScopeSql
 import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.domain.model.SourceSort
-import com.xjw.qalbum.qq.QqCachePaths
+import com.xjw.qalbum.exec
+import com.xjw.qalbum.familyPaths
+import com.xjw.qalbum.imageRow
+import com.xjw.qalbum.int
 import com.xjw.qalbum.service.cleanup.ArchiveManager
 import kotlinx.coroutines.runBlocking
-import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
-import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -25,41 +25,24 @@ import org.junit.runner.RunWith
  * 取消归档，以及按来源范围归档（共用的也算）。
  */
 @RunWith(AndroidJUnit4::class)
-class ArchiveDaoTest {
-    private val root = "/storage/emulated/0/Android/data/com.tencent.mobileqq/Tencent/MobileQQ/chatpic"
-    private lateinit var db: AppDatabase
+class ArchiveQueryTest {
+    @get:Rule val database = TestDatabase()
+    private val db get() = database.db
     private val hidden = ArchiveManager.statusesOf(visible = false)
     private val shown = ArchiveManager.statusesOf(visible = true)
-
-    @Before
-    fun setUp() {
-        db = Room.inMemoryDatabaseBuilder(ApplicationProvider.getApplicationContext<Context>(), AppDatabase::class.java)
-            .addCallback(AppDatabase.creationCallback)
-            .build()
-    }
-
-    @After
-    fun tearDown() = db.close()
-
-    private fun image(path: String, sourceType: String, size: Long, mtime: Long = 1_000) = ImageEntity(
-        path = path, filename = path.substringAfterLast('/'), parentDir = path.substringBeforeLast('/'),
-        sourceType = sourceType, cacheKey = path.substringAfterLast('/').removePrefix("Cache_"),
-        variantGroup = QqCachePaths.familyKey(path), variantBytes = size, size = size, mtime = mtime,
-        firstSeen = 1_000, lastSeen = 1_000, mime = "image/jpeg", width = 1, height = 1,
-        status = if (sourceType == "chatthumb") "thumbnail_trash" else "active",
-    )
-
     private val newest = SourceSort.DATE_DESC.ordinal
 
+    private fun image(path: String, sourceType: String, size: Long, mtime: Long = 1_000) = imageRow(path, sourceType, size, mtime)
+
     private fun status(id: Long): String = db.query("SELECT status FROM images WHERE id = $id", null).use { it.moveToFirst(); it.getString(0) }
-    private fun archived(id: Long): Boolean = db.query("SELECT is_protected FROM images WHERE id = $id", null).use { it.moveToFirst(); it.getInt(0) == 1 }
+    private fun archived(id: Long): Boolean = db.int("SELECT is_protected FROM images WHERE id = $id") == 1
 
     @Test
     fun archiveWholePicturesHideShowAndFollowNewVersions() = runBlocking {
         val dao = db.imageDao()
-        val (img, raw, thumb, hd) = QqCachePaths.relativePaths("a".repeat(32)).map { "$root/$it" }
-        val (onlyThumb) = QqCachePaths.relativePaths("b".repeat(32)).drop(2).map { "$root/$it" }
-        val (other) = QqCachePaths.relativePaths("c".repeat(32)).map { "$root/$it" }
+        val (img, raw, thumb, hd) = familyPaths("a".repeat(32))
+        val (onlyThumb) = familyPaths("b".repeat(32)).drop(2)
+        val (other) = familyPaths("c".repeat(32))
         val imgId = dao.insert(image(img, "chatimg", 300))
         val rawId = dao.insert(image(raw, "chatraw", 2_000))
         val thumbId = dao.insert(image(thumb, "chatthumb", 20))
@@ -121,7 +104,7 @@ class ArchiveDaoTest {
         val dao = db.imageDao()
         // 三张图：大小 300 / 2000 / 50，时间 3000 / 1000 / 2000
         val ids = listOf("d" to (300L to 3_000L), "e" to (2_000L to 1_000L), "f" to (50L to 2_000L)).map { (md5, sizeTime) ->
-            val (img) = QqCachePaths.relativePaths(md5.repeat(32)).map { "$root/$it" }
+            val (img) = familyPaths(md5.repeat(32))
             dao.insert(image(img, "chatimg", sizeTime.first, mtime = sizeTime.second))
         }
         dao.archive(ids, hidden = true)
@@ -139,17 +122,16 @@ class ArchiveDaoTest {
     fun archiveScopeIncludesSharedImagesAndThumbnails() = runBlocking {
         val dao = db.imageDao()
         val sources = db.qqSourceDao()
-        val sql = db.openHelper.writableDatabase
-        val (shared) = QqCachePaths.relativePaths("d".repeat(32)).map { "$root/$it" }
-        val (own, _, ownThumb) = QqCachePaths.relativePaths("e".repeat(32)).map { "$root/$it" }
-        val (outside) = QqCachePaths.relativePaths("f".repeat(32)).map { "$root/$it" }
+        val (shared) = familyPaths("d".repeat(32))
+        val (own, _, ownThumb) = familyPaths("e".repeat(32))
+        val (outside) = familyPaths("f".repeat(32))
         val sharedId = dao.insert(image(shared, "chatimg", 100))
         val ownId = dao.insert(image(own, "chatimg", 200))
         val ownThumbId = dao.insert(image(ownThumb, "chatthumb", 10))
         val outsideId = dao.insert(image(outside, "chatimg", 300))
         // 会话 1 里的发送人 2；共用的那张也出现在会话 3
         listOf(sharedId to 1, ownId to 1, ownThumbId to 1, sharedId to 3, outsideId to 3).forEach { (id, conversation) ->
-            sql.execSQL("INSERT INTO qq_image_contexts(image_id, conversation_id, sender_id) VALUES($id, $conversation, 2)")
+            db.exec("INSERT INTO qq_image_contexts(image_id, conversation_id, sender_id) VALUES($id, $conversation, 2)")
         }
         val scope = QqScopeIds(conversationId = 1, senderId = 2)
         val counts = sources.queryArchiveCounts(QqScopeSql.archiveCounts(scope))

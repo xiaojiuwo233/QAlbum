@@ -1,43 +1,26 @@
 package com.xjw.qalbum.analytics
 
-import android.content.Context
-import androidx.datastore.preferences.core.PreferenceDataStoreFactory
-import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import com.xjw.qalbum.data.preferences.SettingsRepository
+import com.xjw.qalbum.TestSettings
 import com.xjw.qalbum.domain.model.ThemeMode
 import com.xjw.qalbum.ui.onboarding.AGREEMENT_VERSION
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
-import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
-import java.io.File
 import java.io.IOException
-import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
 
 /** 同意协议前什么都不发；开关决定发不发事件与错误；关掉使用分析时清掉用户属性 */
 @RunWith(AndroidJUnit4::class)
 class AnalyticsTest {
-    private val context = ApplicationProvider.getApplicationContext<Context>()
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val storeFile = File(context.cacheDir, "analytics-test-${UUID.randomUUID()}.preferences_pb")
-    private val settings = SettingsRepository(context, scope, PreferenceDataStoreFactory.create(scope = scope) { storeFile })
+    @get:Rule val testSettings = TestSettings()
+    private val settings = testSettings.repository
     private val backend = RecordingBackend()
-    private val analytics = Analytics(backend, settings, scope)
-
-    @After
-    fun tearDown() {
-        scope.cancel()
-        storeFile.delete()
-    }
+    private val analytics = Analytics(backend, settings, testSettings.scope)
 
     private class RecordingBackend : AnalyticsBackend {
         val states = CopyOnWriteArrayList<AnalyticsState>()

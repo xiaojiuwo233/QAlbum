@@ -1,21 +1,19 @@
 package com.xjw.qalbum.service.indexer
 
-import android.content.Context
-import android.graphics.Bitmap
-import androidx.datastore.preferences.core.PreferenceDataStoreFactory
-import androidx.room.Room
-import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import com.xjw.qalbum.data.db.AppDatabase
-import com.xjw.qalbum.data.db.entity.ImageEntity
+import com.xjw.qalbum.TestDatabase
+import com.xjw.qalbum.TestSettings
+import com.xjw.qalbum.appContext
 import com.xjw.qalbum.data.db.entity.OriginalBackupEntity
 import com.xjw.qalbum.data.db.entity.QuarantineEntity
-import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.domain.model.FileInfo
+import com.xjw.qalbum.exec
 import com.xjw.qalbum.fileops.FileOpsImpl
+import com.xjw.qalbum.imageRow
 import com.xjw.qalbum.service.indexer.transport.DirStat
 import com.xjw.qalbum.service.indexer.transport.ScanTransport
 import com.xjw.qalbum.service.work.BackgroundTasks
+import com.xjw.qalbum.solidJpeg
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -29,37 +27,32 @@ import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
-import java.util.UUID
 
 /** 补读宽高与核对旧版分析写入的缩小尺寸（读文件头在本进程内执行） */
 @RunWith(AndroidJUnit4::class)
 class ImageSizeBackfillTest {
-    private val context = ApplicationProvider.getApplicationContext<Context>()
-    private val root = File(context.getExternalFilesDir(null), "size-backfill-test")
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    /** 补读跑在这里，等它的子协程结束就是跑完了（DataStore 常驻在 [scope] 里） */
+    @get:Rule val database = TestDatabase()
+    @get:Rule val testSettings = TestSettings()
+    private val db get() = database.db
+    private val settings get() = testSettings.repository
+    private val root = File(appContext.getExternalFilesDir(null), "size-backfill-test")
+    /** 补读跑在这里，等它的子协程结束就是跑完了（DataStore 常驻在设置的协程范围里） */
     private val work = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val storeFile = File(context.cacheDir, "size-backfill-${UUID.randomUUID()}.preferences_pb")
-    private val settings = SettingsRepository(context, scope, PreferenceDataStoreFactory.create(scope = scope) { storeFile })
     private var files = 0
-    private lateinit var db: AppDatabase
 
     @Before
     fun setUp() {
         root.deleteRecursively()
-        db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).addCallback(AppDatabase.creationCallback).build()
     }
 
     @After
     fun tearDown() {
-        db.close()
         root.deleteRecursively()
         work.cancel()
-        scope.cancel()
-        storeFile.delete()
     }
 
     @Test
@@ -89,9 +82,7 @@ class ImageSizeBackfillTest {
     fun picturesInTheRecycleBinAreReadWhereTheyWereMoved() = runBlocking {
         val moved = picture(2048, 1536)
         val id = insert(File(root, "elsewhere/Cache_9"), width = 512, height = 384)
-        db.openHelper.writableDatabase.execSQL(
-            "UPDATE images SET status = 'quarantined', path = 'qalbum-internal://quarantine/$id' WHERE id = $id",
-        )
+        db.exec("UPDATE images SET status = 'quarantined', path = 'qalbum-internal://quarantine/$id' WHERE id = $id")
         db.cleanupDao().insertQuarantine(
             QuarantineEntity(
                 imageId = id, originalPath = File(root, "elsewhere/Cache_9").path, quarantinePath = moved.path,
@@ -126,7 +117,7 @@ class ImageSizeBackfillTest {
         run()
         assertEquals(2560 to 1600, size(id))
 
-        db.openHelper.writableDatabase.execSQL("UPDATE images SET width = 640, height = 400 WHERE id = $id")
+        db.exec("UPDATE images SET width = 640, height = 400 WHERE id = $id")
         run()
         assertEquals(640 to 400, size(id))
     }
@@ -147,7 +138,7 @@ class ImageSizeBackfillTest {
 
     private fun backfill(open: suspend () -> ScanTransport?) = ImageSizeBackfill(
         imageDao = db.imageDao(), backups = db.originalBackupDao(), settings = settings,
-        openTransport = open, tasks = BackgroundTasks(context), appScope = work,
+        openTransport = open, tasks = BackgroundTasks(appContext), appScope = work,
     )
 
     private suspend fun awaitIdle() = withTimeout(30_000) {
@@ -159,22 +150,11 @@ class ImageSizeBackfillTest {
     /** 写一张纯色 JPEG */
     private fun picture(width: Int, height: Int): File {
         val n = ++files
-        val file = File(root, "chatraw/$n/Cache_$n").apply { parentFile!!.mkdirs() }
-        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).apply { eraseColor(0xFF336699.toInt()) }
-        file.outputStream().use { bitmap.compress(Bitmap.CompressFormat.JPEG, 80, it) }
-        bitmap.recycle()
-        return file
+        return File(root, "chatraw/$n/Cache_$n").apply { parentFile!!.mkdirs(); writeBytes(solidJpeg(width, height)) }
     }
 
     private suspend fun insert(file: File, width: Int, height: Int, sourceType: String = "chatraw"): Long =
-        db.imageDao().insert(
-            ImageEntity(
-                path = file.path, filename = file.name, parentDir = file.parentFile!!.name, sourceType = sourceType,
-                cacheKey = file.name, size = file.length(), mtime = 1_700_000_000_000L, firstSeen = 1, lastSeen = 1,
-                mime = "image/jpeg", width = width, height = height,
-                status = if (sourceType == "chatthumb") "thumbnail_trash" else "active",
-            ),
-        )
+        db.imageDao().insert(imageRow(file.path, sourceType, file.length(), 1_700_000_000_000L, width = width, height = height))
 
     private suspend fun record(backupPath: String?, original: Pair<Int, Int>, compressed: Pair<Int, Int>): Long {
         val image = insert(picture(compressed.first, compressed.second), compressed.first, compressed.second)

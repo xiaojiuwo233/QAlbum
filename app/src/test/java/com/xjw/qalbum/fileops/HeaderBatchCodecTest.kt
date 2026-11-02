@@ -6,6 +6,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Test
 
+/** 特权进程批量读文件头的打包格式：空的、读不到的条目都能还原，数据截断时报错 */
 class HeaderBatchCodecTest {
 
     @Test

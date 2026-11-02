@@ -1,51 +1,41 @@
 package com.xjw.qalbum.service.cleanup
 
-import android.content.Context
-import androidx.room.Room
-import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import com.xjw.qalbum.data.db.AppDatabase
+import com.xjw.qalbum.ACCOUNT
+import com.xjw.qalbum.TestDatabase
+import com.xjw.qalbum.addOrigins
 import com.xjw.qalbum.data.db.dao.RuleStats
-import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.db.entity.QqOriginEntity
 import com.xjw.qalbum.data.db.entity.QqOriginPathEntity
-import com.xjw.qalbum.data.db.entity.QqSourceAccountEntity
 import com.xjw.qalbum.data.db.entity.computeDateBucket
-import com.xjw.qalbum.qq.QqCachePaths
+import com.xjw.qalbum.exec
+import com.xjw.qalbum.familyPaths
+import com.xjw.qalbum.imageRow
+import com.xjw.qalbum.int
+import com.xjw.qalbum.md5
+import com.xjw.qalbum.qq.QqSentPreviewLinker
 import com.xjw.qalbum.service.cleanup.rules.CleanupRule
 import com.xjw.qalbum.service.cleanup.rules.RuleScope
 import com.xjw.qalbum.service.cleanup.rules.RuleSql
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
-import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
-import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
 /** 各条清理规则的 SQL 在真实表结构（含家族触发器）上命中哪些行、怎么算大小 */
 @RunWith(AndroidJUnit4::class)
 class CleanupRuleQueryTest {
-
-    private val root = "/storage/emulated/0/Android/data/com.tencent.mobileqq/Tencent/MobileQQ/chatpic"
+    @get:Rule val database = TestDatabase()
+    private val db get() = database.db
     private val now = 1_760_000_000_000L
     private val day = 24L * 60 * 60 * 1000
     private val mb = 1_048_576L
     private var families = 0
     private var origins = 0
-    private lateinit var db: AppDatabase
-
-    @Before
-    fun open() {
-        db = Room.inMemoryDatabaseBuilder(ApplicationProvider.getApplicationContext<Context>(), AppDatabase::class.java)
-            .addCallback(AppDatabase.creationCallback)
-            .build()
-    }
-
-    @After
-    fun close() = db.close()
 
     @Test
     fun thumbnailsOnlyMatchOldUnarchivedThumbs() = runBlocking {
@@ -221,10 +211,8 @@ class CleanupRuleQueryTest {
         val raw = insert(sentRaw, "chatraw", "active", 2 * mb, age = 100)
         val previewPath = family()[0]
         val preview = insert(previewPath, "chatimg", "active", 150_000, age = 100)
-        db.openHelper.writableDatabase.execSQL(
-            "INSERT INTO qq_preview_checks(path, size, raw_path, checked_at) VALUES(?, 150000, ?, 1)", arrayOf(previewPath, sentRaw),
-        )
-        com.xjw.qalbum.qq.QqSentPreviewLinker.mergeFamilies(db)
+        db.exec("INSERT INTO qq_preview_checks(path, size, raw_path, checked_at) VALUES(?, 150000, ?, 1)", previewPath, sentRaw)
+        QqSentPreviewLinker.mergeFamilies(db)
         // 收到的图：原图 + QQ 显示用的预览图
         val (img, receivedRaw) = family()
         val shown = insert(img, "chatimg", "active", 200_000, age = 100)
@@ -235,8 +223,8 @@ class CleanupRuleQueryTest {
         // 发送图片缓存 QQ 不会再读：自己发的原图不能靠它「瘦身」
         assertEquals(setOf(received), ids(CleanupRule.SlimOriginals, 90))
         // 图库里并进原图那一家：原图代表整张图（2 个版本），预览隐藏
-        assertEquals(2, db.query("SELECT variant_count FROM images WHERE id = $raw", emptyArray()).use { it.moveToFirst(); it.getInt(0) })
-        assertEquals(1, db.query("SELECT variant_hidden FROM images WHERE id = $preview", emptyArray()).use { it.moveToFirst(); it.getInt(0) })
+        assertEquals(2, db.int("SELECT variant_count FROM images WHERE id = $raw"))
+        assertEquals(1, db.int("SELECT variant_hidden FROM images WHERE id = $preview"))
         assertFalse(shown in ids(CleanupRule.SentPreviews))
     }
 
@@ -259,14 +247,14 @@ class CleanupRuleQueryTest {
         assertEquals(setOf(photo), ids(CleanupRule.SlimOriginals, 90))
     }
 
-    /** 一条聊天来源（消息），关联到 [paths]；[daysAgo] 天前发的，[seenAt] 为最近一次读取时见到的时间 */
+    /**
+     * 一条聊天来源（消息），按路径关联到 [paths]（不给家族键，免得与同编号的测试图对上）；
+     * [daysAgo] 天前发的，[seenAt] 为最近一次读取时见到的时间
+     */
     private suspend fun origin(paths: List<String>, chatType: Int, daysAgo: Int, seenAt: Long = now, picType: Int = 0, picSubType: Int = -1): String {
-        val sources = db.qqSourceDao()
-        sources.putAccount(QqSourceAccountEntity("account", "账号", now, 0))
         val id = "origin-${++origins}"
-        sources.insertOrigins(listOf(QqOriginEntity(id, "account", "conversation-$chatType", "", chatType, "sender", "", "",
-            now - daysAgo * day, "%032x".format(origins), seenAt, picType, picSubType)))
-        sources.insertPaths(paths.map { QqOriginPathEntity(it, id) })
+        db.addOrigins(QqOriginEntity(id, ACCOUNT, "conversation-$chatType", "", chatType, "sender", "", "", now - daysAgo * day, md5(origins), seenAt, picType, picSubType))
+        db.qqSourceDao().insertPaths(paths.map { QqOriginPathEntity(it, id) })
         return id
     }
 
@@ -277,8 +265,7 @@ class CleanupRuleQueryTest {
         db.cleanupRuleDao().stats(RuleSql.stats(rule.where(option, now), rule.scope))
 
     /** 一张新图的各版本路径：chatimg、chatraw、chatthumb、chatthumb _hd */
-    private fun family(): List<String> =
-        QqCachePaths.relativePaths("%032x".format(++families)).map { "$root/$it" }
+    private fun family(): List<String> = familyPaths(md5(++families))
 
     private suspend fun insert(
         path: String,
@@ -292,28 +279,7 @@ class CleanupRuleQueryTest {
         mime: String = "image/jpeg",
         archived: Boolean = false,
         optimized: Int = 0,
-    ): Long {
-        val mtime = now - age * day
-        return db.imageDao().insert(
-            ImageEntity(
-                path = path,
-                filename = path.substringAfterLast('/'),
-                parentDir = path.substringBeforeLast('/'),
-                sourceType = sourceType,
-                cacheKey = path.substringAfterLast('/').removePrefix("Cache_"),
-                variantGroup = QqCachePaths.familyKey(path),
-                size = size,
-                mtime = mtime,
-                firstSeen = mtime,
-                lastSeen = mtime,
-                mime = mime,
-                width = width,
-                height = height,
-                isAnimated = animated,
-                status = status,
-                isArchived = archived,
-                optimized = optimized,
-            ),
-        )
-    }
+    ): Long = db.imageDao().insert(
+        imageRow(path, sourceType, size, now - age * day, status, width, height, mime, animated, archived, optimized),
+    )
 }

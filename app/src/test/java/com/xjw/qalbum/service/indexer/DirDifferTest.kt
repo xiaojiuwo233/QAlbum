@@ -6,6 +6,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+/** 增量扫描：按目录修改时间剪掉没变的目录，刚写入过的目录多扫一次 */
 class DirDifferTest {
 
     private val base = "/sd/chatpic/chatimg"

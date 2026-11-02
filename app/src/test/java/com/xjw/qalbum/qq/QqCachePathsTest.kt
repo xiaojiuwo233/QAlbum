@@ -1,5 +1,6 @@
 package com.xjw.qalbum.qq
 
+import com.xjw.qalbum.CHATPIC
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -7,14 +8,15 @@ import org.junit.Test
 import java.security.MessageDigest
 import kotlin.random.Random
 
+/** QQ 缓存文件名：由 MD5 推出各目录的文件名与家族键，别名、Temp 转码图归入同一家族，不规范的命名不合并 */
 class QqCachePathsTest {
-    private val root = "/storage/emulated/0/Android/data/com.tencent.mobileqq/Tencent/MobileQQ/chatpic"
+    private val root = CHATPIC
 
     private fun md5(text: String): String =
         MessageDigest.getInstance("MD5").digest(text.toByteArray()).joinToString("") { "%02x".format(it) }
 
     @Test
-    fun `全零 MD5 的各目录文件名与调查工具一致`() {
+    fun `全零 MD5 在各目录下的文件名固定不变`() {
         assertEquals(
             listOf(
                 "chatimg/a2f/Cache_50539d06b4b71a2f",

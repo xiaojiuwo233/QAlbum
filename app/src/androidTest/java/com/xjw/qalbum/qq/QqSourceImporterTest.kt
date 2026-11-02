@@ -1,26 +1,23 @@
 package com.xjw.qalbum.qq
 
-import android.content.Context
-import androidx.datastore.preferences.core.PreferenceDataStoreFactory
-import androidx.room.Room
-import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import com.google.protobuf.CodedOutputStream
-import com.xjw.qalbum.data.db.AppDatabase
+import com.xjw.qalbum.CHATPIC
+import com.xjw.qalbum.TestDatabase
+import com.xjw.qalbum.TestSettings
+import com.xjw.qalbum.appContext
 import com.xjw.qalbum.data.db.QqSourceStatsSql
 import com.xjw.qalbum.data.db.dao.QqContent
 import com.xjw.qalbum.data.db.dao.QqScopeIds
 import com.xjw.qalbum.data.db.dao.QqScopeSql
-import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.db.entity.QqAutoArchiveEntity
-import com.xjw.qalbum.data.preferences.SettingsRepository
+import com.xjw.qalbum.exec
+import com.xjw.qalbum.imageRow
+import com.xjw.qalbum.int
+import com.xjw.qalbum.long
+import com.xjw.qalbum.protobuf
 import com.xjw.qalbum.service.cleanup.ArchiveManager
 import com.xjw.qalbum.service.cleanup.rules.CleanupRule
 import com.xjw.qalbum.service.cleanup.rules.RuleSql
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import net.zetetic.database.sqlcipher.SQLiteConnection
 import net.zetetic.database.sqlcipher.SQLiteDatabase
@@ -30,9 +27,9 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
-import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.UUID
 
@@ -42,22 +39,20 @@ import java.util.UUID
  */
 @RunWith(AndroidJUnit4::class)
 class QqSourceImporterTest {
-    private val context = ApplicationProvider.getApplicationContext<Context>()
-    private val root = "/storage/emulated/0/Android/data/com.tencent.mobileqq/Tencent/MobileQQ/chatpic"
+    @get:Rule val database = TestDatabase()
+    @get:Rule val testSettings = TestSettings()
+    private val db get() = database.db
+    private val root = CHATPIC
     private val account = QqAccount("account-key", "u_owner")
     private val header = QqCipherHeader("0123456789abcdef", "HMAC_SHA1", "PBKDF2_HMAC_SHA512")
     private val day = 24L * 60 * 60 * 1000
     private val now = 1_760_000_000_000L
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val storeFile = File(context.cacheDir, "importer-test-${UUID.randomUUID()}.preferences_pb")
-    private lateinit var db: AppDatabase
     private lateinit var directory: File
 
     @Before
     fun setUp() {
         System.loadLibrary("sqlcipher")
-        db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).addCallback(AppDatabase.creationCallback).build()
-        directory = File(context.cacheDir, "qq-source-snapshots/${UUID.randomUUID()}").apply { mkdirs() }
+        directory = File(appContext.cacheDir, "qq-source-snapshots/${UUID.randomUUID()}").apply { mkdirs() }
         messages { db ->
             listOf("group_msg_table", "c2c_msg_table").forEach { table ->
                 db.execSQL(
@@ -70,10 +65,7 @@ class QqSourceImporterTest {
 
     @After
     fun tearDown() {
-        db.close()
         directory.parentFile?.deleteRecursively()
-        scope.cancel()
-        storeFile.delete()
     }
 
     @Test
@@ -92,7 +84,7 @@ class QqSourceImporterTest {
         message("c2c_msg_table", 3, "u_carol", 0, old, element(shared, picType = 1000), peer = "u_carol")
         message("group_msg_table", 4, "u_alice", 1001, recent, element(gif, picType = 2000))
         // 纯文字消息：读取时在 SQL 里就被筛掉，不影响结果，但水位照样推进
-        message("group_msg_table", 6, "u_bob", 1001, recent, encode { out ->
+        message("group_msg_table", 6, "u_bob", 1001, recent, protobuf { out ->
             out.writeUInt64(45001, 99)
             out.writeInt32(45002, 1)
             out.writeString(45101, "hello")
@@ -102,9 +94,9 @@ class QqSourceImporterTest {
         val result = import(first)
         assertEquals(4, result.pictures)
         assertEquals(mapOf("group_msg_table" to 4L, "c2c_msg_table" to 1L), result.marks)
-        assertEquals(4, scalar("SELECT COUNT(*) FROM qq_origins WHERE seen_at = $first"))
-        assertEquals(1, scalar("SELECT COUNT(*) FROM qq_origins WHERE pic_type = 1000 AND sent_original = 1"))
-        assertEquals(1, scalar("SELECT COUNT(*) FROM qq_origins WHERE pic_type = 2000"))
+        assertEquals(4, db.int("SELECT COUNT(*) FROM qq_origins WHERE seen_at = $first"))
+        assertEquals(1, db.int("SELECT COUNT(*) FROM qq_origins WHERE pic_type = 1000 AND sent_original = 1"))
+        assertEquals(1, db.int("SELECT COUNT(*) FROM qq_origins WHERE pic_type = 2000"))
         QqSourceStatsBuilder(db).rebuild {}
 
         // 群聊旧图：只有 Alice 那张（Bob 那张私聊里也有，GIF 是最近的）
@@ -122,7 +114,7 @@ class QqSourceImporterTest {
         val second = now - day
         assertEquals(3, import(second).pictures)
         db.qqSourceDao().setCompleteReadAt(second)
-        assertEquals(1, scalar("SELECT COUNT(*) FROM qq_origins WHERE seen_at < $second"))
+        assertEquals(1, db.int("SELECT COUNT(*) FROM qq_origins WHERE seen_at < $second"))
         assertEquals(setOf(photoRaw), ids(CleanupRule.DeletedChats, 1))
 
         // 增量读取：只解析新消息，旧消息的读取时间不动
@@ -133,8 +125,8 @@ class QqSourceImporterTest {
         val incremental = import(third, startAfter = mapOf("group_msg_table" to 4L, "c2c_msg_table" to 1L))
         assertEquals(1, incremental.pictures)
         assertEquals(mapOf("group_msg_table" to 5L, "c2c_msg_table" to 1L), incremental.marks)
-        assertEquals(1, scalar("SELECT COUNT(*) FROM qq_origins WHERE seen_at = $third"))
-        assertEquals(3, scalar("SELECT COUNT(*) FROM qq_origins WHERE seen_at = $second"))
+        assertEquals(1, db.int("SELECT COUNT(*) FROM qq_origins WHERE seen_at = $third"))
+        assertEquals(3, db.int("SELECT COUNT(*) FROM qq_origins WHERE seen_at = $second"))
         assertTrue(sharedRaw !in ids(CleanupRule.DeletedChats, 0))
     }
 
@@ -168,7 +160,7 @@ class QqSourceImporterTest {
         assertTrue(incremental.contains("Alice 新昵称"))
 
         // 与清空后整体重建的结果一致
-        QqSourceStatsSql.clearDerived.forEach(db.openHelper.writableDatabase::execSQL)
+        QqSourceStatsSql.clearDerived.forEach { db.exec(it) }
         dao.markDirty()
         QqSourceStatsBuilder(db).rebuild {}
         assertEquals(sourceStats(), incremental)
@@ -184,21 +176,21 @@ class QqSourceImporterTest {
         val odd = image("chatimg/odd/not_a_cache_name", "chatimg", now - day, 100, 100)
         message("group_msg_table", 1, "u_alice", 1001, now - day, element(photo, picType = 1000, second = other, path = "$root/chatimg/odd/not_a_cache_name"))
         val first = import(now - day)
-        assertEquals(QqCachePaths.md5Family(hex(photo)), scalarLong("SELECT family FROM qq_origins"))
-        assertEquals(QqCachePaths.md5Family(hex(other)), scalarLong("SELECT family FROM qq_origin_families"))
+        assertEquals(QqCachePaths.md5Family(hex(photo)), db.long("SELECT family FROM qq_origins"))
+        assertEquals(QqCachePaths.md5Family(hex(other)), db.long("SELECT family FROM qq_origin_families"))
         // 推不出家族键的路径另记
-        assertEquals(1, scalar("SELECT COUNT(*) FROM qq_origin_paths"))
-        assertEquals(5, scalar("SELECT COUNT(*) FROM image_qq_origins"))
-        assertTrue(listOf(photoRaw, otherRaw, odd).all { scalar("SELECT COUNT(*) FROM image_qq_origins WHERE image_id = $it") == 1 })
+        assertEquals(1, db.int("SELECT COUNT(*) FROM qq_origin_paths"))
+        assertEquals(5, db.int("SELECT COUNT(*) FROM image_qq_origins"))
+        assertTrue(listOf(photoRaw, otherRaw, odd).all { db.int("SELECT COUNT(*) FROM image_qq_origins WHERE image_id = $it") == 1 })
 
         // 已有的消息只更新读取时间，不再补登记：删掉另记的家族后从头再读，它还是不在；解析规则更新后从头读时补上
-        db.openHelper.writableDatabase.execSQL("DELETE FROM qq_origin_families")
+        db.exec("DELETE FROM qq_origin_families")
         val again = import(now)
-        assertEquals(0, scalar("SELECT COUNT(*) FROM qq_origin_families"))
-        assertEquals(1, scalar("SELECT COUNT(*) FROM qq_origins WHERE seen_at = $now"))
+        assertEquals(0, db.int("SELECT COUNT(*) FROM qq_origin_families"))
+        assertEquals(1, db.int("SELECT COUNT(*) FROM qq_origins WHERE seen_at = $now"))
         assertTrue(again.renamed.isEmpty() && first.renamed.isEmpty())
         importWith(now + 1, allPaths = true)
-        assertEquals(1, scalar("SELECT COUNT(*) FROM qq_origin_families"))
+        assertEquals(1, db.int("SELECT COUNT(*) FROM qq_origin_families"))
     }
 
     @Test
@@ -210,8 +202,7 @@ class QqSourceImporterTest {
         QqSourceStatsBuilder(db).rebuild {}
         val sources = db.qqSourceDao()
         sources.addAutoArchive(QqAutoArchiveEntity(conversationKey(), "", "群", now))
-        val settings = SettingsRepository(context, scope, PreferenceDataStoreFactory.create(scope = scope) { storeFile })
-        val archive = ArchiveManager(db, settings, scope)
+        val archive = ArchiveManager(db, testSettings.repository, testSettings.scope)
 
         // 这张图的原图与预览图
         assertEquals(2, archive.applyAutoArchive())
@@ -222,7 +213,7 @@ class QqSourceImporterTest {
         import(now, startAfter = mapOf("group_msg_table" to 1L))
         QqSourceStatsBuilder(db).rebuild {}
         assertEquals(2, archive.applyAutoArchive())
-        assertEquals(0, scalar("SELECT COUNT(*) FROM images WHERE is_protected = 0"))
+        assertEquals(0, db.int("SELECT COUNT(*) FROM images WHERE is_protected = 0"))
     }
 
     @Test
@@ -251,15 +242,15 @@ class QqSourceImporterTest {
         val linker = QqSentPreviewLinker(db) { path -> opened += path; contents[path]?.inputStream() }
         assertEquals(1, linker.link(listOf(opaqueKey(account.key, "sender", account.uid))))
         assertTrue("$root/${QqCachePaths.relativePaths(hex(photo))[0]}" !in opened)
-        assertEquals(1, scalar("SELECT COUNT(*) FROM image_qq_origins WHERE image_id = $preview"))
-        assertEquals(0, scalar("SELECT COUNT(*) FROM image_qq_origins WHERE image_id = $stranger"))
+        assertEquals(1, db.int("SELECT COUNT(*) FROM image_qq_origins WHERE image_id = $preview"))
+        assertEquals(0, db.int("SELECT COUNT(*) FROM image_qq_origins WHERE image_id = $stranger"))
         assertEquals(
-            scalar("SELECT COUNT(*) FROM image_qq_origins l JOIN image_qq_origins r ON r.origin_id = l.origin_id WHERE l.image_id = $preview AND r.image_id = $raw"),
+            db.int("SELECT COUNT(*) FROM image_qq_origins l JOIN image_qq_origins r ON r.origin_id = l.origin_id WHERE l.image_id = $preview AND r.image_id = $raw"),
             1,
         )
         // 图库里并进原图那一家（不再多出一张），「发送图片缓存」只列它
-        assertEquals(scalarLong("SELECT variant_group FROM images WHERE id = $raw"), scalarLong("SELECT variant_group FROM images WHERE id = $preview"))
-        assertEquals(1, scalar("SELECT variant_hidden FROM images WHERE id = $preview"))
+        assertEquals(db.long("SELECT variant_group FROM images WHERE id = $raw"), db.long("SELECT variant_group FROM images WHERE id = $preview"))
+        assertEquals(1, db.int("SELECT variant_hidden FROM images WHERE id = $preview"))
         assertEquals(setOf(preview), ids(CleanupRule.SentPreviews, 0))
         assertTrue(shown !in ids(CleanupRule.SentPreviews, 0))
         // 消息还在：预览不算「聊天记录已删除」；对不上的那张照算
@@ -272,9 +263,9 @@ class QqSourceImporterTest {
         assertEquals(0, linker.link(listOf(opaqueKey(account.key, "sender", account.uid))))
         assertTrue(opened.isEmpty())
         // 预览被重新入库（家族键按路径重算）后，扫描结束时并回原图那一家
-        db.openHelper.writableDatabase.execSQL("UPDATE images SET variant_group = ${QqCachePaths.familyKey("$root/$previewPath")} WHERE id = $preview")
+        db.exec("UPDATE images SET variant_group = ${QqCachePaths.familyKey("$root/$previewPath")} WHERE id = $preview")
         QqSentPreviewLinker.mergeFamilies(db)
-        assertEquals(scalarLong("SELECT variant_group FROM images WHERE id = $raw"), scalarLong("SELECT variant_group FROM images WHERE id = $preview"))
+        assertEquals(db.long("SELECT variant_group FROM images WHERE id = $raw"), db.long("SELECT variant_group FROM images WHERE id = $preview"))
     }
 
     // ---- 只读副本 ----
@@ -311,7 +302,7 @@ class QqSourceImporterTest {
         table: String, id: Long, sender: String, group: Long, time: Long, vararg elements: ByteArray,
         peer: String = "", nickname: String = sender.removePrefix("u_"),
     ) {
-        val content = encode { out -> elements.forEach { out.writeByteArray(40800, it) } }
+        val content = protobuf { out -> elements.forEach { out.writeByteArray(40800, it) } }
         messages {
             it.execSQL(
                 "INSERT INTO $table VALUES (?, ?, ?, 0, ?, 0, ?, '', ?, 2, ?, NULL)",
@@ -350,7 +341,7 @@ class QqSourceImporterTest {
 
     private fun hex(md5: ByteArray) = md5.joinToString("") { "%02x".format(it) }
 
-    private fun element(md5: ByteArray, picType: Int, original: Boolean = false, second: ByteArray? = null, path: String? = null) = encode { out ->
+    private fun element(md5: ByteArray, picType: Int, original: Boolean = false, second: ByteArray? = null, path: String? = null) = protobuf { out ->
         out.writeUInt64(45001, md5[0].toLong() and 0xff)
         out.writeInt32(45002, 2)
         out.writeByteArray(45406, md5)
@@ -360,41 +351,18 @@ class QqSourceImporterTest {
         if (original) out.writeInt32(QqPictureCodec.ORIGINAL_FIELD, 1)
     }
 
-    private fun encode(block: (CodedOutputStream) -> Unit): ByteArray {
-        val bytes = ByteArrayOutputStream()
-        val out = CodedOutputStream.newInstance(bytes)
-        block(out)
-        out.flush()
-        return bytes.toByteArray()
-    }
-
     /** 这张图的预览图与原图入库，返回原图（整张图的代表）的 id */
     private suspend fun images(md5: ByteArray, mtime: Long): Long {
         val (img, raw) = QqCachePaths.relativePaths(hex(md5)).map { "$root/$it" }
         val ids = listOf(raw to 2_000_000L, img to 200_000L).map { (path, size) ->
-            db.imageDao().insert(
-                ImageEntity(
-                    path = path, filename = path.substringAfterLast('/'), parentDir = path.substringBeforeLast('/'),
-                    sourceType = if (path == raw) "chatraw" else "chatimg", cacheKey = path.substringAfterLast('/'),
-                    variantGroup = QqCachePaths.familyKey(path), size = size, mtime = mtime, firstSeen = mtime, lastSeen = mtime,
-                    mime = "image/jpeg", width = 1000, height = 800, isAnimated = false, status = "active",
-                ),
-            )
+            db.imageDao().insert(imageRow(path, if (path == raw) "chatraw" else "chatimg", size, mtime, width = 1000, height = 800))
         }
         return ids.first()
     }
 
     /** 单个缓存文件入库，返回 id */
     private suspend fun image(relative: String, type: String, mtime: Long, width: Int, height: Int): Long {
-        val path = "$root/$relative"
-        return db.imageDao().insert(
-            ImageEntity(
-                path = path, filename = path.substringAfterLast('/'), parentDir = path.substringBeforeLast('/'),
-                sourceType = type, cacheKey = path.substringAfterLast('/'), variantGroup = QqCachePaths.familyKey(path),
-                size = 100_000, mtime = mtime, firstSeen = mtime, lastSeen = mtime,
-                mime = "image/jpeg", width = width, height = height, isAnimated = false, status = "active",
-            ),
-        )
+        return db.imageDao().insert(imageRow("$root/$relative", type, 100_000, mtime, width = width, height = height))
     }
 
     private fun md5Of(bytes: ByteArray): String =
@@ -405,7 +373,4 @@ class QqSourceImporterTest {
 
     private fun conversationKey() = opaqueKey(account.key, "conversation", "2", "1001")
 
-    private fun scalar(sql: String): Int = db.query(sql, emptyArray()).use { it.moveToFirst(); it.getInt(0) }
-
-    private fun scalarLong(sql: String): Long = db.query(sql, emptyArray()).use { it.moveToFirst(); it.getLong(0) }
 }

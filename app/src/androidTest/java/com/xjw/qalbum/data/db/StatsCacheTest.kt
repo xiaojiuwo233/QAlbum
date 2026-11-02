@@ -1,11 +1,9 @@
 package com.xjw.qalbum.data.db
 
-import android.content.Context
-import androidx.room.Room
-import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import com.xjw.qalbum.data.db.entity.ImageEntity
+import com.xjw.qalbum.TestDatabase
 import com.xjw.qalbum.data.paging.BulkWrites
+import com.xjw.qalbum.imageRow
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -22,7 +20,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
-import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.util.concurrent.atomic.AtomicInteger
@@ -30,29 +28,15 @@ import java.util.concurrent.atomic.AtomicInteger
 /** 统计缓存：再次订阅直接给缓存不重查；图片变了才重查；清理执行期间（hold）不查，结束后补上 */
 @RunWith(AndroidJUnit4::class)
 class StatsCacheTest {
-    private val context = ApplicationProvider.getApplicationContext<Context>()
-    private val dbName = "stats-cache-test.db"
-    private lateinit var db: AppDatabase
+    @get:Rule val database = TestDatabase("stats-cache-test.db")
+    private val db get() = database.db
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val queries = AtomicInteger(0)
 
-    @Before
-    fun setUp() {
-        context.deleteDatabase(dbName)
-        db = Room.databaseBuilder(context, AppDatabase::class.java, dbName).addCallback(AppDatabase.creationCallback).build()
-    }
-
     @After
-    fun tearDown() {
-        scope.cancel()
-        db.close()
-        context.deleteDatabase(dbName)
-    }
+    fun tearDown() = scope.cancel()
 
-    private fun image(index: Int) = ImageEntity(
-        path = "/p/$index", filename = "$index", parentDir = "/p", sourceType = "chatimg", cacheKey = "$index",
-        size = 100, mtime = 1_000, firstSeen = 1_000, lastSeen = 1_000, mime = "image/jpeg", width = 1, height = 1,
-    )
+    private fun image(index: Int) = imageRow("/p/$index", "chatimg")
 
     private suspend fun count(): Int {
         queries.incrementAndGet()

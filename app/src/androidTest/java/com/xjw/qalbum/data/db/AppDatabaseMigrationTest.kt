@@ -5,6 +5,8 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.xjw.qalbum.CHATPIC
+import com.xjw.qalbum.familyPaths
 import com.xjw.qalbum.qq.QqCachePaths
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -13,6 +15,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
+/** 数据库升级：每个版本都有迁移，各次迁移保留用户数据、补齐新列与触发器，结果与 Room 的表结构一致 */
 @RunWith(AndroidJUnit4::class)
 class AppDatabaseMigrationTest {
 
@@ -33,8 +36,7 @@ class AppDatabaseMigrationTest {
     @Test
     fun migrate27To28_familyRecomputesOnlyWhenVisibilityChanges() {
         val name = "migration-27-28"
-        val root = "/storage/emulated/0/Android/data/com.tencent.mobileqq/Tencent/MobileQQ/chatpic"
-        val (img, raw) = QqCachePaths.relativePaths("0123456789abcdef0123456789abcdef").map { "$root/$it" }
+        val (img, raw) = familyPaths("0123456789abcdef0123456789abcdef")
         helper.createDatabase(name, 27).use { db ->
             image(db, 1, raw)
             image(db, 2, img)
@@ -76,14 +78,13 @@ class AppDatabaseMigrationTest {
     @Test
     fun migrate26To27_linksPicturesByFamilyInsteadOfStoredPaths() {
         val name = "migration-26-27"
-        val root = "/storage/emulated/0/Android/data/com.tencent.mobileqq/Tencent/MobileQQ/chatpic"
         val md5 = "0123456789abcdef0123456789abcdef"
         val second = "fedcba9876543210fedcba9876543210"
-        val (img, raw, thumb, hd) = QqCachePaths.relativePaths(md5).map { "$root/$it" }
-        val secondRaw = "$root/" + QqCachePaths.relativePaths(second)[1]
+        val (img, raw, thumb, hd) = familyPaths(md5)
+        val secondRaw = familyPaths(second)[1]
         val alias = "$raw.png"
-        val temp = "$root/Temp/" + thumb.substringAfterLast('/') + ".thumb_1.tmp.from_orig_avif_aio.ready"
-        val odd = "$root/chatimg/odd/not_a_cache_name"
+        val temp = "$CHATPIC/Temp/" + thumb.substringAfterLast('/') + ".thumb_1.tmp.from_orig_avif_aio.ready"
+        val odd = "$CHATPIC/chatimg/odd/not_a_cache_name"
         helper.createDatabase(name, 26).use { db ->
             db.execSQL("INSERT INTO qq_source_accounts VALUES('a', '账号', 1, 1)")
             db.execSQL(
@@ -110,7 +111,7 @@ class AppDatabaseMigrationTest {
             listOf(thumb, alias, temp, secondRaw, odd).forEachIndexed { index, path -> image(db, 2L + index, path) }
             (2L..6L).forEach { id -> assertEquals("image $id", 1L, scalarLong(db, "SELECT COUNT(*) FROM image_qq_origins WHERE image_id = $id AND origin_id = 'o'")) }
             // 发送图片缓存并进原图那一家（改家族键）时一起关联
-            image(db, 7, "$root/chatimg/abc/Cache_123abc")
+            image(db, 7, "$CHATPIC/chatimg/abc/Cache_123abc")
             assertEquals(0L, scalarLong(db, "SELECT COUNT(*) FROM image_qq_origins WHERE image_id = 7"))
             db.execSQL("UPDATE images SET variant_group = ${QqCachePaths.md5Family(md5)} WHERE id = 7")
             assertEquals(1L, scalarLong(db, "SELECT COUNT(*) FROM image_qq_origins WHERE image_id = 7"))

@@ -1,6 +1,6 @@
 package com.xjw.qalbum.ui.gallery
 
-import com.xjw.qalbum.data.db.entity.ImageEntity
+import com.xjw.qalbum.imageRow
 import com.xjw.qalbum.ui.components.ScrollDirectory
 import com.xjw.qalbum.ui.components.scrubGain
 import org.junit.Assert.assertEquals
@@ -97,9 +97,6 @@ class TimelineSectionsTest {
         assertEquals(listOf("1 MB 以下", null, "4 MB"), ascending.entries.map { it.mark })
     }
 
-    private fun image(size: Long, variantBytes: Long, variantCount: Int) = ImageEntity(
-        path = "/p", filename = "f", parentDir = "/", sourceType = "chatraw", cacheKey = "k",
-        variantCount = variantCount, variantBytes = variantBytes,
-        size = size, mtime = 1L, firstSeen = 1L, lastSeen = 1L, mime = "image/jpeg", width = 1, height = 1,
-    )
+    private fun image(size: Long, variantBytes: Long, variantCount: Int) =
+        imageRow("/p", "chatraw", size = size, variantCount = variantCount, variantBytes = variantBytes)
 }

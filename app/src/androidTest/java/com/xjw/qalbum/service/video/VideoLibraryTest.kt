@@ -1,20 +1,18 @@
 package com.xjw.qalbum.service.video
 
-import android.content.Context
-import androidx.room.Room
-import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import com.xjw.qalbum.data.db.AppDatabase
+import com.xjw.qalbum.TestDatabase
+import com.xjw.qalbum.appContext
 import com.xjw.qalbum.data.db.entity.VideoEntity
-import com.xjw.qalbum.fileops.BoundFileOps
+import com.xjw.qalbum.fileops.inProcessFiles
 import com.xjw.qalbum.qq.QqStorageRoots
-import com.xjw.qalbum.service.cleanup.InProcessFileOps
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.koin.core.context.GlobalContext
@@ -23,30 +21,25 @@ import java.io.File
 /** 视频页的扫描、重扫与删除（文件操作在本进程内执行，走与特权进程相同的 FileOpsImpl） */
 @RunWith(AndroidJUnit4::class)
 class VideoLibraryTest {
-    private val context = ApplicationProvider.getApplicationContext<Context>()
-    private val base = File(context.getExternalFilesDir(null), "video-library-test")
+    @get:Rule val database = TestDatabase("video-library-test.db")
+    private val db get() = database.db
+    private val base = File(appContext.getExternalFilesDir(null), "video-library-test")
     private val roots = QqStorageRoots(0, "${base.path}/internal", base.path)
-    private val dbName = "video-library-test.db"
-    private lateinit var db: AppDatabase
-    private val bound = BoundFileOps(InProcessFileOps) {}
+    private val bound = inProcessFiles()
 
     @Before
     fun setUp() {
         base.deleteRecursively()
-        context.deleteDatabase(dbName)
-        db = Room.databaseBuilder(context, AppDatabase::class.java, dbName).addCallback(AppDatabase.creationCallback).build()
     }
 
     @After
     fun tearDown() {
-        db.close()
-        context.deleteDatabase(dbName)
         base.deleteRecursively()
     }
 
     private fun library(): VideoLibrary {
         val koin = GlobalContext.get()
-        return VideoLibrary(context, db, koin.get(), koin.get(), koin.get())
+        return VideoLibrary(appContext, db, koin.get(), koin.get(), koin.get())
     }
 
     private fun ftyp(size: Int, brand: String = "isom"): ByteArray = ByteArray(size).also { bytes ->

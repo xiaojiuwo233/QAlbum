@@ -1,22 +1,23 @@
 package com.xjw.qalbum.service.cleanup
 
-import android.content.Context
-import androidx.room.Room
-import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import com.xjw.qalbum.data.db.AppDatabase
-import com.xjw.qalbum.data.db.entity.ImageEntity
-import com.xjw.qalbum.data.db.entity.QqOriginEntity
+import com.xjw.qalbum.TestDatabase
+import com.xjw.qalbum.addOrigins
+import com.xjw.qalbum.appContext
 import com.xjw.qalbum.data.db.entity.QqOriginFamilyEntity
-import com.xjw.qalbum.data.db.entity.QqSourceAccountEntity
-import com.xjw.qalbum.fileops.BoundFileOps
+import com.xjw.qalbum.familyPaths
+import com.xjw.qalbum.fileops.inProcessFiles
+import com.xjw.qalbum.imageRow
+import com.xjw.qalbum.md5
 import com.xjw.qalbum.qq.QqCachePaths
 import com.xjw.qalbum.qq.QqSourceScope
+import com.xjw.qalbum.qqOrigin
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
@@ -27,28 +28,24 @@ import java.io.File
  */
 @RunWith(AndroidJUnit4::class)
 class PictureFamilyPlannerTest {
-    private val context = ApplicationProvider.getApplicationContext<Context>()
-    private val root = File(context.getExternalFilesDir(null), "planner-test/chatpic")
-    private val bound = BoundFileOps(InProcessFileOps) {}
-    private lateinit var db: AppDatabase
+    @get:Rule val database = TestDatabase()
+    private val db get() = database.db
+    private val root = File(appContext.getExternalFilesDir(null), "planner-test/chatpic")
+    private val bound = inProcessFiles()
     private var origins = 0
 
     @Before
     fun setUp() {
         root.parentFile!!.deleteRecursively()
-        db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).addCallback(AppDatabase.creationCallback).build()
     }
 
     @After
     fun tearDown() {
-        db.close()
         root.parentFile!!.deleteRecursively()
     }
 
-    private fun md5(index: Int) = "%032x".format(index)
-
-    /** 一张图的各版本（chatimg、chatraw、chatthumb、_hd）路径 */
-    private fun paths(md5: String) = QqCachePaths.relativePaths(md5).map { File(root, it) }
+    /** 一张图的各版本（chatimg、chatraw、chatthumb、_hd）文件 */
+    private fun paths(md5: String) = familyPaths(md5, root.path).map(::File)
 
     /** 写文件；[indexed] 时同时入库 */
     private suspend fun file(file: File, indexed: Boolean = true, variantGroup: Long? = QqCachePaths.familyKey(file.path)): Long? {
@@ -57,22 +54,13 @@ class PictureFamilyPlannerTest {
         file.setLastModified(1_700_000_000_000L)
         if (!indexed) return null
         val type = file.path.split('/').let { it[it.size - 3] }
-        return db.imageDao().insert(
-            ImageEntity(
-                path = file.path, filename = file.name, parentDir = file.parent!!, sourceType = type, cacheKey = file.name,
-                variantGroup = variantGroup, size = file.length(), mtime = file.lastModified(), firstSeen = 1, lastSeen = 1,
-                mime = "image/jpeg", width = 1, height = 1, status = if (type == "chatthumb") "thumbnail_trash" else "active",
-            ),
-        )
+        return db.imageDao().insert(imageRow(file.path, type, file.length(), file.lastModified(), variantGroup = variantGroup))
     }
 
     private suspend fun origin(md5: String, conversation: String, sender: String, vararg more: String) {
-        val sources = db.qqSourceDao()
-        sources.putAccount(QqSourceAccountEntity("account", "账号", 1, 0))
         val id = "origin-${++origins}"
-        sources.insertOrigins(listOf(QqOriginEntity(id, "account", conversation, conversation, 2, sender, sender, "", 1_000, md5,
-            family = QqCachePaths.md5Family(md5))))
-        sources.insertFamilies(more.map { QqOriginFamilyEntity(QqCachePaths.md5Family(it)!!, id) })
+        db.addOrigins(qqOrigin(id, md5, conversation, sender))
+        db.qqSourceDao().insertFamilies(more.map { QqOriginFamilyEntity(QqCachePaths.md5Family(it)!!, id) })
     }
 
     private suspend fun plan(ids: List<Long>, options: PictureDeleteOptions = PictureDeleteOptions(), scope: QqSourceScope? = null): List<PictureFileGroup> {

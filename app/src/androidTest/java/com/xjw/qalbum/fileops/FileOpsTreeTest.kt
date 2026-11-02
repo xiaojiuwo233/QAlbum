@@ -1,9 +1,8 @@
 package com.xjw.qalbum.fileops
 
-import android.content.Context
 import android.system.Os
-import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.xjw.qalbum.appContext
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -17,8 +16,7 @@ import java.io.File
 /** 特权进程里给 QQ 缓存页与视频页用的目录操作（在测试进程里直接跑同一份 [FileOpsImpl]） */
 @RunWith(AndroidJUnit4::class)
 class FileOpsTreeTest {
-    private val context = ApplicationProvider.getApplicationContext<Context>()
-    private val root = File(context.filesDir, "fileops-tree-test")
+    private val root = File(appContext.filesDir, "fileops-tree-test")
 
     @Before
     fun setUp() {

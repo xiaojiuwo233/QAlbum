@@ -1,26 +1,24 @@
 package com.xjw.qalbum.data.db
 
-import android.content.Context
 import androidx.paging.PagingSource
-import androidx.room.Room
-import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.xjw.qalbum.TestDatabase
 import com.xjw.qalbum.data.db.dao.TrashUnit
-import com.xjw.qalbum.data.db.entity.ImageEntity
 import com.xjw.qalbum.data.db.entity.OriginalBackupEntity
 import com.xjw.qalbum.data.db.entity.QuarantineEntity
 import com.xjw.qalbum.domain.model.SourceSort
 import com.xjw.qalbum.domain.model.TimelineSection
-import com.xjw.qalbum.qq.QqCachePaths
+import com.xjw.qalbum.familyPaths
+import com.xjw.qalbum.imageRow
+import com.xjw.qalbum.md5
 import com.xjw.qalbum.ui.gallery.dayKey
 import com.xjw.qalbum.ui.gallery.daySection
 import com.xjw.qalbum.ui.gallery.sizeBucketId
 import com.xjw.qalbum.ui.gallery.sizeBucketSection
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
-import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -30,21 +28,11 @@ import org.junit.runner.RunWith
  */
 @RunWith(AndroidJUnit4::class)
 class RecycleBinQueryTest {
-    private val root = "/storage/emulated/0/Android/data/com.tencent.mobileqq/Tencent/MobileQQ/chatpic"
+    @get:Rule val database = TestDatabase()
+    private val db get() = database.db
     private val now = 1_760_000_000_000L
     private val day = 24L * 60 * 60 * 1000
     private var families = 0
-    private lateinit var db: AppDatabase
-
-    @Before
-    fun open() {
-        db = Room.inMemoryDatabaseBuilder(ApplicationProvider.getApplicationContext<Context>(), AppDatabase::class.java)
-            .addCallback(AppDatabase.creationCallback)
-            .build()
-    }
-
-    @After
-    fun close() = db.close()
 
     @Test
     fun eachDeletionIsOneTileRepresentedByItsLargestFile() = runBlocking {
@@ -122,7 +110,7 @@ class RecycleBinQueryTest {
     private suspend fun trashGroup(
         reason: String, at: Long, vararg files: Pair<String, Long>, legacy: Boolean = false, state: String = "ready",
     ): Group {
-        val paths = QqCachePaths.relativePaths("%032x".format(++families)).map { "$root/$it" }
+        val paths = familyPaths(md5(++families))
         val token = if (legacy) null else "group-$families"
         var rep = 0L
         var top = -1L
@@ -132,14 +120,7 @@ class RecycleBinQueryTest {
                 "chatraw" -> paths[1]
                 else -> paths[2]
             }
-            val id = db.imageDao().insert(
-                ImageEntity(
-                    path = path, filename = path.substringAfterLast('/'), parentDir = path.substringBeforeLast('/'),
-                    sourceType = type, cacheKey = path.substringAfterLast('/'), variantGroup = QqCachePaths.familyKey(path),
-                    size = size, mtime = at - 100 * day, firstSeen = at - 100 * day, lastSeen = at, mime = "image/jpeg",
-                    width = 100, height = 100, isAnimated = false, status = "quarantined",
-                ),
-            )
+            val id = db.imageDao().insert(imageRow(path, type, size, at - 100 * day, "quarantined"))
             db.cleanupDao().insertQuarantine(
                 QuarantineEntity(
                     imageId = id, originalPath = path, quarantinePath = "/data/trash/${families}_$id", thumbnailPath = null,
@@ -156,15 +137,8 @@ class RecycleBinQueryTest {
     }
 
     private suspend fun backup(createdAt: Long, originalSize: Long, kept: Boolean = true): Long {
-        val path = "$root/${QqCachePaths.relativePaths("%032x".format(++families))[1]}"
-        val id = db.imageDao().insert(
-            ImageEntity(
-                path = path, filename = path.substringAfterLast('/'), parentDir = path.substringBeforeLast('/'),
-                sourceType = "chatraw", cacheKey = path.substringAfterLast('/'), variantGroup = QqCachePaths.familyKey(path),
-                size = originalSize / 3, mtime = createdAt - 100 * day, firstSeen = createdAt - 100 * day, lastSeen = createdAt,
-                mime = "image/jpeg", width = 100, height = 100, isAnimated = false, status = "active", optimized = 1,
-            ),
-        )
+        val path = familyPaths(md5(++families))[1]
+        val id = db.imageDao().insert(imageRow(path, "chatraw", originalSize / 3, createdAt - 100 * day, optimized = 1))
         db.originalBackupDao().insert(
             OriginalBackupEntity(
                 imageId = id, path = path, backupPath = if (kept) "/data/backup/$id" else null, originalSize = originalSize,

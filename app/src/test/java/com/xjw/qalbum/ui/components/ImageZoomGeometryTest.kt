@@ -7,32 +7,33 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+/** 看图缩放：拖动范围、双指焦点、长图判断与铺满宽度、拖到边缘交给翻页 */
 class ImageZoomGeometryTest {
     private val portraitViewport = Size(400f, 800f)
 
     @Test
-    fun landscapePhotoCannotPanVerticallyIntoEmptyLetterbox() {
+    fun `横图放大后不能上下拖进空白处`() {
         val offset = ImageZoomGeometry.clamp(Offset(1000f, 1000f), 2f, portraitViewport, Size(1600f, 900f))
         assertEquals(200f, offset.x, 0.001f)
         assertEquals(0f, offset.y, 0.001f)
     }
 
     @Test
-    fun pinchPreservesTheFocalPoint() {
+    fun `双指缩放时焦点不动`() {
         val offset = ImageZoomGeometry.zoomOffset(Offset.Zero, Offset(300f, 400f), Offset(200f, 400f), 2f)
         assertEquals(-100f, offset.x, 0.001f)
         assertEquals(0f, offset.y, 0.001f)
     }
 
     @Test
-    fun returningToOriginalSizeResetsPan() {
+    fun `缩回原大小时位移归零`() {
         assertEquals(Offset.Zero, ImageZoomGeometry.clamp(Offset(100f, 100f), 1f, portraitViewport, Size(1000f, 1000f)))
     }
 
     private val phone = Size(1080f, 2424f)
 
     @Test
-    fun onlyImagesMuchTallerThanTheScreenAreLong() {
+    fun `比屏幕高很多的才算长图`() {
         assertTrue(ImageZoomGeometry.isLong(phone, Size(1080f, 12960f)))
         assertTrue(ImageZoomGeometry.isLong(phone, Size(1080f, 3500f)))
         assertFalse(ImageZoomGeometry.isLong(phone, Size(1080f, 3000f)))
@@ -44,7 +45,7 @@ class ImageZoomGeometryTest {
     }
 
     @Test
-    fun longImageFillsTheWidthFromTheTop() {
+    fun `长图放大到铺满宽度并从顶部开始`() {
         val image = Size(1080f, 12960f)
         val scale = ImageZoomGeometry.fillWidthScale(phone, image)
         assertEquals(1080f / 202f, scale, 0.001f)
@@ -55,7 +56,7 @@ class ImageZoomGeometryTest {
     }
 
     @Test
-    fun horizontalDragGoesToThePagerAtTheEdge() {
+    fun `拖到边缘后横滑交给翻页`() {
         val long = Size(1080f, 12960f)
         val fill = ImageZoomGeometry.fillWidthScale(phone, long)
         // 长图宽度占满时左右拖不动：横滑翻页

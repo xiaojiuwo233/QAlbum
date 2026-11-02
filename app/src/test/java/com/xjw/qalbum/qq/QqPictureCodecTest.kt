@@ -7,6 +7,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayOutputStream
 
+/** 解析消息里的图片段：图片类型、原图标记、表情子类型，以及只记字段号和小数值的诊断统计 */
 class QqPictureCodecTest {
     private val md5 = ByteArray(16) { (it * 17).toByte() }
     private val md5Hex = md5.joinToString("") { "%02x".format(it) }
@@ -44,7 +45,7 @@ class QqPictureCodecTest {
         val pictures = QqPictureCodec.decode(message(element(1, picType = 2000, original = true), element(2)))
         assertEquals(listOf(2000, 0), pictures.map { it.picType })
         assertEquals(listOf(true, false), pictures.map { it.original })
-        // 子类型字段号还没确认：一律未知
+        // 没写子类型字段：未知
         assertEquals(listOf(-1, -1), pictures.map { it.picSubType })
         assertEquals(setOf(md5Hex), pictures.first().md5s)
     }

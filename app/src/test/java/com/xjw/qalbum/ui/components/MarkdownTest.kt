@@ -1,13 +1,17 @@
 package com.xjw.qalbum.ui.components
 
+import com.xjw.qalbum.AppInfo
 import com.xjw.qalbum.ui.components.Markdown.Block
 import com.xjw.qalbum.ui.components.Markdown.Span
+import com.xjw.qalbum.ui.onboarding.USER_AGREEMENT
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
+/** 更新说明与用户协议用的 Markdown：块级与行内格式，以及协议全文能正确解析 */
 class MarkdownTest {
     @Test
-    fun blocks() {
+    fun `块级元素：标题、段落、列表、引用、分隔线、代码块`() {
         val blocks = Markdown.parse(
             """
             ## 0.4.2 更新
@@ -40,7 +44,7 @@ class MarkdownTest {
     }
 
     @Test
-    fun inlineStylesAndLinks() {
+    fun `行内样式与链接，转义和单词里的下划线不算格式`() {
         assertEquals(
             listOf(
                 Span.Text("看 "),
@@ -58,12 +62,29 @@ class MarkdownTest {
             ),
             Markdown.inline("看 **粗体**、*斜体*、`代码`、~~删掉~~ 和 [主页](https://example.com) https://a.b/c"),
         )
-        // 转义与单词里的下划线不当作格式
         assertEquals(listOf(Span.Text("*不是斜体* snake_case_name")), Markdown.inline("\\*不是斜体\\* snake_case_name"))
         // 粗体里可以有斜体
         assertEquals(
             listOf(Span.Text("粗体里 ", bold = true), Span.Text("斜体", bold = true, italic = true), Span.Text(" 也行", bold = true)),
             Markdown.inline("**粗体里 *斜体* 也行**"),
         )
+    }
+
+    @Test
+    fun `用户协议能完整解析：条款都编号，加粗都闭合，链接只有隐私政策和项目主页`() {
+        val blocks = Markdown.parse(USER_AGREEMENT)
+        assertTrue(blocks.any { it is Block.Heading })
+        val items = blocks.filterIsInstance<Block.Item>()
+        assertTrue(items.isNotEmpty() && items.all { it.depth == 0 && it.marker.endsWith(".") })
+        val spans = blocks.flatMap { block ->
+            when (block) {
+                is Block.Item -> Markdown.inline(block.text)
+                is Block.Paragraph -> Markdown.inline(block.text)
+                else -> emptyList()
+            }
+        }
+        assertTrue(spans.none { it is Span.Text && "**" in it.text })
+        assertTrue(spans.any { it is Span.Text && it.bold })
+        assertEquals(listOf("https://policies.google.com/privacy", AppInfo.PROJECT_URL), spans.filterIsInstance<Span.Link>().map { it.url })
     }
 }

@@ -1,14 +1,12 @@
 package com.xjw.qalbum.ui.settings
 
-import android.annotation.SuppressLint
-import com.google.android.material.color.utilities.Hct
 import com.xjw.qalbum.data.preferences.SettingsRepository
 import com.xjw.qalbum.domain.model.AccessMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import kotlin.math.abs
 
+/** 设置首页的状态卡片与各项副标题 */
 class SettingsSummaryTest {
 
     @Test
@@ -44,7 +42,7 @@ class SettingsSummaryTest {
         assertEquals("/sdcard/a/b", shortPath("/sdcard/a/b"))
         assertEquals(
             "…/Tencent/MobileQQ/chatpic",
-            shortPath("/storage/emulated/0/Android/data/com.tencent.mobileqq/Tencent/MobileQQ/chatpic"),
+            shortPath(SettingsRepository.DEFAULT_CHATPIC_PATH),
         )
     }
 
@@ -52,16 +50,6 @@ class SettingsSummaryTest {
     fun `清理的副标题`() {
         assertEquals("回收站保留 30 天 · 不定时清理", cleanupSummary(30, 0))
         assertEquals("回收站保留 7 天 · 每周清理 2 项", cleanupSummary(7, 2))
-    }
-
-    @SuppressLint("RestrictedApi")
-    @Test
-    fun `色相滑条的颜色色相跟着滑条走`() {
-        listOf(0f, 60f, 140f, 220f, 300f).forEach { hue ->
-            val actual = Hct.fromInt(hueSeed(hue)).hue
-            val diff = abs(actual - hue).let { if (it > 180) 360 - it else it }
-            assertTrue("hue $hue → $actual", diff < 2.0)
-        }
     }
 
     private fun shizuku(state: ShizukuState) = AccessState(AccessMode.SHIZUKU, shizuku = ShizukuStatus(state))

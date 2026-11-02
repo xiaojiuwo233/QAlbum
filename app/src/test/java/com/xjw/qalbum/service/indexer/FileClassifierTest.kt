@@ -6,6 +6,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+/** 增量扫描：目录里的文件与库里的记录比对，分出新增、变化、未变、消失与复活 */
 class FileClassifierTest {
 
     private val dir = "/sd/chatpic/chatimg/abc"
