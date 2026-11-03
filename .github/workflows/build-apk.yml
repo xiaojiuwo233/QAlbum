@@ -1,6 +1,7 @@
 name: Build APK
 
 # 每次推送提交 / 发起 PR 时自动测试并构建 Release APK
+on:
   push:
     branches:
       - "**"
