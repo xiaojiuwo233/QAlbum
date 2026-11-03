@@ -278,6 +278,7 @@ internal fun accessHeadline(access: AccessState?): String = when {
     access.shizuku?.state == ShizukuState.PermissionDenied -> "还没有授权"
     access.granted == false -> if (access.mode == AccessMode.ROOT) "没有 Root 权限" else "连不上 Shizuku"
     access.folderFound == false -> "找不到图片目录"
+    access.folderReadable == false -> "没有目录读取权限"
     else -> "可以使用"
 }
 

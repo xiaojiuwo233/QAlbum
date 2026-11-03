@@ -385,7 +385,7 @@ private fun AccessPage(viewModel: SettingsViewModel, onBack: () -> Unit, onNext:
         viewModel.checkAccess()
         onPauseOrDispose { }
     }
-    val ready = access?.takeIf { it.mode == mode }?.ready == true
+    val ready = access?.takeIf { it.mode == mode }?.granted == true
     PageFrame(buttons = {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             TextButton(onClick = onBack) { Text("上一步") }
@@ -443,8 +443,8 @@ private fun ScanPage(viewModel: SettingsViewModel, onBack: () -> Unit, onFinish:
     val access by viewModel.access.collectAsState()
     var editing by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(Unit) { viewModel.checkAccess() }
-    val granted = access?.ready == true
-    val ready = granted && access?.folderFound == true
+    val granted = access?.granted == true
+    val ready = access?.ready == true
     PageFrame(buttons = {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
@@ -493,6 +493,7 @@ private fun ScanPage(viewModel: SettingsViewModel, onBack: () -> Unit, onFinish:
             when {
                 checking -> "正在检查图片目录…"
                 ready -> "TIM、国际版 QQ 的目录不一样，点上面修改。"
+                access?.folderFound == true && access?.folderReadable == false -> "目录存在，但当前方式没有读取权限。请回上一步更换访问方式。"
                 granted -> "找不到这个目录。确认装了 QQ，TIM、国际版 QQ 点上面修改。"
                 else -> "还不能读取图片目录，先回上一步授权。"
             },

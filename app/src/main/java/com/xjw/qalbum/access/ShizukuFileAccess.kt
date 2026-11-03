@@ -49,6 +49,12 @@ class ShizukuFileAccess : FileAccessProvider {
         return runShell("test -e '${path.escape()}' && echo 1 || echo 0").trim() == "1"
     }
 
+    override suspend fun canReadDir(dir: String): Boolean {
+        if (!isAvailable()) return false
+        val q = "'${dir.escape()}'"
+        return runShellExit("test -d $q && test -r $q && test -x $q") == 0
+    }
+
     override suspend fun canWriteDir(dir: String): Boolean {
         if (!isAvailable()) return false
         val q = "'${dir.escape()}'"

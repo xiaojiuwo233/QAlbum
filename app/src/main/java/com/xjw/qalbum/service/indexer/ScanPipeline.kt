@@ -1,6 +1,7 @@
 package com.xjw.qalbum.service.indexer
 
 import android.os.RemoteException
+import android.system.OsConstants
 import androidx.room.withTransaction
 import com.xjw.qalbum.data.db.AppDatabase
 import com.xjw.qalbum.data.db.dao.DirSnapshotDao
@@ -12,6 +13,7 @@ import com.xjw.qalbum.domain.model.ScanProgress
 import com.xjw.qalbum.fileops.FileOpsImpl
 import com.xjw.qalbum.qq.QqCachePaths
 import com.xjw.qalbum.service.indexer.transport.DirStat
+import com.xjw.qalbum.service.indexer.transport.DirectoryReadException
 import com.xjw.qalbum.service.indexer.transport.ScanTransport
 import com.xjw.qalbum.service.indexer.transport.ScanTransportFactory
 import kotlinx.coroutines.CancellationException
@@ -187,6 +189,16 @@ class ScanPipeline(
             send(ScanProgress.Done(updatedFiles))
         } catch (ce: CancellationException) {
             throw ce
+        } catch (e: DirectoryReadException) {
+            Timber.e(e, "ScanPipeline[$mode] directory access failed via ${transport.name}")
+            val denied = e.errno == OsConstants.EACCES || e.errno == OsConstants.EPERM
+            send(
+                ScanProgress.Failed(
+                    if (denied) "当前访问方式没有图片目录的读取权限，请在「设置 → 文件访问」更换方式：${e.path}"
+                    else "读取图片目录失败（errno=${e.errno}）：${e.path}",
+                    if (denied) "permission_denied" else "directory_io",
+                ),
+            )
         } catch (t: Throwable) {
             Timber.e(t, "ScanPipeline[$mode] failed")
             send(ScanProgress.Failed(t.message ?: "未知错误", t.javaClass.simpleName))

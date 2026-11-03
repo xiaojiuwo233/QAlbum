@@ -1,12 +1,19 @@
 package com.xjw.qalbum.fileops
 
 import android.system.Os
+import android.system.OsConstants
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.xjw.qalbum.appContext
+import com.xjw.qalbum.domain.model.AccessMode
+import com.xjw.qalbum.service.indexer.transport.AidlScanTransport
+import com.xjw.qalbum.service.indexer.transport.DirectoryReadException
+import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -31,6 +38,48 @@ class FileOpsTreeTest {
 
     private fun write(relative: String, bytes: Int): File =
         File(root, relative).apply { parentFile!!.mkdirs(); writeBytes(ByteArray(bytes)) }
+
+    @Test
+    fun missingAndEmptyScanDirectoriesStillReturnEmptyPages() {
+        val empty = File(root, "empty").apply { mkdirs() }
+        for (dir in listOf(empty.path, "${root.path}/missing")) {
+            assertTrue(FileOpsImpl.listSubdirs(dir, 0, 10).isEmpty())
+            assertTrue(FileOpsImpl.listFiles(dir, 0, 10).isEmpty())
+        }
+    }
+
+    @Test
+    fun deniedScanDirectoriesReportPermissionInsteadOfEmptyPages() {
+        val denied = write("denied/file", 1).parentFile!!
+        Os.chmod(denied.path, 0)
+        try {
+            val transport = AidlScanTransport(inProcessFiles(), AccessMode.SHIZUKU)
+            val dirs = assertThrows(DirectoryReadException::class.java) { runBlocking { transport.listSubdirs(denied.path) } }
+            val files = assertThrows(DirectoryReadException::class.java) { runBlocking { transport.listFiles(listOf(denied.path)).toList() } }
+            assertEquals(OsConstants.EACCES, dirs.errno)
+            assertEquals(OsConstants.EACCES, files.errno)
+            assertEquals(denied.path, files.path)
+            transport.close()
+        } finally {
+            Os.chmod(denied.path, 0x1C0)
+        }
+    }
+
+    @Test
+    fun permissionLostBetweenPagesDoesNotHideFiles() {
+        val dir = write("paged/a", 1).parentFile!!
+        write("paged/b", 2)
+        assertEquals(FileOpsImpl.MORE_MARKER, FileOpsImpl.listFiles(dir.path, 0, 1).last())
+        Os.chmod(dir.path, 0)
+        try {
+            assertEquals(
+                listOf("${FileOpsImpl.DIRECTORY_ERROR_MARKER}${OsConstants.EACCES}|${dir.path}/b"),
+                FileOpsImpl.listFiles(dir.path, 1, 1).toList(),
+            )
+        } finally {
+            Os.chmod(dir.path, 0x1C0)
+        }
+    }
 
     @Test
     fun statsCountFilesRecursivelyWithoutFollowingLinks() {

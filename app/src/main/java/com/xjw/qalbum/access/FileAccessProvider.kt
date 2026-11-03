@@ -25,6 +25,9 @@ interface FileAccessProvider {
     /** 路径是否存在 */
     suspend fun exists(path: String): Boolean
 
+    /** 当前身份能否读取并进入目录；路径存在不代表有目录枚举权限。 */
+    suspend fun canReadDir(dir: String): Boolean = false
+
     /** 特权身份对目录 [dir] 是否可写入（写+搜索）。用于批量移动前一次性探测目标目录，
      *  跳过注定失败的逐张 mv——Shizuku shell（uid 2000）写不进 App 私有目录。
      *  未覆写时保守返回 false。 */

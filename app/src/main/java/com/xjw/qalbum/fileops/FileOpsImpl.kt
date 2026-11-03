@@ -33,6 +33,9 @@ internal object FileOpsImpl {
     /** 「还有下一页」哨兵。真实条目都含 '|'，不会冲突。 */
     const val MORE_MARKER = "+"
 
+    /** 目录枚举错误，后接 errno|path；与正常条目及翻页哨兵不冲突。 */
+    const val DIRECTORY_ERROR_MARKER = "!errno|"
+
     /** 压缩 / 还原原图时在同目录写的临时文件后缀（扫描跳过这类文件，见 ScanPipeline） */
     const val TEMP_SUFFIX = ".qalbum-tmp"
 
@@ -652,7 +655,14 @@ internal object FileOpsImpl {
         val snap = if (offset > 0 && cached != null && cached.dir == dir) cached else {
             val names = File(dir).list() ?: run {
                 dirSnapshot = null
-                return emptyArray()
+                // File.list() 把 EACCES 和不存在都折叠成 null；只在失败时补一次 open 取 errno。
+                try {
+                    Os.close(Os.open(dir, OsConstants.O_RDONLY, 0))
+                } catch (e: ErrnoException) {
+                    if (e.errno == OsConstants.ENOENT || e.errno == OsConstants.ENOTDIR) return emptyArray()
+                    return arrayOf("$DIRECTORY_ERROR_MARKER${e.errno}|$dir")
+                }
+                return arrayOf("$DIRECTORY_ERROR_MARKER${OsConstants.EIO}|$dir")
             }
             // 排序保证翻页窗口稳定（readdir 原始序在并发修改时不可靠）
             names.sort()
@@ -677,8 +687,11 @@ internal object FileOpsImpl {
                     if (dirsOnly) "$mtimeMs|$name"
                     else "${st.st_size}|$mtimeMs|$name"
                 )
-            } catch (_: Exception) {
-                // 单项 lstat 失败（瞬时删除/权限）：跳过该项，不影响整页
+            } catch (e: ErrnoException) {
+                if (e.errno == OsConstants.EACCES || e.errno == OsConstants.EPERM) {
+                    return arrayOf("$DIRECTORY_ERROR_MARKER${e.errno}|$dir/$name")
+                }
+                // 翻页期间被删除的项可跳过，权限拒绝必须上报，避免把目录内文件误标 missing。
             }
         }
         if (end < names.size) {

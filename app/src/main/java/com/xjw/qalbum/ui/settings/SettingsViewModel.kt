@@ -104,6 +104,7 @@ class SettingsViewModel(
         shizuku?.state == ShizukuState.PermissionDenied -> "denied"
         granted == false -> if (mode == AccessMode.ROOT) "denied" else "unavailable"
         folderFound == false -> "no_folder"
+        folderReadable == false -> "folder_unreadable"
         else -> "ok"
     }
 
@@ -114,7 +115,8 @@ class SettingsViewModel(
         val granted = runCatching { provider.isAvailable() }.getOrDefault(false)
         if (!granted) return AccessState(mode, shizuku = shizuku, granted = false)
         val folder = runCatching { provider.exists(path) }.getOrDefault(false)
-        return AccessState(mode, shizuku = shizuku, granted = true, folderFound = folder)
+        val readable = folder && runCatching { provider.canReadDir(path) }.getOrDefault(false)
+        return AccessState(mode, shizuku = shizuku, granted = true, folderFound = folder, folderReadable = readable)
     }
 
     fun setAccessMode(mode: AccessMode) {
@@ -309,7 +311,7 @@ class SettingsViewModel(
 
 /**
  * 文件访问的检测结果。[shizuku] 只在 Shizuku 模式下有；[granted] 为 null 表示还没走到这一步；
- * [folderFound] 是能不能找到图片目录（授权了才检测）。
+ * [folderFound] 是能不能找到图片目录，[folderReadable] 是当前身份能否读取并进入目录。
  */
 data class AccessState(
     val mode: AccessMode,
@@ -317,7 +319,8 @@ data class AccessState(
     val shizuku: ShizukuStatus? = null,
     val granted: Boolean? = null,
     val folderFound: Boolean? = null,
+    val folderReadable: Boolean? = null,
 ) {
     /** 可以扫描、清理 */
-    val ready: Boolean get() = granted == true
+    val ready: Boolean get() = granted == true && folderFound == true && folderReadable == true
 }

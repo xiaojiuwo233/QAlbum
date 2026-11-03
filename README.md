@@ -31,7 +31,9 @@ QQ 聊天里的图片随着时间越积越多，体积占用越来越大，QQ内
 
 - QQ 9.x 以上
 - Android 8.0 及以上
-- [Shizuku](https://shizuku.rikka.app/) 或 Root（高级功能）
+- [Shizuku](https://shizuku.rikka.app/) (**仅限部分旧系统**) 或 Root (高级功能)
+
+* 使用高版本Android系统或新版QQ的情况下，缓存目录可能会阻止shell权限读取和写入，你需要使用Root才能访问这些目录
 
 ## 下载
 

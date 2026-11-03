@@ -3,6 +3,9 @@ package com.xjw.qalbum.service.indexer.transport
 import com.xjw.qalbum.domain.model.FileInfo
 import kotlinx.coroutines.flow.Flow
 
+/** 已连通服务但文件系统拒绝枚举；重建 Binder 不能恢复目录权限。 */
+class DirectoryReadException(val path: String, val errno: Int) : RuntimeException(path)
+
 /** 目录的轻量元信息（目录剪枝只需要 mtime） */
 data class DirStat(
     val path: String,

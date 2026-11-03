@@ -49,6 +49,11 @@ class RootFileAccess : FileAccessProvider {
         SuFile(path).exists()
     }
 
+    override suspend fun canReadDir(dir: String): Boolean = withContext(Dispatchers.IO) {
+        val q = dir.shellSingleQuote()
+        Shell.cmd("test -d $q && test -r $q && test -x $q").exec().isSuccess
+    }
+
     override suspend fun canWriteDir(dir: String): Boolean = withContext(Dispatchers.IO) {
         val f = SuFile(dir)
         f.isDirectory && f.canWrite()

@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import java.io.IOException
 
 /**
  * AIDL 特权服务传输（首选）：所有文件操作是特权进程内的原生系统调用，
@@ -96,6 +97,12 @@ class AidlScanTransport(
             if (page.isEmpty()) return
             var hasMore = false
             for (entry in page) {
+                if (entry.startsWith(FileOpsImpl.DIRECTORY_ERROR_MARKER)) {
+                    val parts = entry.removePrefix(FileOpsImpl.DIRECTORY_ERROR_MARKER).split('|', limit = 2)
+                    val errno = parts.firstOrNull()?.toIntOrNull()
+                    if (parts.size != 2 || errno == null) throw IOException("无效的目录错误响应")
+                    throw DirectoryReadException(parts[1], errno)
+                }
                 if (entry == FileOpsImpl.MORE_MARKER) hasMore = true else consume(entry)
             }
             if (!hasMore) return

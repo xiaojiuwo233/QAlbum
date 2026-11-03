@@ -19,6 +19,7 @@ interface IFileOps {
     // 分页基于排序后的目录项，结果末尾追加 "+" 表示还有下一页。
     // 同一目录从 offset==0 起的连续翻页基于服务端同一份快照（目录并发增删
     // 不会造成窗口漂移导致的漏项/重项），换目录或重新从 0 翻页即刷新快照。
+    // 路径不存在返回空数组；拒绝访问与读取失败返回单项 "!errno|errno|path"，客户端必须中止本轮目录处理。
     String[] listSubdirs(String root, int offset, int limit) = 1;
 
     // 列出 dir 下深度 1 的普通文件。每项 "size|mtimeMs|name"，分页约定同上。

@@ -223,10 +223,14 @@ internal fun SegmentedGroupScope.accessStatusItems(
     }
     if (state.granted == true) {
         item("folder") { position: SegmentPosition ->
-            if (state.folderFound == true) {
-                StatusItem(position, StatusTone.GOOD, "能读取 QQ 图片目录", shortPath(path))
-            } else {
-                StatusItem(position, StatusTone.WARNING, "找不到 QQ 图片目录", "确认装了 QQ，或在「扫描」里改目录")
+            when {
+                state.folderFound != true -> StatusItem(position, StatusTone.WARNING, "找不到 QQ 图片目录", "确认装了 QQ，或在「扫描」里改目录")
+                state.folderReadable == true -> StatusItem(position, StatusTone.GOOD, "能读取 QQ 图片目录", shortPath(path))
+                else -> StatusItem(
+                    position, StatusTone.ERROR, "没有图片目录的读取权限",
+                    if (state.mode == AccessMode.SHIZUKU) "Shizuku 已授权，但 QQ 目录拒绝访问；已 Root 的设备可切换到 Root 方式"
+                    else "当前权限无法读取目录，请检查目录权限与路径",
+                )
             }
         }
     }
