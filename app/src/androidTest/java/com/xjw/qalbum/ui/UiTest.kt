@@ -68,13 +68,14 @@ class UiTest {
             }
         }
         val image = rule.onNodeWithContentDescription("preview")
-        // 等图画出来：中间偏右的一列是红或青
-        rule.waitUntil(10_000) {
+        // 中间偏右的一列是红或青；缩放松手后也必须仍然可见
+        fun previewIsVisible(): Boolean {
             val pixels = image.captureToImage().toPixelMap()
             val pixel = pixels[pixels.width * 9 / 16, pixels.height / 2]
-            (pixel.red > 0.8f && pixel.green < 0.2f && pixel.blue < 0.2f) ||
+            return (pixel.red > 0.8f && pixel.green < 0.2f && pixel.blue < 0.2f) ||
                 (pixel.red < 0.2f && pixel.green > 0.8f && pixel.blue > 0.8f)
         }
+        rule.waitUntil(10_000) { previewIsVisible() }
         image.performTouchInput { doubleClick() }
         rule.waitForIdle()
         rule.runOnIdle { assertEquals(2.5f, zoom, 0.05f); assertEquals(0, taps) }
@@ -84,6 +85,7 @@ class UiTest {
         image.performTouchInput { pinch(centerLeft + Offset(40f, 0f), centerRight - Offset(40f, 0f), centerLeft, centerRight) }
         rule.waitForIdle()
         rule.runOnIdle { assertTrue(zoom > 1f) }
+        assertTrue("Pinch release must keep the image visible", previewIsVisible())
         rule.runOnIdle { reset.value++ }
         rule.waitForIdle()
         rule.runOnIdle { assertEquals(1f, zoom, 0.05f) }

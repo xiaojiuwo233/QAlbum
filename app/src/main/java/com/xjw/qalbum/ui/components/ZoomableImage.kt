@@ -34,6 +34,7 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.geometry.isSpecified
 import androidx.compose.ui.geometry.lerp
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -297,12 +298,14 @@ internal fun ZoomableImage(
                         val pan = event.calculatePan()
                         when (gesture) {
                             Gesture.Transform -> {
+                                val centroid = event.calculateCentroid(useCurrent = false)
+                                if (!centroid.isSpecified) continue
                                 animation?.cancel()
                                 autoFitDone = true
                                 val next = (scale * event.calculateZoom()).coerceIn(1f, maxScale())
                                 val center = Offset(size.width / 2f, size.height / 2f)
                                 offset = clamp(
-                                    ImageZoomGeometry.zoomOffset(offset, event.calculateCentroid(useCurrent = false), center, next / scale, pan),
+                                    ImageZoomGeometry.zoomOffset(offset, centroid, center, next / scale, pan),
                                     next,
                                 )
                                 scale = next
