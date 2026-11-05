@@ -67,9 +67,9 @@ interface IFileOps {
     // 修正属主：与所在目录属主不同的文件改成目录的属主，改不了就放开读写。每个路径 0 无需修改、1 已修正、2 失败。
     int[] repairOwnership(in String[] paths) = 16;
 
-    // 读取 QQ 数据库期间暂停它的 checkpoint（仅 Root）：QQ 在运行时对 name-shm 的 checkpoint 锁与 DMS 字节加共享锁，
-    // 不写任何内容；QQ 的 checkpoint 得到 BUSY，写入照常进 WAL，复制期间主库文件不变。
-    // 返回句柄（> 0）；0 = 不需要（QQ 没在运行或没有 -shm）；-1 = 一直拿不到锁。句柄 10 分钟后自动释放。
+    // 读取 QQ 数据库期间暂停它的 checkpoint（仅 Root）：QQ 在运行时对 name-shm 的 checkpoint 锁、1 号读锁与 DMS 字节
+    // 加共享锁，不写任何内容；QQ 的 checkpoint 得到 BUSY，写入照常进 WAL，复制期间主库文件不变。
+    // 返回句柄（> 0）；0 = 不需要（QQ 没在运行或没有 -shm）；-1 = QQ 一直占着锁；-2 = 出错没加上。句柄 10 分钟后自动释放。
     int pinQqDatabase(int userId, String account, String name) = 17;
     void unpinQqDatabase(int handle) = 18;
 
@@ -92,4 +92,7 @@ interface IFileOps {
     // 让别的应用目录里的文件能改名移进 dir（App 外部目录里的回收站，仅 Root）：去掉目录的「继承配额」标记，
     // 跨应用改名不再被配额拒绝（EXDEV）。返回 1 已处理、0 不支持、-1 失败。
     int allowRenameInto(String dir) = 24;
+
+    // 强制停止 QQ（仅 Root，用户在来源页确认后）：返回 1 停下了、0 本来就没在运行、-1 停不下来。
+    int forceStopQq(int userId) = 25;
 }

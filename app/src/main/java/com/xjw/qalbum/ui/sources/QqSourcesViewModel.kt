@@ -107,6 +107,9 @@ class QqSourcesViewModel(
     val report = repository.report
     val sourcesComplete = repository.sourcesComplete
 
+    /** QQ 正写着数据库、没读成：问要不要强制停止 QQ 再读 */
+    val forceStopOffer = repository.forceStopOffer
+
     fun selectTab(next: SourceTab) {
         if (tab.value == next) return
         search.value = ""
@@ -146,6 +149,8 @@ class QqSourcesViewModel(
     fun cancel() = repository.cancel()
     fun clearIndex() = repository.clear()
     fun acknowledgeMessage() = repository.acknowledgeMessage()
+    fun forceStopAndRefresh() = repository.forceStopAndRefresh()
+    fun dismissForceStop() = repository.dismissForceStop()
 }
 
 private fun List<QqFacetKindCount>.countFor(tab: SourceTab): Int =

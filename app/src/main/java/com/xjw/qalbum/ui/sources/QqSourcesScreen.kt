@@ -126,6 +126,7 @@ fun QqSourcesScreen(
     val autoArchive by viewModel.autoArchive.collectAsState()
     val autoRefresh by viewModel.autoRefresh.collectAsState()
     val canRead by viewModel.canRead.collectAsState()
+    val forceStopOffer by viewModel.forceStopOffer.collectAsState()
     val listState = rememberLazyListState()
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
 
@@ -272,6 +273,17 @@ fun QqSourcesScreen(
             destructive = true,
             onConfirm = { clearConfirm = false; viewModel.clearIndex() },
             onDismiss = { clearConfirm = false },
+        )
+    }
+
+    // 读取失败后紧接着整理统计时等它整理完再问
+    if (forceStopOffer != null && progress == null) {
+        ConfirmDialog(
+            title = "强制停止 QQ？",
+            text = "QQ 运行时会一直写数据库，这次没能读取。强制停止 QQ 后再读一次，读完可以重新打开 QQ。",
+            confirmLabel = "强制停止并读取",
+            onConfirm = viewModel::forceStopAndRefresh,
+            onDismiss = viewModel::dismissForceStop,
         )
     }
 }

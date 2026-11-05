@@ -52,6 +52,7 @@ class RootFileOpsService : RootService() {
             QqReadAccess.openRead(userId, account, name)
         override fun pinQqDatabase(userId: Int, account: String, name: String): Int = QqReadAccess.pin(userId, account, name)
         override fun unpinQqDatabase(handle: Int) = QqReadAccess.unpin(handle)
+        override fun forceStopQq(userId: Int): Int = QqReadAccess.forceStop(userId)
 
         override fun pathStats(paths: Array<String>): LongArray = FileOpsImpl.pathStats(paths)
         override fun largestChildren(dir: String, limit: Int): Array<String> = FileOpsImpl.largestChildren(dir, limit)

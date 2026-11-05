@@ -1,6 +1,7 @@
 package com.xjw.qalbum.qq
 
 import com.google.protobuf.CodedOutputStream
+import com.xjw.qalbum.fileops.QqReadAccess
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
@@ -20,7 +21,8 @@ import kotlin.random.Random
 
 /**
  * 复制 QQ 数据库的一致性：QQ 运行中追加 WAL 不影响；复制主库途中 checkpoint 改写主库、但 WAL 没重新开始时也一致；
- * 主库没变时 WAL 重新开始也一致；两样都变了才重试（还没拿到 pin 就再拿）；一直这样则放弃。这里用本地文件模拟 QQ 的写入。
+ * 主库没变、WAL 在复制它之前重新开始也一致；WAL 复制途中重新开始、两样都变了、QQ 一直占着锁都失败，不重试；
+ * 复制主库途中已经对不上就停下。这里用本地文件模拟 QQ 的写入。
  */
 class QqSnapshotCopierTest {
     private lateinit var qq: File
@@ -32,8 +34,6 @@ class QqSnapshotCopierTest {
     /** 模拟 QQ 那边：文件、修改计数、读取时的回调（用来在复制途中写入） */
     private inner class FakeQq(var pinResult: Int = 0) : QqSnapshotCopier.Source {
         val pins = mutableListOf<Int>()
-        /** 依次返回的 pin 结果，用完后返回 [pinResult] */
-        var pinResults = ArrayDeque<Int>()
         val modified = mutableMapOf<String, Int>()
         val opens = mutableMapOf<String, Int>()
         val unpinned = mutableListOf<Int>()
@@ -70,7 +70,7 @@ class QqSnapshotCopierTest {
             }
         }
 
-        override suspend fun pin(name: String): Int = (pinResults.removeFirstOrNull() ?: pinResult).also {
+        override suspend fun pin(name: String): Int = pinResult.also {
             pins += it
             pinned = it > 0
         }
@@ -93,7 +93,9 @@ class QqSnapshotCopierTest {
         out.deleteRecursively()
     }
 
-    private fun copier(source: FakeQq) = QqSnapshotCopier(source, out, { _, _ -> }, attempts = 3, retryDelayMs = 0)
+    private fun copier(source: FakeQq, checkEveryBytes: Long = Long.MAX_VALUE) = QqSnapshotCopier(source, out, { _, _ -> }, checkEveryBytes)
+
+    private fun busy(block: suspend () -> Unit): Throwable? = runBlocking { runCatching { block() }.exceptionOrNull() }
 
     private fun seed(source: FakeQq, withWal: Boolean = true) {
         source.write("nt_msg.db", qqHeader() + body)
@@ -111,6 +113,8 @@ class QqSnapshotCopierTest {
         assertArrayEquals(body, copy.file.readBytes())
         assertArrayEquals(wal, File(out, "nt_msg.db-wal").readBytes())
         assertEquals(listOf(7), source.unpinned)
+        // 加上了锁：复制时 QQ 在运行
+        assertTrue(copy.qqRunning)
     }
 
     @Test
@@ -120,10 +124,22 @@ class QqSnapshotCopierTest {
         val frames = random.nextBytes(40 * 1024)
         // 复制主库时 QQ 收到新消息：只追加 WAL，主库不变
         source.onRead = { name -> if (name == "nt_msg.db") source.write("nt_msg.db-wal", frames, append = true) }
-        copier(source).copyAll(Long.MAX_VALUE)
+        val copy = copier(source).copyAll(Long.MAX_VALUE).getValue("nt_msg.db")
 
         assertEquals(1, source.opens["nt_msg.db"])
         assertArrayEquals(wal + frames, File(out, "nt_msg.db-wal").readBytes())
+        assertFalse(copy.qqRunning)
+    }
+
+    @Test
+    fun `复制 WAL 时之后追加的帧不必复制`() = runBlocking {
+        val source = FakeQq()
+        seed(source)
+        source.crossed = 40L * 1024
+        source.onRead = { name -> if (name == "nt_msg.db-wal") source.write("nt_msg.db-wal", random.nextBytes(8 * 1024), append = true) }
+        copier(source).copyAll(Long.MAX_VALUE)
+
+        assertArrayEquals(wal, File(out, "nt_msg.db-wal").readBytes())
     }
 
     @Test
@@ -139,36 +155,69 @@ class QqSnapshotCopierTest {
     }
 
     @Test
-    fun `主库没变时 WAL 重新开始也一致`() = runBlocking {
+    fun `主库没变、WAL 在复制它之前重新开始也一致`() = runBlocking {
         val source = FakeQq()
         seed(source)
-        // 复制 WAL 时它重新开始了（新的 salt，从头写），主库没变：复制到的帧要么已在主库里，要么是之后的新事务
-        source.crossed = QqSnapshotCopier.WAL_HEADER_BYTES + 1L
-        source.onRead = { name -> if (name == "nt_msg.db-wal") source.write("nt_msg.db-wal", walHeader(salt = 2) + random.nextBytes(1024)) }
+        // 复制主库时 WAL 重新开始了（新的 salt，从头写），主库没变：复制到的是新一轮的帧，都比主库新
+        val restarted = walHeader(salt = 2) + random.nextBytes(1024)
+        source.onRead = { name -> if (name == "nt_msg.db") source.write("nt_msg.db-wal", restarted) }
         copier(source).copyAll(Long.MAX_VALUE)
 
-        assertEquals(1, source.opens["nt_msg.db"])
+        assertArrayEquals(restarted, File(out, "nt_msg.db-wal").readBytes())
     }
 
     @Test
-    fun `主库与 WAL 都变了就重试，没拿到 pin 的再拿`() = runBlocking {
-        val source = FakeQq(pinResult = 5)
-        source.pinResults = ArrayDeque(listOf(-1))
+    fun `WAL 复制途中重新开始就失败`() {
+        val source = FakeQq()
         seed(source)
-        var rounds = 0
-        // 第一次（没拿到 pin）复制主库途中 QQ checkpoint 并让 WAL 重新开始：主库与 WAL 都变了，这一轮不一致
+        // 复制 WAL 时它重新开始了（从头写、变短）：复制到的只是上一轮的前一段，比主库里回写的旧
+        source.crossed = QqSnapshotCopier.WAL_HEADER_BYTES + 1L
+        source.onRead = { name -> if (name == "nt_msg.db-wal") source.write("nt_msg.db-wal", walHeader(salt = 2) + random.nextBytes(1024)) }
+
+        assertTrue(busy { copier(source).copyAll(Long.MAX_VALUE) } is QqDatabaseBusyException)
+    }
+
+    @Test
+    fun `主库与 WAL 都变了就失败，不重试`() {
+        val source = FakeQq(pinResult = QqReadAccess.PIN_FAILED)
+        seed(source)
+        // 没加上锁，复制主库途中 QQ checkpoint 并让 WAL 重新开始：主库与 WAL 都变了
         source.onRead = { name ->
-            if (name == "nt_msg.db" && rounds++ == 0) {
+            if (name == "nt_msg.db") {
                 source.write("nt_msg.db", qqHeader() + body.copyOf().also { it[0] = 2 })
                 source.write("nt_msg.db-wal", walHeader(salt = 9) + random.nextBytes(2048))
             }
         }
-        val copy = copier(source).copyAll(Long.MAX_VALUE).getValue("nt_msg.db")
 
-        assertEquals(2, source.opens["nt_msg.db"])
-        assertEquals(listOf(-1, 5), source.pins)
-        assertEquals(listOf(5), source.unpinned)
-        assertEquals(2, copy.file.readBytes()[0].toInt())
+        assertTrue(busy { copier(source).copyAll(Long.MAX_VALUE) } is QqDatabaseBusyException)
+        assertEquals(1, source.opens["nt_msg.db"])
+        assertEquals(listOf(QqReadAccess.PIN_FAILED), source.pins)
+        assertEquals(emptyList<Int>(), source.unpinned)
+    }
+
+    @Test
+    fun `复制主库途中已经对不上就停下，不复制剩下的`() {
+        val source = FakeQq()
+        seed(source)
+        source.crossed = 64L * 1024
+        source.onRead = { name ->
+            if (name == "nt_msg.db") {
+                source.write("nt_msg.db", qqHeader() + body.copyOf().also { it[0] = 3 })
+                source.write("nt_msg.db-wal", walHeader(salt = 5) + random.nextBytes(2048))
+            }
+        }
+
+        assertTrue(busy { copier(source, checkEveryBytes = 64L * 1024).copyAll(Long.MAX_VALUE) } is QqDatabaseBusyException)
+        assertTrue(File(out, "nt_msg.db").length() < body.size)
+    }
+
+    @Test
+    fun `QQ 一直占着锁时不复制`() {
+        val source = FakeQq(pinResult = QqReadAccess.PIN_BUSY)
+        seed(source)
+
+        assertTrue(busy { copier(source).copyAll(Long.MAX_VALUE) } is QqDatabaseBusyException)
+        assertEquals(null, source.opens["nt_msg.db"])
     }
 
     @Test
@@ -183,23 +232,6 @@ class QqSnapshotCopierTest {
         assertTrue(deferred)
         assertEquals(1, source.opens["nt_msg.db"])
         assertEquals(listOf(3), source.unpinned)
-    }
-
-    @Test
-    fun `每次都碰上 checkpoint 和 WAL 重新开始时放弃`() = runBlocking {
-        val source = FakeQq()
-        seed(source)
-        var salt = 10
-        source.onRead = { name ->
-            if (name == "nt_msg.db") {
-                source.write("nt_msg.db", qqHeader() + body)
-                source.write("nt_msg.db-wal", walHeader(salt = salt++) + random.nextBytes(1024))
-            }
-        }
-        val error = runCatching { copier(source).copyAll(Long.MAX_VALUE) }.exceptionOrNull()
-
-        assertTrue(error?.message.orEmpty().contains("正在更新"))
-        assertEquals(3, source.opens["nt_msg.db"])
     }
 
     @Test

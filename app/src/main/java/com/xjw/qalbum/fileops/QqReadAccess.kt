@@ -16,7 +16,9 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
-/** Root 侧只有目录枚举、lstat 和 O_RDONLY；SQLCipher 永远在普通应用进程读取私有副本。 */
+/**
+ * Root 侧只有目录枚举、lstat、O_RDONLY 和共享锁（外加用户确认后强制停止 QQ）；SQLCipher 永远在普通应用进程读取私有副本。
+ */
 internal object QqReadAccess {
     private val accountPattern = Regex("[0-9a-f]{32}")
     private val uidPattern = Regex("[0-9]+###(u_[A-Za-z0-9_-]{8,64})")
@@ -97,22 +99,23 @@ internal object QqReadAccess {
 
     /**
      * QQ 在运行且 [name] 有 `-shm` 时，对它加共享锁暂停 checkpoint，返回句柄（> 0）；QQ 没在运行、没有 `-shm`
-     * 时返回 0（不需要）；一直拿不到锁返回 -1。句柄 10 分钟后自动释放，防止客户端没来得及释放。
+     * 时返回 [PIN_NOT_NEEDED]；QQ 一直占着锁（正在 checkpoint）返回 [PIN_BUSY]；出错返回 [PIN_FAILED]。
+     * 句柄 10 分钟后自动释放，防止客户端没来得及释放。
      */
     fun pin(userId: Int, account: String, name: String): Int = try {
         pinChecked(userId, account, name)
     } catch (e: Exception) {
-        // 加不上锁不影响读取（客户端按状态核对、重试），只是不能保证一次成功
-        -1
+        // 加不上锁照样能读（客户端按状态核对），只是 QQ 写得勤时容易对不上
+        PIN_FAILED
     }
 
     private fun pinChecked(userId: Int, account: String, name: String): Int {
         require(name in databases)
         val shm = source(userId, account, "$name-shm")
-        if (!shm.isFile || !qqRunning()) return 0
+        if (!shm.isFile || !qqRunning()) return PIN_NOT_NEEDED
         // 同一个文件上次没释放的先放掉（同一进程内 fcntl 锁不能重叠）
         pins.entries.filter { it.value.first == shm.path }.forEach { unpin(it.key) }
-        val pin = WalCheckpointPin.acquire(shm, PIN_TIMEOUT_MS) ?: return -1
+        val pin = WalCheckpointPin.acquire(shm, PIN_TIMEOUT_MS) ?: return PIN_BUSY
         val handle = nextPin.getAndIncrement()
         pins[handle] = shm.path to pin
         expiry.schedule({ unpin(handle) }, PIN_LIFETIME_MINUTES, TimeUnit.MINUTES)
@@ -131,9 +134,44 @@ internal object QqReadAccess {
         name == QQ_PACKAGE || name.startsWith("$QQ_PACKAGE:")
     } == true
 
+    /**
+     * 强制停止 QQ（用户在来源页确认后：QQ 一直在写数据库，读不到一致的副本）。返回 1 停下了、0 本来就没在运行、
+     * -1 停不下来（命令失败或进程还在）。
+     */
+    fun forceStop(userId: Int): Int {
+        root(userId)
+        if (!qqRunning()) return 0
+        val process = ProcessBuilder("/system/bin/cmd", "activity", "force-stop", "--user", userId.toString(), QQ_PACKAGE)
+            .redirectErrorStream(true)
+            .start()
+        try {
+            // 正常没有输出（出错也只有一行），不会写满管道
+            if (!process.waitFor(FORCE_STOP_TIMEOUT_SECONDS, TimeUnit.SECONDS)) process.destroy()
+        } finally {
+            runCatching { process.inputStream.close() }
+            runCatching { process.outputStream.close() }
+        }
+        // 进程收到 SIGKILL 后很快退出，稍等一下再看
+        repeat(20) {
+            if (!qqRunning()) return 1
+            Thread.sleep(100)
+        }
+        return -1
+    }
+
+    /** [pin] 的结果：QQ 没在运行或没有 `-shm`，不需要 */
+    const val PIN_NOT_NEEDED = 0
+
+    /** [pin] 的结果：QQ 一直占着锁（正在 checkpoint） */
+    const val PIN_BUSY = -1
+
+    /** [pin] 的结果：出错没加上 */
+    const val PIN_FAILED = -2
+
     private const val QQ_PACKAGE = "com.tencent.mobileqq"
     private const val PIN_TIMEOUT_MS = 10_000L
     private const val PIN_LIFETIME_MINUTES = 10L
+    private const val FORCE_STOP_TIMEOUT_SECONDS = 10L
 
     fun openRead(userId: Int, account: String, name: String): ParcelFileDescriptor {
         require(!name.endsWith("-shm"))

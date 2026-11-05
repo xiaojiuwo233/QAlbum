@@ -3,6 +3,7 @@ package com.xjw.qalbum.qq
 import android.content.Context
 import android.os.ParcelFileDescriptor
 import android.database.sqlite.SQLiteDatabaseCorruptException
+import android.database.sqlite.SQLiteException
 import androidx.room.withTransaction
 import com.xjw.qalbum.analytics.Analytics
 import com.xjw.qalbum.analytics.chatIndexCleared
@@ -65,6 +66,9 @@ class QqSourceRepository(
     val message = _message.asStateFlow()
     private val _report = MutableStateFlow<String?>(null)
     val report = _report.asStateFlow()
+    /** 手动读取时 QQ 正写着数据库、没读成：来源页问要不要强制停止 QQ 再读（值为那次是否完整读取）；null = 没有 */
+    private val _forceStopOffer = MutableStateFlow<Boolean?>(null)
+    val forceStopOffer = _forceStopOffer.asStateFlow()
     private var job: Job? = null
     private var statsJob: Job? = null
     private val stats = QqSourceStatsBuilder(db)
@@ -140,8 +144,15 @@ class QqSourceRepository(
     }
 
     fun acknowledgeMessage() { _message.value = null }
-    private fun report(text: String) { _report.value = text; _message.value = text }
+    private fun report(text: String, snackbar: Boolean = true) { _report.value = text; if (snackbar) _message.value = text }
     fun cancel() { if (_progress.value?.cancellable == true) job?.cancel() }
+    fun dismissForceStop() { _forceStopOffer.value = null }
+
+    /** 弹窗里确认了：强制停止 QQ，再按那次的方式读一次（有别的来源任务在跑时先留着，跑完再问） */
+    fun forceStopAndRefresh() {
+        val full = _forceStopOffer.value ?: return
+        refresh(full, forceStopQq = true)
+    }
 
     /** 读取并等它结束（后台定时读取用）；已经在读时直接返回 */
     suspend fun refreshAndWait(full: Boolean = false) {
@@ -153,9 +164,11 @@ class QqSourceRepository(
      * 所有账号、所有表都从头读完且没有读不了的记录，才算一次完整读取（记下 complete_read_at）。
      * 读完只给这次新登记的路径补关联、只把新增的来源与关联计入统计（见 QqSourceStatsSql.applyNew），
      * 不必把几十万张图与来源整体对一遍。已经有来源任务在跑时返回 null。[automatic] 是后台定时读取（统计用）。
+     * [forceStopQq] 先强制停止 QQ（用户在弹窗里确认的，见 [forceStopOffer]）。
      */
-    fun refresh(full: Boolean = false, automatic: Boolean = false): Job? {
+    fun refresh(full: Boolean = false, automatic: Boolean = false, forceStopQq: Boolean = false): Job? {
         if (!_progress.compareAndSet(null, QqSourceProgress("获取 Root 权限"))) return null
+        _forceStopOffer.value = null
         statsFailed = false
         startFacetCache()
         val started = appScope.launch(Dispatchers.IO) { statsCache.holding { mirrored("读取聊天来源", cancellable = true) {
@@ -183,6 +196,8 @@ class QqSourceRepository(
             var outcome = "failed"
             var failedStage: String? = null
             var failure: Exception? = null
+            // 有账号因为 QQ 正写着数据库没读成（手动读取时问要不要强制停止 QQ 再读）
+            var qqBusy = false
             try {
                 // 解析规则更新过（比如新认出表情子类型）：这次从头读，旧来源才补得上
                 val reparse = settings.qqParseVersion.first() < QqPictureCodec.PARSE_VERSION
@@ -190,6 +205,12 @@ class QqSourceRepository(
                 // 这次新写入的来源、路径、关联都在这个位置之后
                 val baseline = readBaseline()
                 bound = reader.bind()
+                if (forceStopQq) {
+                    _progress.value = QqSourceProgress("强制停止 QQ")
+                    // 停不下来也照样读：复制时会核对
+                    val stopped = try { reader.forceStopQq(bound) } catch (e: CancellationException) { throw e } catch (_: Exception) { false }
+                    Timber.i("QQ force-stopped before reading: ok=%s", stopped)
+                }
                 stage = "account_catalog"
                 _progress.value = QqSourceProgress("读取 QQ 账号目录")
                 val accounts = reader.accounts(bound)
@@ -201,12 +222,14 @@ class QqSourceRepository(
                 val root = settings.chatpicPath.first()
                 accounts.forEachIndexed { index, account ->
                     currentCoroutineContext().ensureActive()
+                    var qqRunning = false
                     try {
                         stage = "database_snapshot"
                         val copyStarted = System.currentTimeMillis()
                         reader.snapshot(bound, account) { done, total ->
                             _progress.value = QqSourceProgress("读取账号 ${index + 1}/${accounts.size} 的只读副本", done, total)
                         }.use { snapshot ->
+                            qqRunning = snapshot.qqRunning
                             stage = "source_import"
                             val importStarted = System.currentTimeMillis()
                             copyMs += importStarted - copyStarted
@@ -235,6 +258,8 @@ class QqSourceRepository(
                     } catch (e: CancellationException) { throw e }
                     catch (e: Exception) {
                         failed++
+                        // 复制时 QQ 在运行、副本读不了，多半也是 QQ 正写着（强制停止 QQ 再读就好）
+                        if (e is QqDatabaseBusyException || qqRunning && (e is SQLiteException || e.message == DECRYPT_FAILED)) qqBusy = true
                         failures += "账号 ${index + 1}：${failureReason(e, stage)}"
                         logFailure(e, stage)
                         failedStage = stage
@@ -290,14 +315,16 @@ class QqSourceRepository(
                 }
                 Timber.i("QQ source read: accounts=%d/%d pictures=%d copy=%dms import=%dms links=%dms previews=%dms stats=%dms total=%dms",
                     successful, accounts.size, pictures, copyMs, importMs, linksMs, previewsMs, statsMs, System.currentTimeMillis() - readStart)
-                report(if (successful == 0) failures.joinToString("；").ifBlank { "没有可读取的图片来源" } else
+                val summary = if (successful == 0) failures.joinToString("；").ifBlank { "没有可读取的图片来源" } else
                     (if (fullPass) "已读取" else "已读取新消息：") + "$successful 个账号、$pictures 条图片来源" +
                         (if (failed > 0) "；$failed 个账号读取失败" else "") +
                         (if (skipped > 0) "；$skipped 条记录未能解析" else "") +
                         (if (unreadable > 0) "；$unreadable 条记录无法读取" else "") +
                         (if (incompleteTables > 0) "；部分消息范围未能读取" else "") +
                         (if (!complete) "；部分来源未能读取，共用统计可能有遗漏" else "") +
-                        (if (failures.isNotEmpty()) "；" + failures.joinToString("；") else ""))
+                        (if (failures.isNotEmpty()) "；" + failures.joinToString("；") else "")
+                // 要问强制停止 QQ 时弹窗就是提示，不再弹消息条
+                report(summary, snackbar = !(qqBusy && offersForceStop(automatic, forceStopQq)))
             } catch (_: CancellationException) {
                 outcome = "cancelled"
                 report("已停止读取；已完成的账号索引保留")
@@ -309,10 +336,13 @@ class QqSourceRepository(
                 report(failureReason(e, stage))
             } finally {
                 bound?.close()
+                // 强制停止过还是不行就不再问
+                if (qqBusy && outcome != "cancelled" && offersForceStop(automatic, forceStopQq)) _forceStopOffer.value = full
                 _progress.value = null
                 analytics?.chatRead(
                     automatic, if (fullPass) "full" else "incremental", outcome, System.currentTimeMillis() - readStart,
                     copyMs, importMs, linksMs + previewsMs + statsMs, accountCount, failed, pictures, failedStage, failure,
+                    forceStopQq,
                 )
             }
         } } }
@@ -327,9 +357,13 @@ class QqSourceRepository(
         return dao.readBaseline().also { settings.setQqReadBaseline("${it.origins}:${it.families}:${it.paths}:${it.links}") }
     }
 
+    /** 手动读取、这次也没强制停止过 QQ 时才问 */
+    private fun offersForceStop(automatic: Boolean, forceStopped: Boolean) = !automatic && !forceStopped
+
     private companion object {
         /** 从头读一张消息表的间隔：超过一周再完整读一次，发现 QQ 里删掉的消息 */
         const val FULL_READ_INTERVAL_MS = 7L * 24 * 60 * 60 * 1000
+        const val DECRYPT_FAILED = "QQ 数据库副本无法解密，当前版本可能尚不兼容"
     }
 
     private fun logFailure(error: Exception, stage: String) {
@@ -345,6 +379,7 @@ class QqSourceRepository(
     }
 
     private fun failureReason(error: Exception, stage: String): String {
+        if (error is QqDatabaseBusyException) return "QQ 正在写入数据库，没能读取；原有索引仍保留"
         if (error is SQLiteDatabaseCorruptException) return "QQ 只读副本包含无法读取的数据页；已保留原有索引，请重新读取后重试"
         return when (error.message) {
             "未取得 QAlbum 的 Root 授权" -> "未取得 QAlbum 的 Root 授权，请在 Root 管理器中允许"
@@ -352,8 +387,7 @@ class QqSourceRepository(
             "QQ 账号目录不可读" -> "Root 已授权，但 QQ 私有账号目录不可读，请重新启动 QAlbum 后重试"
             "QQ 未缓存可读取的账号数据库" -> "本机没有可读取的 QQ 账号缓存"
             "空间不足，无法创建 QQ 只读副本" -> "空间不足，无法创建 QQ 只读副本"
-            "QQ 数据库副本无法解密，当前版本可能尚不兼容" -> "QQ 数据库副本无法解密，当前版本可能尚不兼容"
-            "QQ 数据库正在更新，请稍后重试；原有来源索引仍保留", "QQ 数据库在读取期间发生变化" -> "QQ 数据库正在更新，请稍后重试；原有索引仍保留"
+            DECRYPT_FAILED -> DECRYPT_FAILED
             "尚不支持此 QQ 数据库格式", "QQ 图片来源字段尚不兼容", "QQ 消息表尚不兼容" -> "当前 QQ 数据库格式尚不兼容"
             else -> when (stage) {
                 "root_service" -> "Root 文件服务连接失败，请重试"

@@ -18,15 +18,16 @@ fun Analytics.scanFinished(mode: String, automatic: Boolean, result: String, dur
 
 /**
  * 读取聊天记录（高级功能）结束：[mode] full / incremental，[result] ok / partial / failed / cancelled，
- * [pictures] 读到的图片来源条数，[stage] 失败在哪一步，耗时分复制数据库、解析、关联三段。
+ * [pictures] 读到的图片来源条数，[stage] 失败在哪一步，耗时分复制数据库、解析、关联三段；
+ * [forceStopped] 是 QQ 正写着数据库没读成后，用户确认强制停止 QQ 再读的那一次。
  */
 fun Analytics.chatRead(
     automatic: Boolean, mode: String, result: String, durationMs: Long, copyMs: Long, importMs: Long, linkMs: Long,
-    accounts: Int, failedAccounts: Int, pictures: Int, stage: String?, error: Throwable?,
+    accounts: Int, failedAccounts: Int, pictures: Int, stage: String?, error: Throwable?, forceStopped: Boolean,
 ) = event(
     "chat_read", "trigger" to trigger(automatic), "mode" to mode, "result" to result, "duration_ms" to durationMs,
     "copy_ms" to copyMs, "import_ms" to importMs, "link_ms" to linkMs, "accounts" to accounts, "failed" to failedAccounts,
-    "count" to pictures, "stage" to stage, "error" to errorName(error),
+    "count" to pictures, "stage" to stage, "error" to errorName(error), "force_stop" to forceStopped,
 )
 
 // ---- 原图压缩 ----

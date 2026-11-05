@@ -5,6 +5,7 @@ import android.os.ParcelFileDescriptor
 import android.os.Process
 import com.xjw.qalbum.fileops.BoundFileOps
 import com.xjw.qalbum.fileops.FileOpsClient
+import com.xjw.qalbum.fileops.QqReadAccess
 import com.xjw.qalbum.domain.model.AccessMode
 import com.topjohnwu.superuser.Shell
 import kotlinx.coroutines.CancellationException
@@ -15,8 +16,12 @@ import java.io.InputStream
 import java.util.UUID
 
 internal data class QqAccount(val key: String, val uid: String)
-internal data class QqCopiedDatabase(val file: File, val header: QqCipherHeader)
+/** [qqRunning]：复制时 QQ 在运行 */
+internal data class QqCopiedDatabase(val file: File, val header: QqCipherHeader, val qqRunning: Boolean = false)
 internal class QqDatabaseSnapshot(val directory: File, val databases: Map<String, QqCopiedDatabase>) : AutoCloseable {
+    /** 复制时 QQ 在运行（副本读出错时可能是 QQ 正写着，强制停止 QQ 再读多半就好） */
+    val qqRunning: Boolean get() = databases.values.any { it.qqRunning }
+
     override fun close() {
         directory.deleteRecursively()
     }
@@ -49,7 +54,7 @@ internal class QqSnapshotReader(context: Context, private val client: FileOpsCli
 
     /**
      * 复制这个账号的数据库成私有副本（见 [QqSnapshotCopier]：QQ 在运行时先暂停它的 checkpoint，
-     * 主库不变、WAL 可以继续增长；不一致就按库重试）。失败时删掉已复制的部分。
+     * 主库不变、WAL 可以继续增长；对不上抛 [QqDatabaseBusyException]，不重试）。失败时删掉已复制的部分。
      */
     suspend fun snapshot(bound: BoundFileOps, account: QqAccount, onProgress: (Long, Long) -> Unit): QqDatabaseSnapshot {
         val directory = File(root, UUID.randomUUID().toString()).apply { check(mkdir()) }
@@ -77,8 +82,8 @@ internal class QqSnapshotReader(context: Context, private val client: FileOpsCli
                 } catch (e: CancellationException) {
                     throw e
                 } catch (_: Exception) {
-                    // 加不上锁照样复制：按状态核对、不一致就重试
-                    -1
+                    // 加不上锁照样复制：按状态核对
+                    QqReadAccess.PIN_FAILED
                 }
 
                 override suspend fun unpin(handle: Int) {
@@ -92,4 +97,7 @@ internal class QqSnapshotReader(context: Context, private val client: FileOpsCli
             throw t
         }
     }
+
+    /** 强制停止 QQ（用户确认后）：true = 停下了或本来就没在运行 */
+    suspend fun forceStopQq(bound: BoundFileOps): Boolean = bound.callWithTimeout { it.forceStopQq(userId) } >= 0
 }

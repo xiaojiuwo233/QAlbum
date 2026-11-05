@@ -52,6 +52,7 @@ class FileOpsUserService : IFileOps.Stub() {
         error("QQ 图片来源需要 Root 权限")
     override fun pinQqDatabase(userId: Int, account: String, name: String): Int = error("QQ 图片来源需要 Root 权限")
     override fun unpinQqDatabase(handle: Int) = Unit
+    override fun forceStopQq(userId: Int): Int = error("QQ 图片来源需要 Root 权限")
 
     override fun pathStats(paths: Array<String>): LongArray = FileOpsImpl.pathStats(paths)
     override fun largestChildren(dir: String, limit: Int): Array<String> = FileOpsImpl.largestChildren(dir, limit)

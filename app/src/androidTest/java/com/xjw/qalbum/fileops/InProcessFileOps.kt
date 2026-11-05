@@ -18,6 +18,7 @@ internal class InProcessFileOps(private val renames: Boolean = true) : IFileOps.
     override fun openQqDatabaseRead(userId: Int, account: String, name: String): ParcelFileDescriptor? = null
     override fun pinQqDatabase(userId: Int, account: String, name: String): Int = 0
     override fun unpinQqDatabase(handle: Int) = Unit
+    override fun forceStopQq(userId: Int): Int = 0
     override fun statFiles(paths: Array<String>): Array<String> = FileOpsImpl.statFiles(paths)
     override fun moveFilesChecked(sources: Array<String>, targets: Array<String>, stamps: Array<String>): BooleanArray =
         if (renames) FileOpsImpl.moveFilesChecked(sources, targets, stamps) else BooleanArray(sources.size)

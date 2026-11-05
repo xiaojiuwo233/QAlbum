@@ -1,5 +1,7 @@
 package com.xjw.qalbum.qq
 
+import android.os.ParcelFileDescriptor
+import android.system.Os
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.xjw.qalbum.CHATPIC
 import com.xjw.qalbum.TestDatabase
@@ -11,6 +13,7 @@ import com.xjw.qalbum.data.db.dao.QqScopeIds
 import com.xjw.qalbum.data.db.dao.QqScopeSql
 import com.xjw.qalbum.data.db.entity.QqAutoArchiveEntity
 import com.xjw.qalbum.exec
+import com.xjw.qalbum.fileops.QqReadAccess
 import com.xjw.qalbum.imageRow
 import com.xjw.qalbum.int
 import com.xjw.qalbum.long
@@ -23,6 +26,7 @@ import net.zetetic.database.sqlcipher.SQLiteConnection
 import net.zetetic.database.sqlcipher.SQLiteDatabase
 import net.zetetic.database.sqlcipher.SQLiteDatabaseHook
 import org.junit.After
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -31,11 +35,16 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import java.io.InputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.UUID
+import kotlin.random.Random
 
 /**
  * 读取聊天来源的全过程：按 QQ 的加密参数造一份 nt_msg.db 只读副本，跑 [QqSourceImporter]，再核对
- * 读取时间（完整读取 / 删消息后重读 / 增量读取）、图片属性、按聊天的两条规则、按时间清理与自动归档。
+ * 读取时间（完整读取 / 删消息后重读 / 增量读取）、图片属性、按聊天的两条规则、按时间清理与自动归档；
+ * 以及从带 QQ 文件头、开着 WAL 的原文件复制副本（[QqSnapshotCopier]，Android 9 起走 sendfile）。
  */
 @RunWith(AndroidJUnit4::class)
 class QqSourceImporterTest {
@@ -128,6 +137,38 @@ class QqSourceImporterTest {
         assertEquals(1, db.int("SELECT COUNT(*) FROM qq_origins WHERE seen_at = $third"))
         assertEquals(3, db.int("SELECT COUNT(*) FROM qq_origins WHERE seen_at = $second"))
         assertTrue(sharedRaw !in ids(CleanupRule.DeletedChats, 0))
+    }
+
+    @Test
+    fun aCopyOfQqsLiveFilesKeepsWhatIsStillOnlyInTheWal() = runBlocking {
+        message("group_msg_table", 1, "u_alice", 1001, now, element(picture(1), picType = 1000))
+        // 主库十几 MB：复制要分好几段
+        messages { db ->
+            db.execSQL("CREATE TABLE padding (b BLOB)")
+            repeat(12) { db.execSQL("INSERT INTO padding VALUES (?)", arrayOf(Random(it).nextBytes(1024 * 1024))) }
+        }
+        // QQ 那边：带 1024 字节的 QQ_NT 文件头，开着 WAL，刚收到的消息还在 WAL 里没回写
+        val qq = File(directory.parentFile, "qq-${UUID.randomUUID()}").apply { mkdirs() }
+        messages { db ->
+            db.rawQuery("PRAGMA journal_mode = WAL", emptyArray()).use { it.moveToFirst() }
+            db.execSQL(
+                "INSERT INTO group_msg_table VALUES (2, 'u_bob', '', 0, 1001, 0, ?, '', 'bob', 2, ?, NULL)",
+                arrayOf(now / 1000, protobuf { out -> out.writeByteArray(40800, element(picture(2), picType = 1000)) }),
+            )
+            File(qq, "nt_msg.db").writeBytes(qqFileHeader() + File(directory, "nt_msg.db").readBytes())
+            File(directory, "nt_msg.db-wal").copyTo(File(qq, "nt_msg.db-wal"))
+        }
+
+        val copy = File(directory.parentFile, UUID.randomUUID().toString()).apply { mkdirs() }
+        val copies = QqSnapshotCopier(qqFiles(qq), copy, { _, _ -> }).copyAll(Long.MAX_VALUE)
+
+        // 主库去掉文件头后原样复制，WAL 整个复制
+        val main = File(qq, "nt_msg.db").readBytes()
+        assertArrayEquals(main.copyOfRange(QqCipherHeader.SIZE, main.size), copies.getValue("nt_msg.db").file.readBytes())
+        assertArrayEquals(File(qq, "nt_msg.db-wal").readBytes(), File(copy, "nt_msg.db-wal").readBytes())
+        assertEquals(header, copies.getValue("nt_msg.db").header)
+        val result = QqDatabaseSnapshot(copy, copies).use { QqSourceImporter(db).import(it, account, 1, root, now) { _, _ -> } }
+        assertEquals(2, result.pictures)
     }
 
     @Test
@@ -287,6 +328,33 @@ class QqSourceImporterTest {
             File(directory, "nt_msg.db").path, key, null,
             SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.CREATE_IF_NECESSARY, null, hook,
         ).use(block)
+    }
+
+    /** QQ 数据库前 1024 字节：「QQ_NT DB」+ 长度 + protobuf（2 = random，4 = HMAC 算法） */
+    private fun qqFileHeader(): ByteArray {
+        val payload = protobuf { out ->
+            out.writeString(2, header.random)
+            out.writeString(4, header.hmac)
+        }
+        val bytes = ByteArray(QqCipherHeader.SIZE)
+        "QQ_NT DB".toByteArray().copyInto(bytes)
+        ByteBuffer.wrap(bytes, 8, 4).order(ByteOrder.LITTLE_ENDIAN).putInt(payload.size)
+        payload.copyInto(bytes, 12)
+        return bytes
+    }
+
+    /** 把 [dir] 里的文件当成 QQ 的数据库（QQ 没在运行），像 Root 侧那样传回只读的文件描述符 */
+    private fun qqFiles(dir: File) = object : QqSnapshotCopier.Source {
+        override suspend fun states() = dir.listFiles().orEmpty().associate { file ->
+            val stat = Os.stat(file.path)
+            file.name to QqSnapshotCopier.FileState(stat.st_size, "${stat.st_size}|${stat.st_ino}|${stat.st_mtime}")
+        }
+
+        override suspend fun open(name: String): InputStream =
+            ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.open(File(dir, name), ParcelFileDescriptor.MODE_READ_ONLY))
+
+        override suspend fun pin(name: String) = QqReadAccess.PIN_NOT_NEEDED
+        override suspend fun unpin(handle: Int) = Unit
     }
 
     /** 读取一次；[link] 时像读取结束那样把来源与已入库的图片关联起来 */
