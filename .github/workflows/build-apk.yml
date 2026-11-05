@@ -1,6 +1,8 @@
 name: Build APK
 
-# 每次推送提交 / 发起 PR 时自动测试并构建 Release APK
+# 每次推送提交 / 发起 PR 时自动测试并构建 Release APK；
+# main 上以「release:」开头的提交（或手动触发时勾选「发布」）构建通过后，自动打 tag 并发布 GitHub Release
+# paths-ignore 改动时同步改 .github/scripts/release-notes.sh：更新说明会跳过同样只改文档的提交
 on:
   push:
     branches:
@@ -13,10 +15,16 @@ on:
       - "**/*.md"
       - "docs/**"
   workflow_dispatch: # 支持在 Actions 页面手动触发
+    inputs:
+      release:
+        description: 构建通过后发布当前版本（仅 main）
+        type: boolean
+        default: false
 
-# 同一分支出现新提交时，自动取消上一次仍在进行的构建，节省 CI 额度
+# 同一分支出现新提交时，自动取消上一次仍在进行的构建，节省 CI 额度；
+# 发布的那次单独成组，不会被之后的推送取消
 concurrency:
-  group: build-apk-${{ github.ref }}
+  group: build-apk-${{ github.ref }}-${{ (startsWith(github.event.head_commit.message, 'release:') || inputs.release) && github.sha || 'latest' }}
   cancel-in-progress: true
 
 permissions:
@@ -31,6 +39,11 @@ jobs:
   build:
     name: 构建 Release APK
     runs-on: ubuntu-latest
+    outputs:
+      file: ${{ steps.apk.outputs.file }}
+      version: ${{ steps.apk.outputs.version }}
+      code: ${{ steps.apk.outputs.code }}
+      signed: ${{ steps.apk.outputs.signed }}
 
     steps:
       # 1. 拉取源码
@@ -115,12 +128,19 @@ jobs:
         run: |
           out=app/build/outputs/apk/release
           meta="$out/output-metadata.json"
-          version_name=$(jq -er '.elements[0].versionName' "$meta" | cut -d. -f1-3 | cut -d- -f1)
+          raw_name=$(jq -er '.elements[0].versionName' "$meta")
+          version_name=$(cut -d. -f1-3 <<<"$raw_name" | cut -d- -f1)
           version_code=$(jq -er '.elements[0].versionCode' "$meta")
           file="QAlbum-$version_name-$version_code.apk"
           cp "$out/$(jq -er '.elements[0].outputFile' "$meta")" "$RUNNER_TEMP/$file"
           ls -lh "$RUNNER_TEMP/$file"
-          echo "file=$file" >> "$GITHUB_OUTPUT"
+          {
+            echo "file=$file"
+            echo "version=$version_name"
+            echo "code=$version_code"
+            # 回退 debug 签名时 versionName 带 -debugsigned
+            [[ "$raw_name" == *-debugsigned* ]] && echo "signed=false" || echo "signed=true"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v7
@@ -131,3 +151,63 @@ jobs:
           overwrite: true
           if-no-files-found: error
           retention-days: 30
+
+  # main 上的 release 提交（或手动触发勾选「发布」）：测试与构建都通过后，
+  # 用上面构建出的 APK 打 tag「版本代码-版本号」并发布 Release（App 内检查更新读的就是它）
+  release:
+    name: 发布 Release
+    needs: build
+    if: github.ref == 'refs/heads/main' && (startsWith(github.event.head_commit.message, 'release:') || inputs.release)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 创建 tag 与 Release
+
+    steps:
+      # 要完整历史和 tag：更新说明从上一个版本的 tag 算起
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Download APK
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.build.outputs.file }}
+          path: ${{ runner.temp }}/release
+
+      # 只发正式签名的包；同一版本号只发一次（忘了改 baseVersionName 时直接失败）
+      - name: Check version
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          SIGNED: ${{ needs.build.outputs.signed }}
+        run: |
+          if [ "$SIGNED" != true ]; then
+            echo "::error::APK 回退成了 debug 签名（缺 KEYSTORE_BASE64 等 Secret），不发布"
+            exit 1
+          fi
+          released=$(git tag -l "*-$VERSION")
+          if [ -n "$released" ]; then
+            echo "::error::${VERSION} 已经发布过（tag ${released}），先在 app/build.gradle.kts 里提升 baseVersionName"
+            exit 1
+          fi
+
+      - name: Release notes
+        run: |
+          bash .github/scripts/release-notes.sh "$GITHUB_SHA" > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md"
+
+      # tag 不存在时由 gh 在发布时建在本次提交上；带附件时 gh 先建草稿、传完 APK 再发布，
+      # 所以检查更新不会读到还没有 APK 的版本
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          FILE: ${{ needs.build.outputs.file }}
+          VERSION: ${{ needs.build.outputs.version }}
+          CODE: ${{ needs.build.outputs.code }}
+        run: |
+          gh release create "$CODE-$VERSION" "$RUNNER_TEMP/release/$FILE" \
+            --target "$GITHUB_SHA" \
+            --title "$VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --latest
