@@ -20,10 +20,14 @@
     <!-- Shizuku 通信权限 -->
     <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
 
-    <!-- 查询其他 App 是否已安装（Android 11+）。仅需 Shizuku：QQ/TIM 路径只作为
-         文件系统字符串使用，不依赖包可见性，无需声明 -->
+    <!-- 能看到的其他 App（Android 11+）：Shizuku 是否已安装；分享日志时能接收的 App（把读权限直接授给它们，
+         见 LogScreen 的 shareLogChooser）。QQ/TIM 路径只作为文件系统字符串使用，不依赖包可见性 -->
     <queries>
         <package android:name="moe.shizuku.privileged.api" />
+        <intent>
+            <action android:name="android.intent.action.SEND" />
+            <data android:mimeType="text/plain" />
+        </intent>
     </queries>
 
     <application

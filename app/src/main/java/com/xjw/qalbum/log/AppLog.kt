@@ -1,12 +1,16 @@
 package com.xjw.qalbum.log
 
+import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Process
 import android.os.SystemClock
+import android.provider.MediaStore
+import android.util.Log
 import androidx.core.content.FileProvider
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -14,6 +18,7 @@ import java.io.BufferedWriter
 import java.io.File
 import java.io.FileWriter
 import java.io.RandomAccessFile
+import java.io.Writer
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -47,6 +52,10 @@ object AppLog {
     private const val ROTATE_RETRY_BACKOFF_MS = 30_000L      // 轮转失败（磁盘满）后的重试退避
 
     private const val CURRENT_NAME = "app.log"
+    private const val EXPORT_PREFIX = "qalbum-log-"
+    private const val EXPORT_TTL_MS = 24L * 60 * 60 * 1000
+    /** 「下载」里放导出日志的子目录 */
+    const val DOWNLOADS_FOLDER = "QAlbum"
     private val TIME_FORMAT = ThreadLocal.withInitial {
         SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US)
     }
@@ -192,17 +201,53 @@ object AppLog {
         val redact = !detailed
         return runCatching {
             val shareDir = File(appContext.cacheDir, "share").apply { mkdirs() }
-            val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
-            val dest = File(shareDir, "qalbum-log-$stamp.txt")
-            dest.bufferedWriter().use { out ->
-                out.write(exportHeader())
-                logFilesOldestFirst().forEach { f ->
-                    runCatching { f.forEachLine { out.appendLine(if (redact) LogRedactor.redact(it) else it) } }
-                }
-            }
+            // 以前导出的（分享出去一天以上的）删掉，不在缓存里越积越多
+            val cutoff = System.currentTimeMillis() - EXPORT_TTL_MS
+            shareDir.listFiles { f -> f.name.startsWith(EXPORT_PREFIX) && f.lastModified() < cutoff }?.forEach { it.delete() }
+            val dest = File.createTempFile("$EXPORT_PREFIX${exportStamp()}-", ".txt", shareDir)
+            dest.bufferedWriter().use { writeExport(it, redact) }
             FileProvider.getUriForFile(appContext, "${appContext.packageName}.fileprovider", dest)
+        }.onFailure { log(Log.WARN, "AppLog", "日志导出失败\n${it.stackTraceToString()}") }.getOrNull()
+    }
+
+    /**
+     * 导出到公共的「下载/QAlbum」（Android 10 起，不需要存储权限），返回文件名，失败返回 null。有的 App 收到分享时
+     * 转给自己别的界面再读，那时读不到；存在下载里再从那边发最稳。没开详细日志时同样脱敏。在 IO 线程调用。
+     */
+    fun exportToDownloads(): String? {
+        if (!initialized || Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
+        flushBlocking()
+        val redact = !detailed
+        val resolver = appContext.contentResolver
+        val name = "$EXPORT_PREFIX${exportStamp()}.txt"
+        var uri: Uri? = null
+        return runCatching {
+            val values = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, name)
+                put(MediaStore.Downloads.MIME_TYPE, "text/plain")
+                put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/$DOWNLOADS_FOLDER")
+                put(MediaStore.Downloads.IS_PENDING, 1)
+            }
+            val target = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: error("无法在下载目录建文件")
+            uri = target
+            (resolver.openOutputStream(target) ?: error("无法写入下载目录")).bufferedWriter().use { writeExport(it, redact) }
+            resolver.update(target, ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }, null, null)
+            name
+        }.onFailure {
+            uri?.let { runCatching { resolver.delete(it, null, null) } }
+            log(Log.WARN, "AppLog", "日志保存到下载失败\n${it.stackTraceToString()}")
         }.getOrNull()
     }
+
+    /** 导出的内容：设备信息头 + 全部保留的日志（历史在前）；[redact] 时逐行脱敏 */
+    private fun writeExport(out: Writer, redact: Boolean) {
+        out.write(exportHeader())
+        logFilesOldestFirst().forEach { f ->
+            runCatching { f.forEachLine { out.appendLine(if (redact) LogRedactor.redact(it) else it) } }
+        }
+    }
+
+    private fun exportStamp(): String = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
 
     /** 清空全部日志（磁盘 + 内存）。 */
     fun clear() {

@@ -179,7 +179,7 @@ class QqSourceStatsTest {
     /** 与仓库的分段重建相同的三步，第二步分成两段 */
     private fun rebuildInTwoSteps() {
         val sql = db.openHelper.writableDatabase
-        QqSourceStatsSql.rebuildNames.forEach(sql::execSQL)
+        QqSourceStatsSql.rebuildNames(sql)
         QqSourceStatsSql.contextsInRange(sql, 0, 2)
         QqSourceStatsSql.contextsInRange(sql, 2, Long.MAX_VALUE)
         QqSourceStatsSql.recount.forEach(sql::execSQL)

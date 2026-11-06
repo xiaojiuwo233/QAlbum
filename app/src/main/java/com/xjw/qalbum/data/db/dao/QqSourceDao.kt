@@ -76,6 +76,9 @@ data class QqSourceSummary(
 data class QqFacetKindCount(val kind: Int, val chatType: Int, val count: Int)
 data class QqSeenSummary(val total: Int, val stale: Int)
 
+/** 补关联时每段的行数（见 [QqSourceDao.linkAfter]） */
+private const val LINK_ROWS = 50_000L
+
 /** 读取前来源、路径、关联三张表的最大 rowid：之后写入的行 rowid 都比它大（见 QqSourceRepository） */
 data class QqReadBaseline(val origins: Long, val families: Long, val paths: Long, val links: Long) {
     companion object {
@@ -350,37 +353,46 @@ interface QqSourceDao {
         COALESCE((SELECT MAX(rowid) FROM image_qq_origins), 0) AS links""")
     suspend fun readBaseline(): QqReadBaseline
 
-    /** [afterRowid] 之后新增的消息：按家族键关联已入库的图片（原图、预览图、缩略图、带后缀的别名、Temp 转码图） */
+    /** 行号在 (afterRowid, upToRowid] 的消息：按家族键关联已入库的图片（原图、预览图、缩略图、带后缀的别名、Temp 转码图） */
     @Query("""INSERT OR IGNORE INTO image_qq_origins(image_id, origin_id)
         SELECT i.id, o.id FROM qq_origins o CROSS JOIN images i ON i.variant_group = o.family
-        WHERE o.rowid > :afterRowid AND o.family IS NOT NULL AND i.status NOT IN ('deleted', 'quarantined')""")
-    suspend fun linkOriginsAfter(afterRowid: Long)
+        WHERE o.rowid > :afterRowid AND o.rowid <= :upToRowid AND o.family IS NOT NULL AND i.status NOT IN ('deleted', 'quarantined')""")
+    suspend fun linkOrigins(afterRowid: Long, upToRowid: Long)
 
     /** 同上，消息里其他 MD5 的家族键 */
     @Query("""INSERT OR IGNORE INTO image_qq_origins(image_id, origin_id)
         SELECT i.id, f.origin_id FROM qq_origin_families f CROSS JOIN images i ON i.variant_group = f.family
-        WHERE f.rowid > :afterRowid AND i.status NOT IN ('deleted', 'quarantined')""")
-    suspend fun linkFamiliesAfter(afterRowid: Long)
+        WHERE f.rowid > :afterRowid AND f.rowid <= :upToRowid AND i.status NOT IN ('deleted', 'quarantined')""")
+    suspend fun linkFamilies(afterRowid: Long, upToRowid: Long)
 
     /** 同上，消息另记的推不出家族键的路径 */
     @Query("""INSERT OR IGNORE INTO image_qq_origins(image_id, origin_id)
         SELECT i.id, p.origin_id FROM qq_origin_paths p CROSS JOIN images i ON i.path = p.path
-        WHERE p.rowid > :afterRowid AND i.status NOT IN ('deleted', 'quarantined')""")
-    suspend fun linkPathsAfter(afterRowid: Long)
+        WHERE p.rowid > :afterRowid AND p.rowid <= :upToRowid AND i.status NOT IN ('deleted', 'quarantined')""")
+    suspend fun linkPaths(afterRowid: Long, upToRowid: Long)
 
     /**
-     * 读取来源后补关联：只看 [baseline] 之后新增的消息、家族与路径，不必把全部图片与消息对一遍。
-     * 读取期间入库的图由 images 上的触发器关联。
+     * 读取来源后补关联：只看 [baseline] 之后新增的消息、家族与路径，不必把全部图片与消息对一遍。按行号分段，每段一条语句
+     * （自成一个短事务）：清除索引后第一次读取要关联上千万条，一个事务会长时间占住写锁、写前日志涨到几个 GB。
+     * 中途退出也不要紧，读取位置还没清掉，下次从同一位置再关联一遍（已有的跳过）。读取期间入库的图由 images 上的触发器关联。
      */
-    @Transaction
     suspend fun linkAfter(baseline: QqReadBaseline) {
-        linkOriginsAfter(baseline.origins)
-        linkFamiliesAfter(baseline.families)
-        linkPathsAfter(baseline.paths)
+        val last = readBaseline()
+        linkInRanges(baseline.origins, last.origins, ::linkOrigins)
+        linkInRanges(baseline.families, last.families, ::linkFamilies)
+        linkInRanges(baseline.paths, last.paths, ::linkPaths)
+    }
+
+    private suspend fun linkInRanges(after: Long, last: Long, link: suspend (Long, Long) -> Unit) {
+        var from = after
+        while (from < last) {
+            val upTo = minOf(from + LINK_ROWS, last)
+            link(from, upTo)
+            from = upTo
+        }
     }
 
     /** 全部重新对一遍（升级后图片家族键变化时） */
-    @Transaction
     suspend fun reconcileLinks() = linkAfter(QqReadBaseline.START)
 
     /**
@@ -423,9 +435,6 @@ interface QqSourceDao {
         JOIN qq_source_accounts a ON a.account_key = o.account_key WHERE link.image_id = :imageId
         GROUP BY o.conversation_key, o.sender_key ORDER BY messageTime DESC""")
     fun observeImageOrigins(imageId: Long): Flow<List<QqOriginDetails>>
-
-    @Query("DELETE FROM qq_source_accounts")
-    suspend fun clear()
 
     /** 账号的图片来源总数（增量读取后也是全部，不只是这次新读到的） */
     @Query("SELECT COUNT(*) FROM qq_origins WHERE account_key = :accountKey")

@@ -4,7 +4,6 @@ import android.content.Context
 import android.os.ParcelFileDescriptor
 import android.database.sqlite.SQLiteDatabaseCorruptException
 import android.database.sqlite.SQLiteException
-import androidx.room.withTransaction
 import com.xjw.qalbum.analytics.Analytics
 import com.xjw.qalbum.analytics.chatIndexCleared
 import com.xjw.qalbum.analytics.chatRead
@@ -309,10 +308,10 @@ class QqSourceRepository(
                     dao.setCompleteReadAt(readStart)
                     settings.setQqParseVersion(QqPictureCodec.PARSE_VERSION)
                 }
-                dao.seenSummary(readStart).let { seen ->
-                    Timber.i("QQ source sweep: origins=%d unseen=%d complete=%s fullPass=%s skipped=%d unreadable=%d incompleteTables=%d",
-                        seen.total, seen.stale, complete, fullPass, skipped, unreadable, incompleteTables)
-                }
+                // 没再见到的条数只在完整读取后有意义（就是 QQ 里删掉的），要把全部来源扫一遍，增量读取时不算
+                val seen = if (complete && fullPass) dao.seenSummary(readStart) else null
+                Timber.i("QQ source sweep: origins=%s unseen=%s complete=%s fullPass=%s skipped=%d unreadable=%d incompleteTables=%d",
+                    seen?.total ?: "-", seen?.stale ?: "-", complete, fullPass, skipped, unreadable, incompleteTables)
                 Timber.i("QQ source read: accounts=%d/%d pictures=%d copy=%dms import=%dms links=%dms previews=%dms stats=%dms total=%dms",
                     successful, accounts.size, pictures, copyMs, importMs, linksMs, previewsMs, statsMs, System.currentTimeMillis() - readStart)
                 val summary = if (successful == 0) failures.joinToString("；").ifBlank { "没有可读取的图片来源" } else
@@ -469,23 +468,32 @@ class QqSourceRepository(
         return QqScopeIds(conversation, sender)
     }
 
+    /** 清除来源索引（来源多时要几十分钟，可以停止：再清除一次接着删） */
     fun clear() {
-        if (!_progress.compareAndSet(null, QqSourceProgress("清除来源索引", cancellable = false))) return
+        if (!_progress.compareAndSet(null, QqSourceProgress("清除来源索引"))) return
         job = appScope.launch(Dispatchers.IO) {
+            val started = System.currentTimeMillis()
             try {
-                settings.setQqSourcesComplete(false)
-                // 清空后行号从头分配，上次没走完的读取位置不再适用
-                settings.setQqReadBaseline(null)
-                val sql = db.openHelper.writableDatabase
-                db.withTransaction {
-                    dao.clear()
-                    QqSourceStatsSql.clearDerived.forEach(sql::execSQL)
-                }
+                statsCache.holding { mirrored("清除来源索引", cancellable = true) {
+                    settings.setQqSourcesComplete(false)
+                    // 清空后行号从头分配，上次没走完的读取位置不再适用
+                    settings.setQqReadBaseline(null)
+                    Timber.i("QQ source index clear started")
+                    QqSourceIndexClearer(db).clear { label, done, total ->
+                        _progress.value = QqSourceProgress(label, done, total)
+                    }
+                } }
+                Timber.i("QQ source index cleared in %d ms", System.currentTimeMillis() - started)
                 _report.value = null
                 _message.value = "已清除来源索引"
                 analytics?.chatIndexCleared()
-            } catch (_: Exception) {
-                _message.value = "来源索引清除失败"
+            } catch (e: CancellationException) {
+                Timber.i("QQ source index clear stopped after %d ms", System.currentTimeMillis() - started)
+                _message.value = "已停止，再清除一次会接着清"
+                throw e
+            } catch (e: Exception) {
+                logFailure(e, "index_clear")
+                _message.value = "来源索引清除未完成，可重试继续清除"
             } finally { _progress.value = null }
         }
     }

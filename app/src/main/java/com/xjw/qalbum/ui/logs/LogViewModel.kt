@@ -73,6 +73,14 @@ class LogViewModel(private val settings: SettingsRepository, private val appScop
         }
     }
 
+    /** 存到「下载/QAlbum」，回调拿到文件名（null = 失败） */
+    fun saveToDownloads(onResult: (String?) -> Unit) {
+        viewModelScope.launch {
+            val name = withContext(Dispatchers.IO) { AppLog.exportToDownloads() }
+            onResult(name)
+        }
+    }
+
     fun clear() = AppLog.clear()
 
     private companion object {

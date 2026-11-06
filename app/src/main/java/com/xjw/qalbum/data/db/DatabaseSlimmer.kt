@@ -18,9 +18,8 @@ import java.io.File
  * 精简分两步：
  * 1. v27 以前每条聊天来源存了 4 条完整路径（见 [QqFamilyMigration]）：能由家族键推出的删掉，同一张图其他 MD5 的家族
  *    记进 qq_origin_families，推不出的留下；
- * 2. 把空出来的页还给系统。Android 的 SQLite 默认自动回收（auto_vacuum = FULL），一次删掉上 GB 的数据会在提交时
- *    搬动几十万页、临时占用一两 GB；VACUUM 的临时库又在内存里。所以先切到增量回收，删完再每次回收 16 MB
- *    （每步一个事务，写前日志随即检查点，临时占用小），做完切回自动回收。中途退出也不要紧，剩下的空页下次接着回收。
+ * 2. 把空出来的页还给系统（见 [BulkDeletes]：VACUUM 的临时库在内存里，自动回收又要在提交时一次搬完）。
+ *    中途退出也不要紧，剩下的空页下次接着回收。
  */
 class DatabaseSlimmer(private val context: Context, private val db: AppDatabase, private val name: String = AppDatabase.DB_NAME) {
 
@@ -67,19 +66,9 @@ class DatabaseSlimmer(private val context: Context, private val db: AppDatabase,
     suspend fun slim(progress: (String, Long, Long) -> Unit): Long = withContext(Dispatchers.IO) {
         val file = context.getDatabasePath(name)
         val before = file.length() + File(file.path + "-wal").length()
-        val sql = db.openHelper.writableDatabase
-        val mode = db.withTransaction { sql.long("PRAGMA auto_vacuum") }
-        // 系统的 SQLite 默认安全删除（删掉的页先写零），删上 GB 的数据就要多写上 GB；这个连接上先关掉
-        val secure = db.withTransaction { sql.long("PRAGMA secure_delete") }
-        db.withTransaction { sql.long("PRAGMA secure_delete = 0") }
-        // 自动回收模式下删掉大表要在提交时一次搬完；切到增量回收（两种模式之间可以直接切换）
-        if (mode == FULL) db.withTransaction { sql.long("PRAGMA auto_vacuum = $INCREMENTAL") }
-        try {
+        BulkDeletes.run(db) { sql ->
             if (sql.long("SELECT COALESCE(MAX(rowid), 0) FROM qq_origin_paths") > SLIM_THRESHOLD) slimPaths(sql, progress)
-            reclaim(sql, progress)
-        } finally {
-            if (mode == FULL) db.withTransaction { sql.long("PRAGMA auto_vacuum = $FULL") }
-            db.withTransaction { sql.long("PRAGMA secure_delete = $secure") }
+            BulkDeletes.reclaim(db, sql, progress)
         }
         val after = file.length() + File(file.path + "-wal").length()
         Timber.i("Database slimmed: %d -> %d bytes", before, after)
@@ -133,31 +122,13 @@ class DatabaseSlimmer(private val context: Context, private val db: AppDatabase,
         Timber.i("Legacy source paths slimmed: %d rows, %d kept", total, kept.size)
     }
 
-    /** 每次回收 [STEP_PAGES] 页，直到没有空页 */
-    private suspend fun reclaim(sql: SupportSQLiteDatabase, progress: (String, Long, Long) -> Unit) {
-        val pageSize = sql.long("PRAGMA page_size")
-        val total = sql.long("PRAGMA freelist_count")
-        var free = total
-        while (free > 0) {
-            currentCoroutineContext().ensureActive()
-            progress("释放空间", (total - free) * pageSize, total * pageSize)
-            db.withTransaction { sql.long("PRAGMA incremental_vacuum($STEP_PAGES)") }
-            val left = sql.long("PRAGMA freelist_count")
-            if (left >= free) break
-            free = left
-        }
-    }
-
     private fun SupportSQLiteDatabase.long(statement: String): Long =
         query(statement).use { c -> if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else 0L }
 
     private class PathRow(val rowid: Long, val path: String, val originId: String, val family: Long?)
 
     private companion object {
-        const val FULL = 1L
-        const val INCREMENTAL = 2L
         const val PAGE = 5_000
-        const val STEP_PAGES = 4_096
 
         /** 旧路径少于这么多行（升级后新读到的都不存路径，只有少数推不出家族键的）不必精简 */
         const val SLIM_THRESHOLD = 1_000L

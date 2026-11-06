@@ -47,10 +47,9 @@ class PictureVariantIndexer(
                 val keyed = if (indexed < KEYS_VERSION) writeKeys(dao, sql, aliasOnly = indexed >= 1) else null
                 val keysDone = System.currentTimeMillis()
                 recompute(dao, sql)
-                db.withTransaction {
-                    db.qqSourceDao().markDirty()
-                    db.qqSourceDao().reconcileLinks()
-                }
+                // 先标脏（关联触发器停下），再分段补关联：大库上一个事务要占住写锁好几分钟
+                db.withTransaction { db.qqSourceDao().markDirty() }
+                db.qqSourceDao().reconcileLinks()
                 val done = System.currentTimeMillis()
                 Timber.i(
                     "Picture families indexed (v%d) in %d ms: keys %s, recompute %d ms",

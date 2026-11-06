@@ -4,7 +4,9 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.SharedTransitionScope
@@ -35,6 +37,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Article
 import androidx.compose.material.icons.outlined.DeleteSweep
+import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.IosShare
 import androidx.compose.material.icons.outlined.KeyboardDoubleArrowDown
 import androidx.compose.material.icons.outlined.MoreVert
@@ -113,7 +116,8 @@ fun LogScreen(
     var menuOpen by remember { mutableStateOf(false) }
     var confirmClear by remember { mutableStateOf(false) }
     var confirmDetailed by remember { mutableStateOf(false) }
-    var confirmExport by remember { mutableStateOf(false) }
+    // 详细日志开着时导出、保存先确认：要做的那一种
+    var confirmExport by remember { mutableStateOf<LogExport?>(null) }
     val listState = rememberLazyListState()
     // 列表从底部（最新）开始，「回到顶部才展开」等于永远展不开：往下拉就展开、往上推就收起
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
@@ -123,11 +127,19 @@ fun LogScreen(
             snackbar.showSnackbar(text)
         }
     }
-    fun export() {
-        viewModel.export { uri ->
-            if (uri == null) notify("导出失败")
-            else runCatching { context.startActivity(shareLogChooser(uri)) }.onFailure { notify("没有能接收日志的应用") }
+    fun export(target: LogExport) {
+        when (target) {
+            LogExport.SHARE -> viewModel.export { uri ->
+                if (uri == null) notify("导出失败")
+                else runCatching { context.startActivity(shareLogChooser(context, uri)) }.onFailure { notify("没有能接收日志的应用") }
+            }
+            LogExport.DOWNLOADS -> viewModel.saveToDownloads { name ->
+                notify(if (name == null) "保存失败" else "已保存到 下载/${AppLog.DOWNLOADS_FOLDER}/$name")
+            }
         }
+    }
+    fun requestExport(target: LogExport) {
+        if (detailed) confirmExport = target else export(target)
     }
 
     // 跟随最新：打开时在底部；往上翻停下后不再跟，翻回底部或点「最新」再跟
@@ -163,7 +175,7 @@ fun LogScreen(
                     navigationIcon = { BackButton(onBack) },
                     actions = {
                         IconButton(
-                            onClick = { if (detailed) confirmExport = true else export() },
+                            onClick = { requestExport(LogExport.SHARE) },
                             shapes = IconButtonDefaults.shapes(),
                         ) { Icon(Icons.Outlined.IosShare, contentDescription = "导出") }
                         Box {
@@ -171,6 +183,17 @@ fun LogScreen(
                                 Icon(Icons.Outlined.MoreVert, contentDescription = "更多")
                             }
                             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                                // 有的 App 收到分享后读不到文件，存到下载里再从那边发
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                    DropdownMenuItem(
+                                        text = { Text("保存到下载") },
+                                        leadingIcon = { Icon(Icons.Outlined.Download, contentDescription = null) },
+                                        onClick = {
+                                            menuOpen = false
+                                            requestExport(LogExport.DOWNLOADS)
+                                        },
+                                    )
+                                }
                                 DropdownMenuItem(
                                     text = { Text("详细日志") },
                                     leadingIcon = { Icon(Icons.Outlined.Visibility, contentDescription = null) },
@@ -261,16 +284,16 @@ fun LogScreen(
             },
         )
     }
-    if (confirmExport) {
+    confirmExport?.let { target ->
         ConfirmDialog(
             icon = Icons.Outlined.IosShare,
             title = "导出详细日志？",
             text = "详细日志导出的内容包含 uid、QQ 数据库路径等信息，请不要在公共场合发送！",
             confirmLabel = "导出",
-            onDismiss = { confirmExport = false },
+            onDismiss = { confirmExport = null },
             onConfirm = {
-                confirmExport = false
-                export()
+                confirmExport = null
+                export(target)
             },
         )
     }
@@ -395,12 +418,24 @@ private fun copyToClipboard(context: Context, text: String) {
     clipboard.setPrimaryClip(ClipData.newPlainText("QAlbum 日志", text))
 }
 
-private fun shareLogChooser(uri: Uri): Intent =
-    Intent.createChooser(
-        Intent(Intent.ACTION_SEND).apply {
-            type = "text/plain"
-            putExtra(Intent.EXTRA_STREAM, uri)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        },
-        "导出日志",
-    )
+/** 导出日志的去处：分享给别的 App、存到「下载」 */
+private enum class LogExport { SHARE, DOWNLOADS }
+
+/**
+ * 分享导出的日志。随启动给的临时读权限跟着接收的那个界面走：有的 App（QQ、微信等）先转给自己别的界面或进程再读，
+ * 那时权限已经没了，显示找不到文件。所以再直接授权给每个能接收的 App（不随界面失效，日志文件一天后删掉）。
+ */
+internal fun shareLogChooser(context: Context, uri: Uri): Intent {
+    val send = Intent(Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(Intent.EXTRA_STREAM, uri)
+        clipData = ClipData.newRawUri("QAlbum 日志", uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    runCatching {
+        context.packageManager.queryIntentActivities(send, PackageManager.MATCH_DEFAULT_ONLY).forEach {
+            context.grantUriPermission(it.activityInfo.packageName, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+    }
+    return Intent.createChooser(send, "导出日志")
+}
